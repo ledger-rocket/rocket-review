@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import unquote, urldefrag
 
 from rocket_review.prompts import get_prompt
 from rocket_review.review import DEFAULT_MODEL, HAS_CODEX, review_with_api, review_with_codex
@@ -14,10 +15,14 @@ def read_files(paths: list[str]) -> str:
     parts = []
     for p in paths:
         path = Path(p)
-        if not path.exists():
-            print(f"Error: file not found: {p}", file=sys.stderr)
+        if not path.is_file():
+            print(f"Error: not a file: {p}", file=sys.stderr)
             sys.exit(1)
-        text = path.read_text()
+        try:
+            text = path.read_text()
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"Error: could not read {p}: {e}", file=sys.stderr)
+            sys.exit(1)
         parts.append(f"=== {path} ===\n{text}")
     return "\n\n".join(parts)
 
@@ -36,24 +41,31 @@ def read_docs(paths: list[str]) -> str:
 
 def read_llms(llms_path: Path) -> str:
     """Read llms.txt and follow all relative markdown links to build full project context."""
-    if not llms_path.exists():
+    if not llms_path.is_file():
         print(f"Error: {llms_path} not found.", file=sys.stderr)
         sys.exit(1)
 
-    base_dir = llms_path.parent
+    base_dir = llms_path.parent.resolve()
     llms_text = llms_path.read_text()
     parts = [f"--- llms.txt ---\n{llms_text}"]
 
     links = re.findall(r"\[[^\]]*\]\(([^)]+)\)", llms_text)
-    for link in links:
-        if link.startswith(("http://", "https://", "#")):
+    for raw_link in links:
+        if raw_link.startswith(("http://", "https://", "#")):
             continue
-        doc_path = base_dir / link
+        link, _ = urldefrag(unquote(raw_link))
+        if not link:
+            continue
+        doc_path = (base_dir / link).resolve()
+        # Prevent path traversal outside the llms.txt directory
+        if not str(doc_path).startswith(str(base_dir)):
+            print(f"Warning: skipping link outside project: {raw_link}", file=sys.stderr)
+            continue
         if doc_path.is_file():
             try:
                 text = doc_path.read_text()
                 parts.append(f"--- {link} ---\n{text}")
-            except Exception as e:
+            except (OSError, UnicodeDecodeError) as e:
                 print(f"Warning: could not read {link}: {e}", file=sys.stderr)
 
     return "\n\n".join(parts)
@@ -66,9 +78,13 @@ def get_diff(staged: bool) -> str:
     else:
         cmd.append("HEAD")
     result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Error: {' '.join(cmd)} failed: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
     diff = result.stdout.strip()
     if not diff:
-        print("Error: no diff output. Working tree is clean.", file=sys.stderr)
+        label = "staged changes" if staged else "uncommitted changes"
+        print(f"Error: no {label} found.", file=sys.stderr)
         sys.exit(1)
     return diff
 
@@ -177,9 +193,21 @@ def main():
         )
         sys.exit(1)
 
+    # Validate mutually exclusive sources
+    sources = sum([
+        bool(args.pr),
+        bool(args.commit),
+        args.diff or args.staged,
+        bool(args.files),
+        not sys.stdin.isatty(),
+    ])
+    if sources > 1:
+        print("Error: specify only one review source (files, --diff, --staged, --commit, --pr, or stdin).", file=sys.stderr)
+        sys.exit(1)
+
     # Gather content to review
     content: str | None = None
-    pr_description: str | None = None
+    git_cmd: str | None = None
     if args.pr:
         pr_description, diff = get_pr_content(args.pr)
         content = f"=== PULL REQUEST ===\n{pr_description}\n=== END PULL REQUEST ===\n\n{diff}"
@@ -192,7 +220,8 @@ def main():
         mode = "diff"
     elif args.diff or args.staged:
         if use_codex:
-            content = None  # let codex run git diff itself
+            content = None
+            git_cmd = "git diff --staged" if args.staged else "git diff HEAD"
         else:
             content = get_diff(args.staged)
         mode = "diff"
@@ -224,7 +253,7 @@ def main():
     if use_codex:
         result = review_with_codex(
             mode, content, docs_content, args.model, args.prompt,
-            commit=args.commit, pr=bool(args.pr),
+            commit=args.commit, pr=bool(args.pr), git_cmd=git_cmd,
         )
     else:
         # API mode: assemble full content with docs

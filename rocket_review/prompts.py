@@ -172,6 +172,7 @@ def build_codex_prompt(
     extra: str | None = None,
     commit: str | None = None,
     pr: bool = False,
+    git_cmd: str | None = None,
 ) -> str:
     """Build a single prompt for codex exec."""
     instructions = get_prompt(mode, docs_content)
@@ -197,8 +198,8 @@ def build_codex_prompt(
         parts.append(content)
     elif commit:
         parts.append(f"Run `git show {commit}` to see the commit, then review the changes.")
-    elif mode == "diff" and content is None:
-        parts.append("Run `git diff HEAD` to see the changes, then review them.")
+    elif git_cmd:
+        parts.append(f"Run `{git_cmd}` to see the changes, then review them.")
     elif content:
         label = {"plan": "PLAN", "code": "CODE", "diff": "DIFF"}.get(mode, "CONTENT")
         parts.append(f"=== {label} TO REVIEW ===\n{content}\n=== END {label} ===")

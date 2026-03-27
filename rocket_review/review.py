@@ -26,17 +26,28 @@ def review_with_codex(
     extra: str | None = None,
     commit: str | None = None,
     pr: bool = False,
+    git_cmd: str | None = None,
 ) -> str:
-    prompt = build_codex_prompt(mode, content, docs_content, extra, commit=commit, pr=pr)
+    prompt = build_codex_prompt(
+        mode, content, docs_content, extra,
+        commit=commit, pr=pr, git_cmd=git_cmd,
+    )
 
     with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
         outfile = f.name
+
+    # Write prompt to temp file to avoid ARG_MAX limits on large reviews
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".md", delete=False, prefix="rr-prompt-",
+    ) as pf:
+        pf.write(prompt)
+        prompt_file = pf.name
 
     try:
         cmd = ["codex", "exec", "-s", "read-only", "-o", outfile]
         if model:
             cmd += ["-m", model]
-        cmd.append(prompt)
+        cmd.append(f"Read the file {prompt_file} for your full instructions, then follow them.")
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
@@ -56,6 +67,7 @@ def review_with_codex(
         return output
     finally:
         Path(outfile).unlink(missing_ok=True)
+        Path(prompt_file).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -79,8 +91,23 @@ def _load_env_file() -> None:
                         return
 
 
+def _get_repo_root() -> Path | None:
+    """Get the git repo root, or None if not in a repo."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        return Path(result.stdout.strip()).resolve()
+    return None
+
+
 def extract_referenced_files(text: str, max_size: int = 100_000) -> str:
-    """Extract file paths from text and read their contents."""
+    """Extract file paths from text and read their contents (repo-scoped only)."""
+    repo_root = _get_repo_root()
+    if not repo_root:
+        repo_root = Path.cwd().resolve()
+
     backtick = re.findall(r"`([^`\s]+\.\w{1,10})`", text)
     bare = re.findall(r"(?<![`\w])([\w][\w./-]*\.\w{1,10})(?![\w`])", text)
     candidates = set(backtick + bare)
@@ -88,13 +115,16 @@ def extract_referenced_files(text: str, max_size: int = 100_000) -> str:
     parts = []
     seen = set()
     for c in sorted(candidates):
-        p = Path(c)
+        p = Path(c).resolve()
+        # Only include files within the repo/cwd
+        if not str(p).startswith(str(repo_root)):
+            continue
         if p.is_file() and p not in seen:
             try:
                 if p.stat().st_size <= max_size:
                     parts.append(f"=== {c} ===\n{p.read_text()}")
                     seen.add(p)
-            except Exception:
+            except (OSError, UnicodeDecodeError):
                 continue
     return "\n\n".join(parts)
 
