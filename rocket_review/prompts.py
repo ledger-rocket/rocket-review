@@ -13,7 +13,8 @@ REVIEW METHODOLOGY
 OUTPUT FORMAT
 For each finding:
 [SEVERITY] Issue description
-> Why it matters and suggested improvement
+> Why it matters
+> **Suggested fix:** concrete recommendation or revised plan step
 
 Severity levels:
 - CRITICAL: Blocker — plan will fail or produce wrong results without fixing this
@@ -84,7 +85,9 @@ EVALUATION AREAS (apply as relevant)
 OUTPUT FORMAT
 For each issue:
 [SEVERITY] File:Line — Issue description
-> Fix: Specific solution
+> Why it matters
+> **Suggested fix:** provide the corrected code snippet or specific refactor. \
+Make fixes copy-pasteable when possible.
 
 End with:
 - **Overall Code Quality Summary** (one short paragraph)
@@ -131,7 +134,9 @@ SEVERITY LEVELS
 OUTPUT FORMAT
 For each finding:
 [SEVERITY] File — Issue description
-> Fix: Specific solution
+> Why it matters
+> **Suggested fix:** provide the corrected code snippet or specific change. \
+Make fixes copy-pasteable when possible.
 
 End with:
 - **Change Assessment**: Safe to merge / Needs fixes / Do not merge
