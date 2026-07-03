@@ -1,0 +1,68 @@
+name: Minimal CI
+
+# Standard-tier CI gate, synced to standard-tier fleet repos as
+# .github/workflows/minimal-ci.yml. Composes the language-agnostic shared
+# reusables in .github-private as peer jobs — yamllint, actionlint (via
+# workflow-lint), and gitleaks secret scanning — then aggregates them into a
+# single `CI Success` status check. The org's standard-tier ruleset requires
+# exactly that check name, so gates can be added or removed here without a
+# ruleset edit.
+#
+# Job-scoped least-privilege permissions: yamllint + workflow-lint only read the
+# tree; secrets-scan additionally needs pull-requests:write for its sticky
+# findings comment. osv-scanner is intentionally NOT included — it stays a
+# weekly advisory cron, not a per-PR blocker.
+#
+# Canonical source: .github-private/synced/configs/minimal-ci.yml. Do not edit
+# the synced copy in a consumer repo; change the canonical and re-sync.
+#
+# Reference: PRO-3312 (minimal-ci rollout); PRO-3314 (the CI Success gate).
+
+on:
+  pull_request:
+
+# Least privilege default: jobs only read the checked-out tree. secrets-scan
+# overrides to add the pull-requests:write its reusable needs for the comment.
+permissions:
+  contents: read
+
+jobs:
+  yamllint:
+    uses: ledger-rocket/.github-private/.github/workflows/yamllint.yml@main
+
+  workflow-lint:
+    uses: ledger-rocket/.github-private/.github/workflows/workflow-lint.yml@main
+
+  secrets-scan:
+    permissions:
+      contents: read
+      pull-requests: write  # for the reusable's sticky findings comment
+    uses: ledger-rocket/.github-private/.github/workflows/secrets-scan.yml@main
+
+  # Single green/red target for branch protection. The standard-tier ruleset
+  # requires just this one check by name, so adding or removing a gate above
+  # needs no ruleset edit. Every check job runs unconditionally on pull_request
+  # (none carry an `if:`), so a `skipped` result is never expected here — it
+  # means the run was cancelled or a gate was disabled, and it fails the gate.
+  ci-success:
+    name: CI Success
+    if: ${{ always() }}
+    needs: [yamllint, workflow-lint, secrets-scan]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every gate to have passed
+        run: |
+          set -euo pipefail
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "::error::a required CI gate failed."
+            exit 1
+          fi
+          if [[ "${{ contains(needs.*.result, 'cancelled') }}" == true ]]; then
+            echo "::error::a required CI gate was cancelled."
+            exit 1
+          fi
+          if [[ "${{ contains(needs.*.result, 'skipped') }}" == "true" ]]; then
+            echo "::error::a required CI gate was unexpectedly skipped."
+            exit 1
+          fi
+          echo "All required CI gates passed."
