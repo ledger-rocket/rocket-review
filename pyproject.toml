@@ -7,7 +7,16 @@ name = "rocket-review"
 version = "0.1.0"
 description = "CLI tool to get GPT review of plans, code, or diffs"
 requires-python = ">=3.13"
+license = "MIT"
+readme = "README.md"
 dependencies = ["openai>=1.68.0"]
 
 [project.scripts]
 rr = "rocket_review.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
