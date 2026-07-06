@@ -69,6 +69,8 @@ DISCOVERY_CANDIDATES = ["llms.txt", "AGENTS.md", "CLAUDE.md"]
 def collect_docs(docs_args: list[str] | None, llms_arg: str | None) -> str | None:
     """Assemble standards context from --docs (explicit or auto-discovered) and --llms."""
     paths: list[Path] = []
+    if llms_arg:
+        paths.append(Path(llms_arg))
     if docs_args is not None and len(docs_args) == 0:
         found = [Path(c) for c in DISCOVERY_CANDIDATES if Path(c).is_file()]
         if not found:
@@ -81,8 +83,6 @@ def collect_docs(docs_args: list[str] | None, llms_arg: str | None) -> str | Non
         paths.extend(found)
     elif docs_args:
         paths.extend(Path(p) for p in docs_args)
-    if llms_arg:
-        paths.append(Path(llms_arg))
     if not paths:
         return None
     seen: set[Path] = set()

@@ -56,6 +56,7 @@ def test_collect_docs_llms_alias_combines(tmp_path, monkeypatch):
     (tmp_path / "extra.md").write_text("extra doc")
     out = collect_docs(["extra.md"], "llms.txt")
     assert "llms index" in out and "extra doc" in out
+    assert out.index("llms index") < out.index("extra doc")
 
 
 def test_collect_docs_dedupes_repeated_paths(tmp_path, monkeypatch):
