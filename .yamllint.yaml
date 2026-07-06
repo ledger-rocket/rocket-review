@@ -1,0 +1,10 @@
+# Canonical repo-owned yamllint config, synced to minimal-ci repos (PRO-3312).
+# The shared yamllint reusable runs `yamllint .`, which auto-discovers a repo-root
+# `.yamllint.yaml`. Without one, yamllint falls back to its built-in 80-col default,
+# which workflow/config YAML (long `${{ vars.* }}` expressions) can't fold under —
+# so minimal-ci repos tripped it (daily-digest, docs). 120 is the workflow-YAML
+# convention. Source of truth: .github-private/synced/configs/yamllint.yaml.
+extends: default
+rules:
+  line-length:
+    max: 120
