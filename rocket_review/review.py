@@ -9,7 +9,7 @@ from pathlib import Path
 from rocket_review.prompts import build_codex_prompt
 
 
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gpt-5.5"
 
 HAS_CODEX = shutil.which("codex") is not None
 

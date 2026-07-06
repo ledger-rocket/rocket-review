@@ -1,7 +1,9 @@
 import argparse
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -101,14 +103,16 @@ def get_commit_diff(sha: str) -> str:
     return diff
 
 
-def get_pr_content(pr_ref: str) -> tuple[str, str]:
+def get_pr_content(pr_ref: str, repo: str | None = None) -> tuple[str, str]:
     """Fetch PR metadata and diff using gh CLI. Returns (description, diff)."""
     if not shutil.which("gh"):
         print("Error: gh CLI not found. Install it from https://cli.github.com", file=sys.stderr)
         sys.exit(1)
 
+    repo_args = ["--repo", repo] if repo else []
+
     view_result = subprocess.run(
-        ["gh", "pr", "view", pr_ref, "--json", "title,body,number,url"],
+        ["gh", "pr", "view", pr_ref, "--json", "title,body,number,url"] + repo_args,
         capture_output=True, text=True,
     )
     if view_result.returncode != 0:
@@ -121,7 +125,7 @@ def get_pr_content(pr_ref: str) -> tuple[str, str]:
         description += f"\n\n{pr_info['body']}"
 
     diff_result = subprocess.run(
-        ["gh", "pr", "diff", pr_ref],
+        ["gh", "pr", "diff", pr_ref] + repo_args,
         capture_output=True, text=True,
     )
     if diff_result.returncode != 0:
@@ -144,6 +148,22 @@ def detect_mode(paths: list[str]) -> str:
     return "code"
 
 
+def stdin_has_input() -> bool:
+    """True only for a real pipe or redirected file, not just any non-tty fd.
+
+    A bare non-interactive fd (e.g. stdin redirected from /dev/null, common under
+    CI/test harnesses) is non-tty too but carries no content, so it must not count
+    as a review source or it collides with an explicit --diff/--pr/etc.
+    """
+    if sys.stdin.isatty():
+        return False
+    try:
+        mode = os.fstat(sys.stdin.fileno()).st_mode
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISFIFO(mode) or stat.S_ISREG(mode)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="rr",
@@ -155,6 +175,10 @@ def main():
     parser.add_argument("--commit", metavar="SHA", help="Review a specific commit")
     parser.add_argument(
         "--pr", metavar="REF", help="Review a GitHub PR (number, URL, or branch)"
+    )
+    parser.add_argument(
+        "--repo", metavar="OWNER/REPO",
+        help="GitHub repo for --pr when not in the repo's checkout (e.g. ledger-rocket/event-service)",
     )
     parser.add_argument(
         "--model", default=DEFAULT_MODEL, help=f"Model to use (default: {DEFAULT_MODEL})"
@@ -194,13 +218,13 @@ def main():
         sys.exit(1)
 
     # Validate mutually exclusive sources
-    sources = sum([
+    explicit_sources = sum([
         bool(args.pr),
         bool(args.commit),
         args.diff or args.staged,
         bool(args.files),
-        not sys.stdin.isatty(),
     ])
+    sources = explicit_sources + int(stdin_has_input())
     if sources > 1:
         print("Error: specify only one review source (files, --diff, --staged, --commit, --pr, or stdin).", file=sys.stderr)
         sys.exit(1)
@@ -209,7 +233,7 @@ def main():
     content: str | None = None
     git_cmd: str | None = None
     if args.pr:
-        pr_description, diff = get_pr_content(args.pr)
+        pr_description, diff = get_pr_content(args.pr, repo=args.repo)
         content = f"=== PULL REQUEST ===\n{pr_description}\n=== END PULL REQUEST ===\n\n{diff}"
         mode = "diff"
     elif args.commit:
