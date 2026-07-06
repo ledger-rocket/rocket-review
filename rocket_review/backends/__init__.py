@@ -1,8 +1,8 @@
 import shutil
 
-from rocket_review.backends import api, codex
+from rocket_review.backends import api, claude, codex
 
-BACKENDS = {m.NAME: m for m in (codex, api)}
+BACKENDS = {m.NAME: m for m in (codex, claude, api)}
 
 
 def missing_binary(name: str) -> str | None:

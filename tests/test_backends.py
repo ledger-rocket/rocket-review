@@ -1,6 +1,6 @@
 import pytest
 
-from rocket_review.backends import BACKENDS, api, base, codex
+from rocket_review.backends import BACKENDS, api, base, claude, codex
 from rocket_review.backends.base import BackendError, ReviewJob
 
 
@@ -97,3 +97,33 @@ def test_api_json_mode_adds_output_override_to_system_prompt(monkeypatch):
     monkeypatch.setattr(api, "_call_openai", fake_call)
     api.review(job(json_output=True))
     assert "OUTPUT FORMAT OVERRIDE" in captured["system_prompt"]
+
+
+def test_claude_uses_readonly_allowlist_and_stdin(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"] = cmd
+        captured["stdin"] = stdin
+        return "CLAUDE REVIEW"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    assert claude.review(job(model="claude-sonnet-5")) == "CLAUDE REVIEW"
+    cmd = captured["cmd"]
+    assert cmd[:2] == ["claude", "-p"]
+    allow = cmd[cmd.index("--allowedTools") + 1]
+    assert "Read" in allow and "Write" not in allow and "Edit" not in allow
+    assert "--model" in cmd and "claude-sonnet-5" in cmd
+    assert "DIFF TO REVIEW" in captured["stdin"]  # prompt travels via stdin, not argv
+
+
+def test_claude_default_model_omits_flag(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"] = cmd
+        return "ok"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    claude.review(job())
+    assert "--model" not in captured["cmd"]
