@@ -50,6 +50,17 @@ def test_should_fail_closed_on_errors():
     assert should_fail([parse_backend_output("not json", "codex", None)], "critical")
 
 
+def test_parse_missing_verdict_is_parse_error():
+    r = parse_backend_output('{"findings": []}', "api", None)
+    assert r.parse_error
+
+
+def test_parse_invalid_verdict_is_parse_error():
+    txt = GOOD.replace("needs_fixes", "LGTM")
+    r = parse_backend_output(txt, "api", None)
+    assert r.parse_error
+
+
 def test_envelope_merges_and_tags():
     r1 = parse_backend_output(GOOD, "codex", "gpt-5.5")
     r2 = parse_backend_output(GOOD, "claude", "claude-sonnet-5")

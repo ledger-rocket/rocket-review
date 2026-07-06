@@ -3,11 +3,12 @@ import re
 from dataclasses import asdict, dataclass, field
 
 SEVERITIES = ["critical", "high", "medium", "low"]
+VERDICTS = ("approve", "needs_fixes", "blocker")
 
 REVIEW_SCHEMA = {
     "type": "object",
     "properties": {
-        "verdict": {"type": "string", "enum": ["approve", "needs_fixes", "blocker"]},
+        "verdict": {"type": "string", "enum": list(VERDICTS)},
         "summary": {"type": "string"},
         "findings": {
             "type": "array",
@@ -76,6 +77,10 @@ def extract_json(text: str) -> dict | None:
 def parse_backend_output(text: str, backend: str, model: str | None) -> BackendResult:
     obj = extract_json(text)
     if obj is None or not isinstance(obj.get("findings"), list):
+        return BackendResult(backend=backend, model=model, raw=text, parse_error=True)
+    if obj.get("verdict") not in VERDICTS:
+        # A review that never reached a verdict didn't actually conclude anything;
+        # treat it the same as unparsable output so the gate fails closed.
         return BackendResult(backend=backend, model=model, raw=text, parse_error=True)
     findings = []
     for f in obj["findings"]:
