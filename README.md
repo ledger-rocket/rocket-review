@@ -1,133 +1,116 @@
 # rocket-review
 
-CLI tool to get GPT review of plans, code, or diffs. Uses Codex CLI as the backend so the reviewer can navigate your project, read related files, and give context-aware feedback.
+**`rr` — a second opinion on your code, from a model that didn't write it.**
 
-Command: **`rr`**
+One small CLI that sends your plan, diff, commit, or PR to an agentic reviewer
+(Codex CLI, Claude Code, or opencode) that explores your project before judging —
+then gives you prose or structured JSON you can gate CI on.
+
+Unlike editor-bound plugins (e.g. OpenAI's codex-plugin-cc, which does GPT reviews
+but only inside Claude Code), `rr` is a standalone CLI: call it from any shell, any
+editor, any agent, or CI.
+
+## Why
+
+- **Cross-model review** — the model that wrote the code shouldn't be the only one
+  grading it. Implement with Claude, review with GPT; implement with Codex, review
+  with Claude; or fan out to both and compare.
+- **Plans are reviewable too** — `rr plan.md` stress-tests a design doc *before*
+  you build it. Most review tools only understand diffs.
+- **Standards-aware** — `--docs` auto-discovers `llms.txt`, `AGENTS.md`, or
+  `CLAUDE.md` (or takes explicit paths) and the reviewer flags deviations from
+  *your* documented rules, not generic style opinions.
+- **CI-gateable** — `--json --fail-on high` exits 2 when a high-severity finding
+  lands. Pipe the envelope to `jq` or your bot of choice.
 
 ## Install
 
 ```bash
-pipx install ~/Projects/rocket-review
+pipx install git+https://github.com/ledger-rocket/rocket-review.git
 ```
 
-Requires Python 3.13+, [Codex CLI](https://github.com/openai/codex), and [gh CLI](https://cli.github.com) (for `--pr`).
+Requires Python 3.13+ and at least one backend:
 
-If Codex is not installed, `rr` will error with instructions. Use `--api` to explicitly opt into direct API mode (requires `OPENAI_API_KEY`).
+- [Codex CLI](https://github.com/openai/codex) (default backend)
+- [Claude Code](https://claude.com/claude-code) (`--backend claude`)
+- [opencode](https://opencode.ai) (`--backend opencode` — any provider, including local models)
+- or none of the above: `--backend api` calls the OpenAI API directly (`OPENAI_API_KEY`)
 
-### API key setup (for `--api` mode only)
-
-Set `OPENAI_API_KEY` in your environment or in a `.env` file (checked in cwd then home dir):
-
-```bash
-export OPENAI_API_KEY="sk-..."
-# or
-echo 'OPENAI_API_KEY=sk-...' >> ~/.env
-```
+`--pr` also needs the [gh CLI](https://cli.github.com).
 
 ## Usage
 
 ```bash
-# Review a plan file (Codex reads related project files for context)
-rr plan.md
-
-# Review code files
-rr src/auth.py src/models.py
-
-# Review git diff (Codex runs git diff and inspects context itself)
-rr --diff
-
-# Review staged changes only
-rr --staged
-
-# Review a specific commit
-rr --commit abc1234
-
-# Review a GitHub PR (by number, URL, or branch)
-rr --pr 123
-rr --pr https://github.com/org/repo/pull/123
-rr --pr feature-branch
-
-# Pipe anything
-git diff HEAD~3 | rr
-
-# Pick a different model
-rr plan.md --model gpt-5.4-mini
-rr plan.md --model gpt-5.3-codex
-
-# Add extra review instructions
-rr plan.md --prompt "focus on security implications"
-
-# Force a specific review mode
-rr plan.md --mode code
-
-# Use direct API instead of Codex CLI
-rr plan.md --api
+rr plan.md                        # stress-test a plan before building
+rr --diff                         # review uncommitted changes
+rr --staged                       # review staged changes only
+rr --commit abc1234               # review a commit
+rr --pr 123                       # review a GitHub PR (number, URL, or branch)
+rr --pr 123 --repo acme/api       # ...from outside that repo's checkout
+git diff HEAD~3 | rr              # pipe anything
+rr src/auth.py --docs             # review files against your documented standards
 ```
 
-## Backends
-
-**Codex CLI (default)** — Codex runs in read-only sandbox and can navigate the full project: read imports, tests, related files, run `git diff`, etc. This gives much better reviews than sending isolated content to an API.
-
-**API mode (`--api`)** — Direct OpenAI API call. Automatically extracts file paths referenced in the content and includes their contents. Useful when Codex is not installed. Requires `OPENAI_API_KEY` env var or `.env` file.
+### Pick your reviewer
 
 ```bash
-# Force API mode
-rr plan.md --api
+rr --diff --backend claude                     # Claude reviews (read-only sandbox)
+rr --diff --backend opencode:ollama/qwen3      # fully local review
+rr --diff --backend codex,claude               # both, side by side
+rr --diff --backend codex:gpt-5.5,claude:claude-opus-4-8
 ```
+
+Backends run agentically in read-only mode: they navigate your project — imports,
+tests, related files — before judging. That context is what makes the review
+worth reading.
+
+### Structured output
+
+```bash
+rr --diff --json | jq '.findings[] | {severity, title, backend}'
+rr --staged --json --fail-on high && git commit   # block the commit on high+ findings
+```
+
+Every finding carries `severity, title, file, line, why, fix, backend, model`.
+Parse failures and backend errors fail the gate closed.
 
 ## Review modes
 
-| Mode | Auto-detected when | Focus |
-|------|-------------------|-------|
-| `plan` | Input is `.md`, `.txt`, or `.plan` files | Completeness, risks, ordering, pragmatism |
-| `code` | Input is source code files | Security, performance, correctness, maintainability |
-| `diff` | Using `--diff`, `--staged`, `--commit`, `--pr`, or stdin pipe | Bugs introduced, missing changes, contract breaks |
+- `plan` — auto-detected for `.md`/`.txt`/`.plan` files: completeness, ordering, risks, over-engineering.
+- `code` — source files: correctness, security, performance, maintainability.
+- `diff` — for `--diff`/`--staged`/`--commit`/`--pr`/stdin: bugs introduced, missing changes, contract breaks.
 
-Override with `--mode plan|code|diff`.
+Override with `--mode`, add focus with `--prompt "check the locking"`.
 
-## Project standards (`--llms`)
+## Project standards (`--docs`)
 
-If your project has an `llms.txt` that links to standards docs, use `--llms` to automatically read it and follow all its markdown links:
-
-```bash
-# Reads llms.txt + all docs it references (code_standards.md, code_smells.md, etc.)
-rr src/auth.py --llms
-
-# Point to a custom path
-rr src/auth.py --llms path/to/llms.txt
-```
-
-The reviewer checks compliance with your documented standards and flags deviations.
-
-You can also pass explicit doc files with `--docs` (combinable with `--llms`):
+Point the reviewer at your project's standards docs — it flags deviations from
+*your* documented rules:
 
 ```bash
-rr src/auth.py --llms --docs extra_notes.md
+rr src/auth.py --docs                     # auto-discovers llms.txt / AGENTS.md / CLAUDE.md
+rr src/auth.py --docs docs/standards.md docs/smells.md
 ```
 
-## Models
+Relative markdown links inside the docs are followed one level, so an index file
+(like `llms.txt`) pulls in everything it references. `--llms [PATH]` is kept as a
+compatibility alias for `--docs [PATH]`, defaulting to `llms.txt`.
 
-Default: `gpt-5.4`. Also available: `gpt-5.4-mini`, `gpt-5.3-codex`.
+## Agent integration
 
-Short aliases auto-resolve to the latest dated snapshot available on your API key.
-
-## Claude Code integration
-
-Add this to your project's `CLAUDE.md`:
+Drop into your `CLAUDE.md` / `AGENTS.md`:
 
 ```markdown
-## External review
-
-When asked to get a review, or before implementing a complex plan, use `rr` to get a GPT second opinion:
-
-- Review a plan: `rr plan.md --llms`
-- Review local changes: `rr --diff --llms`
-- Review staged changes: `rr --staged --llms`
-- Review a commit: `rr --commit SHA --llms`
-- Review a PR: `rr --pr 123 --llms`
-- Review specific files: `rr src/auth.py --llms`
-- Use 600000ms timeout for Bash calls to `rr` (Codex needs time to explore the project)
-
-Always pass `--llms` if the project has an llms.txt so the reviewer checks project standards.
-After getting the review, summarize key findings and address them before proceeding.
+Before pushing non-trivial changes, run `rr --diff --docs` and address the findings.
+For plans, run `rr plan.md --docs` before implementing. Use a 900000ms timeout.
 ```
+
+## Notes
+
+- Codex runs with `-s read-only`; Claude Code runs with a read-only tool allowlist;
+  opencode is instructed not to modify files (use a read-only agent profile there
+  if you have one configured).
+- `--fail-on` requires `--json`.
+- Exit codes: 0 no gate tripped · 1 operational error · 2 findings at/above `--fail-on`.
+
+MIT licensed.

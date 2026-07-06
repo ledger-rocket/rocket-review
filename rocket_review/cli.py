@@ -237,7 +237,7 @@ def main():
     )
     parser.add_argument(
         "--repo", metavar="OWNER/REPO",
-        help="GitHub repo for --pr when not in the repo's checkout (e.g. ledger-rocket/event-service)",
+        help="GitHub repo for --pr when not in the repo's checkout (e.g. acme/api-server)",
     )
     parser.add_argument(
         "--backend", default="codex",
