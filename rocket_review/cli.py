@@ -9,8 +9,10 @@ import sys
 from pathlib import Path
 from urllib.parse import unquote, urldefrag
 
-from rocket_review.prompts import get_prompt
-from rocket_review.review import DEFAULT_MODEL, HAS_CODEX, review_with_api, review_with_codex
+from rocket_review.backends import BACKENDS, missing_binary
+from rocket_review.backends.base import BackendError, ReviewJob
+
+DEFAULT_MODEL = BACKENDS["codex"].DEFAULT_MODEL
 
 
 def read_files(paths: list[str]) -> str:
@@ -207,7 +209,7 @@ def main():
 
     if args.api:
         use_codex = False
-    elif HAS_CODEX:
+    elif missing_binary("codex") is None:
         use_codex = True
     else:
         print(
@@ -274,17 +276,21 @@ def main():
         docs_content = f"{docs_content}\n\n{explicit}" if docs_content else explicit
 
     # Run review
-    if use_codex:
-        result = review_with_codex(
-            mode, content, docs_content, args.model, args.prompt,
-            commit=args.commit, pr=bool(args.pr), git_cmd=git_cmd,
-        )
-    else:
-        # API mode: assemble full content with docs
-        if docs_content:
-            content = f"=== PROJECT STANDARDS ===\n{docs_content}\n=== END PROJECT STANDARDS ===\n\n{content}"
-
-        system_prompt = get_prompt(mode, docs_content)
-        result = review_with_api(content, system_prompt, args.model, args.prompt)
+    job = ReviewJob(
+        mode=mode,
+        content=content,
+        docs_content=docs_content,
+        extra=args.prompt,
+        commit=args.commit,
+        pr=bool(args.pr),
+        git_cmd=git_cmd,
+        model=args.model,
+    )
+    backend = BACKENDS["codex"] if use_codex else BACKENDS["api"]
+    try:
+        result = backend.review(job)
+    except BackendError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     print(result)

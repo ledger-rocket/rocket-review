@@ -1,78 +1,25 @@
 import os
 import re
-import shutil
 import subprocess
-import sys
-import tempfile
 from pathlib import Path
 
-from rocket_review.prompts import build_codex_prompt
+from rocket_review.backends.base import BackendError, ReviewJob
+from rocket_review.prompts import get_prompt
 
-
+NAME = "api"
+BINARY = None  # SDK, not a CLI
+INSTALL_HINT = "set OPENAI_API_KEY (or put it in .env)"
 DEFAULT_MODEL = "gpt-5.5"
 
-HAS_CODEX = shutil.which("codex") is not None
 
+def review(job: ReviewJob) -> str:
+    content = job.content or ""
+    if job.docs_content:
+        content = (f"=== PROJECT STANDARDS ===\n{job.docs_content}\n"
+                   f"=== END PROJECT STANDARDS ===\n\n{content}")
+    system_prompt = get_prompt(job.mode, job.docs_content)
+    return _call_openai(content, system_prompt, job.model or DEFAULT_MODEL, job.extra)
 
-# ---------------------------------------------------------------------------
-# Codex backend
-# ---------------------------------------------------------------------------
-
-def review_with_codex(
-    mode: str,
-    content: str | None,
-    docs_content: str | None = None,
-    model: str = DEFAULT_MODEL,
-    extra: str | None = None,
-    commit: str | None = None,
-    pr: bool = False,
-    git_cmd: str | None = None,
-) -> str:
-    prompt = build_codex_prompt(
-        mode, content, docs_content, extra,
-        commit=commit, pr=pr, git_cmd=git_cmd,
-    )
-
-    with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
-        outfile = f.name
-
-    # Write prompt to temp file to avoid ARG_MAX limits on large reviews
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".md", delete=False, prefix="rr-prompt-",
-    ) as pf:
-        pf.write(prompt)
-        prompt_file = pf.name
-
-    try:
-        cmd = ["codex", "exec", "-s", "read-only", "-o", outfile]
-        if model:
-            cmd += ["-m", model]
-        cmd.append(f"Read the file {prompt_file} for your full instructions, then follow them.")
-
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-        except subprocess.TimeoutExpired:
-            print("Error: codex timed out after 15 minutes.", file=sys.stderr)
-            sys.exit(1)
-
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            print(f"Error: codex failed (exit {result.returncode}): {stderr}", file=sys.stderr)
-            sys.exit(1)
-
-        output = Path(outfile).read_text().strip()
-        if not output:
-            print("Error: codex produced no output.", file=sys.stderr)
-            sys.exit(1)
-        return output
-    finally:
-        Path(outfile).unlink(missing_ok=True)
-        Path(prompt_file).unlink(missing_ok=True)
-
-
-# ---------------------------------------------------------------------------
-# API backend
-# ---------------------------------------------------------------------------
 
 def _load_env_file() -> None:
     """Load OPENAI_API_KEY from .env files if not already in environment."""
@@ -143,17 +90,11 @@ def _resolve_model(client, model: str) -> str:
     return candidates[-1] if candidates else model
 
 
-def review_with_api(
-    content: str,
-    system_prompt: str,
-    model: str = DEFAULT_MODEL,
-    extra: str | None = None,
-) -> str:
+def _call_openai(content: str, system_prompt: str, model: str, extra: str | None) -> str:
     _load_env_file()
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        print("Error: OPENAI_API_KEY not set. Export it or put it in .env", file=sys.stderr)
-        sys.exit(1)
+        raise BackendError("OPENAI_API_KEY not set. Export it or put it in .env")
 
     from openai import OpenAI
 
@@ -176,7 +117,6 @@ def review_with_api(
             input=user_message,
         )
     except Exception as exc:
-        print(f"Error: OpenAI API call failed: {exc}", file=sys.stderr)
-        sys.exit(1)
+        raise BackendError(f"OpenAI API call failed: {exc}")
 
     return response.output_text
