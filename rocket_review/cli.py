@@ -31,48 +31,68 @@ def read_files(paths: list[str]) -> str:
     return "\n\n".join(parts)
 
 
-def read_docs(paths: list[str]) -> str:
-    parts = []
-    for p in paths:
-        path = Path(p)
-        if not path.exists():
-            print(f"Warning: docs file not found, skipping: {p}", file=sys.stderr)
-            continue
-        text = path.read_text()
-        parts.append(f"--- {path.name} ---\n{text}")
-    return "\n\n".join(parts) if parts else ""
-
-
-def read_llms(llms_path: Path) -> str:
-    """Read llms.txt and follow all relative markdown links to build full project context."""
-    if not llms_path.is_file():
-        print(f"Error: {llms_path} not found.", file=sys.stderr)
+def read_doc_with_links(doc_path: Path) -> str:
+    """Read a doc and follow all relative markdown links to build full project context."""
+    if not doc_path.is_file():
+        print(f"Error: {doc_path} not found.", file=sys.stderr)
         sys.exit(1)
 
-    base_dir = llms_path.parent.resolve()
-    llms_text = llms_path.read_text()
-    parts = [f"--- llms.txt ---\n{llms_text}"]
+    base_dir = doc_path.parent.resolve()
+    doc_text = doc_path.read_text()
+    parts = [f"--- {doc_path.name} ---\n{doc_text}"]
 
-    links = re.findall(r"\[[^\]]*\]\(([^)]+)\)", llms_text)
+    links = re.findall(r"\[[^\]]*\]\(([^)]+)\)", doc_text)
     for raw_link in links:
         if raw_link.startswith(("http://", "https://", "#")):
             continue
         link, _ = urldefrag(unquote(raw_link))
         if not link:
             continue
-        doc_path = (base_dir / link).resolve()
-        # Prevent path traversal outside the llms.txt directory
-        if not str(doc_path).startswith(str(base_dir)):
+        linked_path = (base_dir / link).resolve()
+        # Prevent path traversal outside the doc's directory
+        if not str(linked_path).startswith(str(base_dir)):
             print(f"Warning: skipping link outside project: {raw_link}", file=sys.stderr)
             continue
-        if doc_path.is_file():
+        if linked_path.is_file():
             try:
-                text = doc_path.read_text()
+                text = linked_path.read_text()
                 parts.append(f"--- {link} ---\n{text}")
             except (OSError, UnicodeDecodeError) as e:
                 print(f"Warning: could not read {link}: {e}", file=sys.stderr)
 
     return "\n\n".join(parts)
+
+
+DISCOVERY_CANDIDATES = ["llms.txt", "AGENTS.md", "CLAUDE.md"]
+
+
+def collect_docs(docs_args: list[str] | None, llms_arg: str | None) -> str | None:
+    """Assemble standards context from --docs (explicit or auto-discovered) and --llms."""
+    paths: list[Path] = []
+    if docs_args is not None and len(docs_args) == 0:
+        found = [Path(c) for c in DISCOVERY_CANDIDATES if Path(c).is_file()]
+        if not found:
+            print(
+                "Error: --docs given without paths and none of "
+                f"{', '.join(DISCOVERY_CANDIDATES)} found in the current directory.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        paths.extend(found)
+    elif docs_args:
+        paths.extend(Path(p) for p in docs_args)
+    if llms_arg:
+        paths.append(Path(llms_arg))
+    if not paths:
+        return None
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for p in paths:
+        rp = p.resolve()
+        if rp not in seen:
+            seen.add(rp)
+            unique.append(p)
+    return "\n\n".join(read_doc_with_links(p) for p in unique)
 
 
 def get_diff(staged: bool) -> str:
@@ -191,13 +211,14 @@ def main():
         help="Review mode (auto-detected if omitted)",
     )
     parser.add_argument("--prompt", help="Additional review instructions")
-    parser.add_argument("--docs", nargs="+", help="Project standards docs to include as context")
     parser.add_argument(
-        "--llms",
-        nargs="?",
-        const="llms.txt",
-        metavar="PATH",
-        help="Read llms.txt and follow its doc links for project context (default: ./llms.txt)",
+        "--docs", nargs="*", metavar="PATH",
+        help="Project standards docs to review against; relative markdown links inside them are "
+             "followed one level. With no PATH, auto-discovers llms.txt / AGENTS.md / CLAUDE.md.",
+    )
+    parser.add_argument(
+        "--llms", nargs="?", const="llms.txt", metavar="PATH",
+        help="Alias for --docs llms.txt (kept for compatibility)",
     )
     parser.add_argument(
         "--api",
@@ -268,12 +289,7 @@ def main():
         mode = args.mode
 
     # Read project standards docs
-    docs_content = None
-    if args.llms:
-        docs_content = read_llms(Path(args.llms))
-    if args.docs:
-        explicit = read_docs(args.docs)
-        docs_content = f"{docs_content}\n\n{explicit}" if docs_content else explicit
+    docs_content = collect_docs(args.docs, args.llms)
 
     # Run review
     job = ReviewJob(
