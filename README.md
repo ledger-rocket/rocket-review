@@ -46,7 +46,7 @@ rr --diff                         # review uncommitted changes
 rr --staged                       # review staged changes only
 rr --commit abc1234               # review a commit
 rr --pr 123                       # review a GitHub PR (number, URL, or branch)
-rr --pr 123 --repo acme/api       # ...from outside that repo's checkout
+rr --pr 123 --repo acme/api-server  # ...from outside that repo's checkout
 git diff HEAD~3 | rr              # pipe anything
 rr src/auth.py --docs             # review files against your documented standards
 ```
@@ -107,9 +107,9 @@ For plans, run `rr plan.md --docs` before implementing. Use a 900000ms timeout.
 
 ## Notes
 
-- Codex runs with `-s read-only`; Claude Code runs with a read-only tool allowlist;
-  opencode is instructed not to modify files (use a read-only agent profile there
-  if you have one configured).
+- Every backend is read-only on your project: Codex runs with `-s read-only`,
+  Claude Code with a read-only tool allowlist, and opencode with its built-in
+  read-only `plan` agent (edit/write denied at the tool level).
 - `--fail-on` requires `--json`.
 - Exit codes: 0 no gate tripped · 1 operational error · 2 findings at/above `--fail-on`.
 
