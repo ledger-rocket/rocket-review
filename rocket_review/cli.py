@@ -6,14 +6,19 @@ import shutil
 import stat
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import unquote, urldefrag
 
 from rocket_review.backends import BACKENDS, missing_binary
 from rocket_review.backends.base import BackendError, ReviewJob
-from rocket_review.models import parse_backend_output, should_fail, to_envelope
-
-DEFAULT_MODEL = BACKENDS["codex"].DEFAULT_MODEL
+from rocket_review.models import (
+    BackendResult,
+    parse_backend_output,
+    should_fail,
+    to_envelope,
+)
 
 
 def read_files(paths: list[str]) -> str:
@@ -187,6 +192,37 @@ def stdin_has_input() -> bool:
     return stat.S_ISFIFO(mode) or stat.S_ISREG(mode)
 
 
+def parse_backend_arg(value: str, single_model: str | None) -> list[tuple[str, str | None]]:
+    specs: list[tuple[str, str | None]] = []
+    for item in value.split(","):
+        name, _, model = item.strip().partition(":")
+        if name not in BACKENDS:
+            print(f"Error: unknown backend '{name}'. Available: {', '.join(BACKENDS)}.",
+                  file=sys.stderr)
+            sys.exit(1)
+        if any(existing == name for existing, _ in specs):
+            print(f"Error: backend '{name}' listed twice.", file=sys.stderr)
+            sys.exit(1)
+        specs.append((name, model or None))
+    if single_model:
+        if len(specs) > 1 or specs[0][1]:
+            print("Error: with multiple backends use --backend name:model instead of --model.",
+                  file=sys.stderr)
+            sys.exit(1)
+        specs[0] = (specs[0][0], single_model)
+    return specs
+
+
+def run_one(
+    name: str, model: str | None, job_template: ReviewJob
+) -> tuple[str, str | None, str | None, str | None]:
+    job = replace(job_template, model=model)
+    try:
+        return name, model, BACKENDS[name].review(job), None
+    except BackendError as e:
+        return name, model, None, str(e)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="rr",
@@ -204,7 +240,15 @@ def main():
         help="GitHub repo for --pr when not in the repo's checkout (e.g. ledger-rocket/event-service)",
     )
     parser.add_argument(
-        "--model", default=DEFAULT_MODEL, help=f"Model to use (default: {DEFAULT_MODEL})"
+        "--backend", default="codex",
+        help="Comma-separated backends: codex, claude, opencode, api. "
+             "Per-backend model via name:model (e.g. codex:gpt-5.5,claude).",
+    )
+    parser.add_argument(
+        "--model", default=None,
+        help="Model for the single selected backend (codex/api default to gpt-5.5; "
+             "claude/opencode use the tool's own default). "
+             "With multiple backends use --backend name:model instead.",
     )
     parser.add_argument(
         "--mode",
@@ -224,7 +268,8 @@ def main():
     parser.add_argument(
         "--api",
         action="store_true",
-        help="Use OpenAI API directly instead of Codex CLI (auto-extracts referenced files)",
+        help="Alias for --backend api: OpenAI API directly, no project navigation "
+             "(auto-extracts referenced files)",
     )
     parser.add_argument(
         "--json", action="store_true",
@@ -245,16 +290,21 @@ def main():
         sys.exit(1)
 
     if args.api:
-        use_codex = False
-    elif missing_binary("codex") is None:
-        use_codex = True
-    else:
-        print(
-            "Error: codex CLI not found. Install it from https://github.com/openai/codex\n"
-            "Or use --api for direct OpenAI API mode (no project navigation, higher token usage).",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        if args.backend != "codex":
+            print(
+                "Error: --api conflicts with --backend; --api is shorthand for --backend api.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        args.backend = "api"
+
+    specs = parse_backend_arg(args.backend, args.model)
+    for name, _ in specs:
+        hint = missing_binary(name)
+        if hint:
+            print(f"Error: backend '{name}' unavailable — {hint}", file=sys.stderr)
+            sys.exit(1)
+    all_agentic = all(name != "api" for name, _ in specs)
 
     # Validate mutually exclusive sources
     explicit_sources = sum([
@@ -276,13 +326,13 @@ def main():
         content = f"=== PULL REQUEST ===\n{pr_description}\n=== END PULL REQUEST ===\n\n{diff}"
         mode = "diff"
     elif args.commit:
-        if use_codex:
-            content = None  # let codex run git show itself
+        if all_agentic:
+            content = None  # let the agentic backend run git show itself
         else:
             content = get_commit_diff(args.commit)
         mode = "diff"
     elif args.diff or args.staged:
-        if use_codex:
+        if all_agentic:
             content = None
             git_cmd = "git diff --staged" if args.staged else "git diff HEAD"
         else:
@@ -307,7 +357,7 @@ def main():
     # Read project standards docs
     docs_content = collect_docs(args.docs, args.llms)
 
-    # Run review
+    # Per-backend model is injected by run_one; the template leaves it unset.
     job = ReviewJob(
         mode=mode,
         content=content,
@@ -316,20 +366,41 @@ def main():
         commit=args.commit,
         pr=bool(args.pr),
         git_cmd=git_cmd,
-        model=args.model,
+        model=None,
         json_output=args.json,
     )
-    backend = BACKENDS["codex"] if use_codex else BACKENDS["api"]
-    try:
-        result = backend.review(job)
-    except BackendError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
+
+    with ThreadPoolExecutor(max_workers=len(specs)) as pool:
+        futures = [pool.submit(run_one, name, model, job) for name, model in specs]
+        outputs = [f.result() for f in futures]  # preserves --backend order
+
+    results = []
+    for name, model, raw, error in outputs:
+        if error is not None:
+            results.append(BackendResult(backend=name, model=model, error=error))
+        elif args.json:
+            results.append(parse_backend_output(raw, name, model))
+        else:
+            results.append(BackendResult(backend=name, model=model, raw=raw))
 
     if args.json:
-        parsed = parse_backend_output(result, "codex" if use_codex else "api", args.model)
-        print(json.dumps(to_envelope([parsed]), indent=2))
-        if args.fail_on and should_fail([parsed], args.fail_on):
-            sys.exit(2)
+        print(json.dumps(to_envelope(results), indent=2))
     else:
-        print(result)
+        for r in results:
+            # A failed backend's block (header + error) goes to stderr so piping stdout
+            # to a file captures only real reviews; successful prose stays on stdout.
+            stream = sys.stderr if r.error else sys.stdout
+            if len(results) > 1:
+                print(f"\n## {r.backend}" + (f" ({r.model})" if r.model else ""), "\n",
+                      file=stream)
+            if r.error:
+                print(f"[backend error] {r.error}", file=sys.stderr)
+            else:
+                print(r.raw)
+
+    if all(r.error for r in results):
+        sys.exit(1)
+    if any(r.error for r in results):
+        print("Warning: some backends failed; findings above are partial.", file=sys.stderr)
+    if args.fail_on and should_fail(results, args.fail_on):
+        sys.exit(2)
