@@ -1,0 +1,59 @@
+from rocket_review.models import (
+    BackendResult, extract_json, parse_backend_output, should_fail, to_envelope,
+)
+
+GOOD = '{"verdict": "needs_fixes", "summary": "s", "findings": [{"severity": "HIGH", "title": "t", "file": "a.py", "line": 3, "why": "w", "fix": "f"}]}'
+
+
+def test_extract_json_plain():
+    assert extract_json(GOOD)["verdict"] == "needs_fixes"
+
+
+def test_extract_json_fenced():
+    assert extract_json(f"preamble\n```json\n{GOOD}\n```\ntrailer")["summary"] == "s"
+
+
+def test_extract_json_prose_wrapped():
+    assert extract_json(f"Here is my review: {GOOD} Hope it helps!") is not None
+
+
+def test_extract_json_garbage_is_none():
+    assert extract_json("no json here { broken") is None
+
+
+def test_parse_normalizes_severity_and_tags_backend():
+    r = parse_backend_output(GOOD, "codex", "gpt-5.5")
+    assert not r.parse_error
+    assert r.findings[0].severity == "high"
+    assert r.findings[0].backend == "codex" and r.findings[0].model == "gpt-5.5"
+
+
+def test_parse_failure_keeps_raw():
+    r = parse_backend_output("plain text review", "claude", None)
+    assert r.parse_error and r.raw == "plain text review" and r.findings == []
+
+
+def test_should_fail_threshold():
+    r = parse_backend_output(GOOD, "codex", None)
+    assert should_fail([r], "high")
+    assert should_fail([r], "low")          # high finding trips a lower bar too
+    assert not should_fail([r], "critical")  # bar above the worst finding
+
+
+def test_should_fail_unknown_severity_is_conservative():
+    txt = GOOD.replace("HIGH", "bananas")
+    assert should_fail([parse_backend_output(txt, "codex", None)], "critical")
+
+
+def test_should_fail_closed_on_errors():
+    assert should_fail([BackendResult(backend="codex", model=None, error="boom")], "critical")
+    assert should_fail([parse_backend_output("not json", "codex", None)], "critical")
+
+
+def test_envelope_merges_and_tags():
+    r1 = parse_backend_output(GOOD, "codex", "gpt-5.5")
+    r2 = parse_backend_output(GOOD, "claude", "claude-sonnet-5")
+    env = to_envelope([r1, r2])
+    assert len(env["results"]) == 2
+    assert len(env["findings"]) == 2
+    assert {f["backend"] for f in env["findings"]} == {"codex", "claude"}
