@@ -1,6 +1,6 @@
 import pytest
 
-from rocket_review.backends import BACKENDS, api, base, claude, codex
+from rocket_review.backends import BACKENDS, api, base, claude, codex, opencode
 from rocket_review.backends.base import BackendError, ReviewJob
 
 
@@ -127,3 +127,25 @@ def test_claude_default_model_omits_flag(monkeypatch):
     monkeypatch.setattr(base, "run_command", fake_run)
     claude.review(job())
     assert "--model" not in captured["cmd"]
+
+
+def test_opencode_run_command_with_model(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"] = cmd
+        return "OPENCODE REVIEW"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    assert opencode.review(job(model="google/gemini-3-pro")) == "OPENCODE REVIEW"
+    cmd = captured["cmd"]
+    assert cmd[:2] == ["opencode", "run"]
+    assert "--agent" in cmd and "plan" in cmd
+    assert "--model" in cmd and "google/gemini-3-pro" in cmd
+    assert "Do not modify any files" in cmd[-1]
+
+
+def test_opencode_empty_output_raises(monkeypatch):
+    monkeypatch.setattr(base, "run_command", lambda cmd, *, stdin=None, timeout=900: "  ")
+    with pytest.raises(BackendError):
+        opencode.review(job())
