@@ -221,6 +221,8 @@ def run_one(
         return name, model, BACKENDS[name].review(job), None
     except BackendError as e:
         return name, model, None, str(e)
+    except Exception as e:
+        return name, model, None, f"{type(e).__name__}: {e}"
 
 
 def main():
@@ -391,8 +393,7 @@ def main():
             # to a file captures only real reviews; successful prose stays on stdout.
             stream = sys.stderr if r.error else sys.stdout
             if len(results) > 1:
-                print(f"\n## {r.backend}" + (f" ({r.model})" if r.model else ""), "\n",
-                      file=stream)
+                print(f"\n## {r.backend}{f' ({r.model})' if r.model else ''}\n", file=stream)
             if r.error:
                 print(f"[backend error] {r.error}", file=sys.stderr)
             else:

@@ -78,7 +78,8 @@ def parse_backend_output(text: str, backend: str, model: str | None) -> BackendR
     obj = extract_json(text)
     if obj is None or not isinstance(obj.get("findings"), list):
         return BackendResult(backend=backend, model=model, raw=text, parse_error=True)
-    if obj.get("verdict") not in VERDICTS:
+    verdict = str(obj.get("verdict", "")).lower()
+    if verdict not in VERDICTS:
         # A review that never reached a verdict didn't actually conclude anything;
         # treat it the same as unparsable output so the gate fails closed.
         return BackendResult(backend=backend, model=model, raw=text, parse_error=True)
@@ -98,7 +99,7 @@ def parse_backend_output(text: str, backend: str, model: str | None) -> BackendR
         ))
     return BackendResult(
         backend=backend, model=model,
-        verdict=obj.get("verdict"), summary=obj.get("summary"),
+        verdict=verdict, summary=obj.get("summary"),
         findings=findings, raw=text,
     )
 

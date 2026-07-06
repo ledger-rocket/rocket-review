@@ -136,3 +136,27 @@ def test_fanout_results_in_backend_order(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert code == 0
     assert out.index("## claude") < out.index("## codex")  # --backend order preserved
+
+
+def test_fanout_unexpected_worker_exception_surfaces_as_backend_error(monkeypatch, capsys):
+    def make_review(behavior):
+        def review(job):
+            if isinstance(behavior, Exception):
+                raise behavior
+            return behavior
+        return review
+
+    fakes = {
+        "codex": types.SimpleNamespace(review=make_review(ValueError("boom"))),
+        "claude": types.SimpleNamespace(review=make_review("OK REVIEW")),
+    }
+    monkeypatch.setattr("rocket_review.cli.BACKENDS", fakes)
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex,claude"])
+    out = capsys.readouterr()
+    assert code == 0  # not a traceback crash
+    assert "OK REVIEW" in out.out  # sibling's completed review still delivered
+    assert "ValueError: boom" in out.err  # surfaced as a backend error, not a crash
+    assert "some backends failed" in out.err
