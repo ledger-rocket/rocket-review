@@ -11,6 +11,7 @@ from urllib.parse import unquote, urldefrag
 
 from rocket_review.backends import BACKENDS, missing_binary
 from rocket_review.backends.base import BackendError, ReviewJob
+from rocket_review.models import parse_backend_output, should_fail, to_envelope
 
 DEFAULT_MODEL = BACKENDS["codex"].DEFAULT_MODEL
 
@@ -225,8 +226,23 @@ def main():
         action="store_true",
         help="Use OpenAI API directly instead of Codex CLI (auto-extracts referenced files)",
     )
+    parser.add_argument(
+        "--json", action="store_true",
+        help="Emit findings as a JSON envelope instead of prose",
+    )
+    parser.add_argument(
+        "--fail-on", choices=["critical", "high", "medium", "low"],
+        help="Exit 2 if any finding is at or above this severity (requires --json)",
+    )
 
     args = parser.parse_args()
+
+    if args.fail_on and not args.json:
+        print(
+            "Error: --fail-on requires --json (findings must be parsed to be gated).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if args.api:
         use_codex = False
@@ -301,6 +317,7 @@ def main():
         pr=bool(args.pr),
         git_cmd=git_cmd,
         model=args.model,
+        json_output=args.json,
     )
     backend = BACKENDS["codex"] if use_codex else BACKENDS["api"]
     try:
@@ -309,4 +326,10 @@ def main():
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    print(result)
+    if args.json:
+        parsed = parse_backend_output(result, "codex" if use_codex else "api", args.model)
+        print(json.dumps(to_envelope([parsed]), indent=2))
+        if args.fail_on and should_fail([parsed], args.fail_on):
+            sys.exit(2)
+    else:
+        print(result)

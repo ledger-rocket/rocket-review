@@ -17,7 +17,7 @@ def review(job: ReviewJob) -> str:
     if job.docs_content:
         content = (f"=== PROJECT STANDARDS ===\n{job.docs_content}\n"
                    f"=== END PROJECT STANDARDS ===\n\n{content}")
-    system_prompt = get_prompt(job.mode, job.docs_content)
+    system_prompt = get_prompt(job.mode, job.docs_content, job.json_output)
     return _call_openai(content, system_prompt, job.model or DEFAULT_MODEL, job.extra)
 
 

@@ -70,3 +70,30 @@ def test_api_missing_key_raises_backend_error(monkeypatch):
     monkeypatch.setattr(api, "_load_env_file", lambda: None)
     with pytest.raises(BackendError):
         api._call_openai("content", "instructions", "gpt-test", None)
+
+
+def test_codex_json_mode_passes_output_schema(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"] = cmd
+        out = cmd[cmd.index("-o") + 1]
+        with open(out, "w") as f:
+            f.write('{"verdict": "approve", "summary": "s", "findings": []}')
+        return ""
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    codex.review(job(json_output=True))
+    assert "--output-schema" in captured["cmd"]
+
+
+def test_api_json_mode_adds_output_override_to_system_prompt(monkeypatch):
+    captured = {}
+
+    def fake_call(content, system_prompt, model, extra):
+        captured["system_prompt"] = system_prompt
+        return "ok"
+
+    monkeypatch.setattr(api, "_call_openai", fake_call)
+    api.review(job(json_output=True))
+    assert "OUTPUT FORMAT OVERRIDE" in captured["system_prompt"]

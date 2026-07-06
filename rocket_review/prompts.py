@@ -165,8 +165,29 @@ The reviewer has provided project standards documentation below. You MUST:
 - Treat documented project conventions as authoritative
 """
 
+JSON_OUTPUT_ADDENDUM = """\
+OUTPUT FORMAT OVERRIDE
+Ignore the output format instructions above. Output ONLY a single JSON object — no prose
+before or after it, no markdown fence — matching exactly this shape:
+{
+  "verdict": "approve" | "needs_fixes" | "blocker",
+  "summary": "recap in at most 200 words",
+  "findings": [
+    {
+      "severity": "critical" | "high" | "medium" | "low",
+      "title": "one-line issue statement",
+      "file": "path/to/file or null",
+      "line": 123 or null,
+      "why": "why it matters",
+      "fix": "concrete suggested fix, copy-pasteable when possible"
+    }
+  ]
+}
+An empty findings array with verdict "approve" is a valid review.
+"""
 
-def get_prompt(mode: str, docs_content: str | None = None) -> str:
+
+def get_prompt(mode: str, docs_content: str | None = None, json_output: bool = False) -> str:
     prompts = {
         "plan": PLAN_REVIEW_PROMPT,
         "code": CODE_REVIEW_PROMPT,
@@ -175,12 +196,14 @@ def get_prompt(mode: str, docs_content: str | None = None) -> str:
     prompt = prompts[mode]
     if docs_content:
         prompt += PROJECT_STANDARDS_ADDENDUM
+    if json_output:
+        prompt += JSON_OUTPUT_ADDENDUM
     return prompt
 
 
 def build_agent_prompt(job: ReviewJob) -> str:
     """Assemble the instruction prompt for an agentic (repo-navigating) backend."""
-    instructions = get_prompt(job.mode, job.docs_content)
+    instructions = get_prompt(job.mode, job.docs_content, job.json_output)
 
     parts = [instructions.strip()]
 

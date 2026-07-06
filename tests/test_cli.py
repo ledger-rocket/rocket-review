@@ -1,4 +1,19 @@
-from rocket_review.cli import detect_mode
+import pytest
+
+from rocket_review.cli import detect_mode, main
+
+
+def run_cli(monkeypatch, argv):
+    monkeypatch.setattr("sys.argv", ["rr", *argv])
+    with pytest.raises(SystemExit) as e:
+        main()
+    return e.value.code
+
+
+def test_fail_on_requires_json(monkeypatch, capsys):
+    code = run_cli(monkeypatch, ["--diff", "--fail-on", "high"])
+    assert code == 1
+    assert "--fail-on requires --json" in capsys.readouterr().err
 
 
 def test_detect_mode_plan_for_markdown():
