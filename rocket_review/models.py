@@ -54,6 +54,7 @@ class BackendResult:
     raw: str = ""
     error: str | None = None
     parse_error: bool = False
+    raw_file: str | None = None
 
 
 def extract_json(text: str) -> dict | None:
@@ -121,8 +122,24 @@ def should_fail(results: list[BackendResult], threshold: str) -> bool:
     )
 
 
-def to_envelope(results: list[BackendResult]) -> dict:
+def to_envelope(results: list[BackendResult], fail_on: str | None = None) -> dict:
+    findings = [f for r in results for f in r.findings]
+    by_severity = {s: 0 for s in SEVERITIES}
+    for f in findings:
+        by_severity[f.severity] = by_severity.get(f.severity, 0) + 1
+    worst = min(findings, key=lambda f: _severity_rank(f.severity)).severity if findings else None
+    summary = {
+        "findings_total": len(findings),
+        "by_severity": by_severity,
+        "worst_severity": worst,
+        "backends_total": len(results),
+        "backends_errored": sum(1 for r in results if r.error),
+        "backends_parse_failed": sum(1 for r in results if r.parse_error),
+        "verdicts": [{"backend": r.backend, "verdict": r.verdict} for r in results],
+        "gate": ({"threshold": fail_on, "tripped": should_fail(results, fail_on)} if fail_on else None),
+    }
     return {
+        "summary": summary,
         "results": [asdict(r) for r in results],
-        "findings": [asdict(f) for r in results for f in r.findings],
+        "findings": [asdict(f) for f in findings],
     }
