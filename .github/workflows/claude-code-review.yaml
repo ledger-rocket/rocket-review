@@ -1,0 +1,25 @@
+# Thin caller — all review logic lives in ledger-rocket/.github-private
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  checks: read
+  id-token: write
+
+jobs:
+  claude-review:
+    uses: ledger-rocket/.github-private/.github/workflows/claude-code-review.yaml@main
+    with:
+      language: python
+      doc-files-to-read: 'README.md'
+    secrets:
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

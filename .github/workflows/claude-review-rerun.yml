@@ -1,0 +1,44 @@
+# Thin caller — all logic lives in ledger-rocket/.github-private.
+#
+# An `@claude` PR comment re-runs the existing Claude review on the same commit
+# (no empty commit needed to clear a stale REQUEST_CHANGES).
+
+name: Claude Review Rerun
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+# Serialize re-runs per PR: a burst of @claude comments queue (cancel-in-progress
+# is false) and the later runs no-op via the dispatcher's in-progress guard, so a
+# burst yields a single re-run, not a stampede of `gh run rerun` calls.
+concurrency:
+  group: claude-rerun-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+# GITHUB_TOKEN does the same-repo re-run + fallback comment; the App token
+# (minted in the reusable) only checks out the shared scripts.
+permissions:
+  contents: read
+  actions: write
+  pull-requests: write
+
+jobs:
+  rerun:
+    # Gate at the caller: an `@claude` comment from a repo insider, on a PR.
+    # This keeps the reusable (and the App token it mints) off every other PR
+    # comment. The reusable + rerun-review.sh repeat these checks as defense in
+    # depth. (Hardcodes `@claude`; if a repo overrides the reusable `trigger`
+    # input, update this condition to match.)
+    if: >
+      (github.event_name == 'pull_request_review_comment' ||
+       github.event.issue.pull_request != null) &&
+      contains(github.event.comment.body, '@claude') &&
+      (github.event.comment.author_association == 'OWNER' ||
+       github.event.comment.author_association == 'MEMBER' ||
+       github.event.comment.author_association == 'COLLABORATOR')
+    uses: ledger-rocket/.github-private/.github/workflows/claude-review-rerun.yml@main
+    secrets:
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
