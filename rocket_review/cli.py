@@ -6,6 +6,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -19,6 +20,42 @@ from rocket_review.models import (
     should_fail,
     to_envelope,
 )
+
+RAW_TRUNCATE_LIMIT = 4000
+
+
+def truncate_raw(results: list[BackendResult]) -> None:
+    """Spill oversized raw output to a temp file, leaving a pointer marker inline.
+
+    Agent-ergonomic (axi P3): truncate, never omit — the full text stays reachable
+    on disk and via --full, so a bounded envelope never loses recoverable context.
+    """
+    for r in results:
+        if len(r.raw) <= RAW_TRUNCATE_LIMIT:
+            continue
+        total = len(r.raw)
+        head = r.raw[:RAW_TRUNCATE_LIMIT]
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", delete=False, prefix="rr-raw-", suffix=".txt"
+            ) as tf:
+                tf.write(r.raw)
+                path = tf.name
+        except OSError as e:
+            # A read-only/full TMPDIR must not sink an otherwise-good review: still
+            # truncate (the envelope stays bounded) and note why the spill failed.
+            r.raw = (
+                head
+                + f"\n(truncated, {total} chars total; could not write full text: {e}; "
+                "use --full to inline)"
+            )
+            r.raw_file = None
+            continue
+        r.raw = (
+            head
+            + f"\n(truncated, {total} chars total — full text: {path}; use --full to inline)"
+        )
+        r.raw_file = path
 
 
 def read_files(paths: list[str]) -> str:
@@ -229,6 +266,16 @@ def main():
     parser = argparse.ArgumentParser(
         prog="rr",
         description="rocket-review: get GPT review of plans, code, or diffs",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  rr plan.md                             # review a plan or design doc\n"
+            "  rr --diff                              # review uncommitted changes (git diff HEAD)\n"
+            "  rr --staged --json --fail-on high      # gate a commit on high+ findings (exit 2)\n"
+            "  rr --diff --backend codex,claude       # cross-model review, one pass per backend\n"
+            "  rr src/auth.py --docs                  # review a file against project standards\n"
+            "  git diff | rr                          # review a diff piped on stdin\n"
+        ),
     )
     parser.add_argument("files", nargs="*", help="Files to review")
     parser.add_argument("--diff", action="store_true", help="Review git diff (HEAD)")
@@ -280,6 +327,10 @@ def main():
     parser.add_argument(
         "--fail-on", choices=["critical", "high", "medium", "low"],
         help="Exit 2 if any finding is at or above this severity (requires --json)",
+    )
+    parser.add_argument(
+        "--full", action="store_true",
+        help="Inline full backend output in the --json envelope (skip truncation)",
     )
 
     args = parser.parse_args()
@@ -386,7 +437,9 @@ def main():
             results.append(BackendResult(backend=name, model=model, raw=raw))
 
     if args.json:
-        print(json.dumps(to_envelope(results), indent=2))
+        if not args.full:
+            truncate_raw(results)
+        print(json.dumps(to_envelope(results, fail_on=args.fail_on), indent=2))
     else:
         for r in results:
             # A failed backend's block (header + error) goes to stderr so piping stdout
@@ -398,6 +451,15 @@ def main():
                 print(f"[backend error] {r.error}", file=sys.stderr)
             else:
                 print(r.raw)
+        # Next-step hint on stderr, not stdout (axi P9 places it on stdout): keeps a
+        # piped `rr --diff > review.txt` clean. Text-mode success only — never in --json
+        # (envelope purity), never when every backend errored (handled by the exit below).
+        if not all(r.error for r in results):
+            print(
+                "help: rr --diff --json --fail-on high (CI gate) | "
+                "rr --diff --backend codex,claude (cross-model)",
+                file=sys.stderr,
+            )
 
     if all(r.error for r in results):
         sys.exit(1)

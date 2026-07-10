@@ -1,9 +1,18 @@
+import json
 import types
 
 import pytest
 
 from rocket_review.backends.base import BackendError
-from rocket_review.cli import detect_mode, main, parse_backend_arg
+from rocket_review.cli import RAW_TRUNCATE_LIMIT, detect_mode, main, parse_backend_arg
+
+TEXT_HINT = "help: rr --diff --json --fail-on high (CI gate)"
+
+REVIEW_JSON = (
+    '{{"verdict": "needs_fixes", "summary": "s", "findings": '
+    '[{{"severity": "high", "title": "t", "file": null, "line": null, '
+    '"why": "w", "fix": "{body}"}}]}}'
+)
 
 
 def run_cli(monkeypatch, argv):
@@ -160,3 +169,88 @@ def test_fanout_unexpected_worker_exception_surfaces_as_backend_error(monkeypatc
     assert "OK REVIEW" in out.out  # sibling's completed review still delivered
     assert "ValueError: boom" in out.err  # surfaced as a backend error, not a crash
     assert "some backends failed" in out.err
+
+
+def _json_envelope(monkeypatch, capsys, review_output, extra_args=()):
+    patch_backends(monkeypatch, {"codex": review_output})
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex", "--json", *extra_args])
+    return code, json.loads(capsys.readouterr().out)
+
+
+def test_json_truncates_long_raw_and_writes_full_to_file(monkeypatch, capsys):
+    from pathlib import Path
+
+    long = REVIEW_JSON.format(body="x" * 5000)
+    assert len(long) > RAW_TRUNCATE_LIMIT
+    code, env = _json_envelope(monkeypatch, capsys, long)
+    assert code == 0
+    r = env["results"][0]
+    assert "(truncated," in r["raw"] and "use --full to inline" in r["raw"]
+    assert len(r["raw"]) < len(long)
+    assert Path(r["raw_file"]).read_text() == long  # full original preserved on disk
+
+
+def test_json_short_raw_untouched(monkeypatch, capsys):
+    short = REVIEW_JSON.format(body="short fix")
+    assert len(short) <= RAW_TRUNCATE_LIMIT
+    code, env = _json_envelope(monkeypatch, capsys, short)
+    r = env["results"][0]
+    assert r["raw"] == short
+    assert r["raw_file"] is None
+
+
+def test_json_truncation_survives_tempfile_failure(monkeypatch, capsys):
+    def boom(*a, **k):
+        raise OSError("read-only fs")
+
+    monkeypatch.setattr("rocket_review.cli.tempfile.NamedTemporaryFile", boom)
+    long = REVIEW_JSON.format(body="x" * 5000)
+    code, env = _json_envelope(monkeypatch, capsys, long)
+    assert code == 0  # a full/read-only TMPDIR must not crash a good review
+    r = env["results"][0]
+    assert "could not write full text" in r["raw"]
+    assert r["raw_file"] is None
+    assert len(r["raw"]) < len(long)
+
+
+def test_json_full_flag_inlines_everything(monkeypatch, capsys):
+    long = REVIEW_JSON.format(body="x" * 5000)
+    code, env = _json_envelope(monkeypatch, capsys, long, extra_args=["--full"])
+    r = env["results"][0]
+    assert r["raw"] == long
+    assert r["raw_file"] is None
+    assert "(truncated" not in r["raw"]
+
+
+def test_help_shows_examples(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["rr", "--help"])
+    with pytest.raises(SystemExit) as e:
+        main()
+    assert e.value.code == 0
+    assert "examples:" in capsys.readouterr().out
+
+
+def test_text_mode_prints_stderr_hint(monkeypatch, capsys):
+    patch_backends(monkeypatch, {"codex": "PROSE REVIEW"})
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex"])
+    out = capsys.readouterr()
+    assert code == 0
+    assert TEXT_HINT in out.err  # next-step hint on stderr
+    assert TEXT_HINT not in out.out  # never pollutes piped stdout
+
+
+def test_json_mode_omits_hint(monkeypatch, capsys):
+    review = REVIEW_JSON.format(body="f")
+    patch_backends(monkeypatch, {"codex": review})
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex", "--json"])
+    out = capsys.readouterr()
+    assert code == 0
+    assert TEXT_HINT not in out.err and TEXT_HINT not in out.out
+
+
+def test_text_mode_all_fail_omits_hint(monkeypatch, capsys):
+    patch_backends(monkeypatch, {"codex": BackendError("codex boom")})
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex"])
+    out = capsys.readouterr()
+    assert code == 1
+    assert TEXT_HINT not in out.err  # no next-step hint on the error path

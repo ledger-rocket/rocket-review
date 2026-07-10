@@ -103,7 +103,13 @@ rr --staged --json --fail-on high && git commit   # block the commit on high+ fi
 ```
 
 Every finding carries `severity, title, file, line, why, fix, backend, model`.
-Parse failures and backend errors fail the gate closed.
+The envelope leads with a `summary` block — `findings_total`, per-severity counts
+(explicit zeros for absent severities), `worst_severity`, per-backend verdicts, and
+the `gate` result when `--fail-on` is set — so an agent gets the counts and the
+gate answer without parsing the findings array. Backend output over 4000 chars is
+spilled to a temp file, with `raw` holding a truncation marker and `raw_file` its
+path; pass `--full` to inline the untruncated output instead. Parse failures and
+backend errors fail the gate closed.
 
 ## Review modes
 
