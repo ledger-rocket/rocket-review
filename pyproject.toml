@@ -5,11 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rocket-review"
 version = "0.1.0"
-description = "CLI tool to get GPT review of plans, code, or diffs"
+description = "Second-opinion code and plan reviews from Codex, Claude Code, opencode, or the OpenAI API — one CLI"
 requires-python = ">=3.13"
 license = "Apache-2.0"
 readme = "README.md"
+keywords = ["code-review", "llm", "ai", "cli", "developer-tools"]
 dependencies = ["openai>=1.68.0"]
+
+[project.urls]
+Repository = "https://github.com/ledger-rocket/rocket-review"
+Issues = "https://github.com/ledger-rocket/rocket-review/issues"
 
 [project.scripts]
 rr = "rocket_review.cli:main"
