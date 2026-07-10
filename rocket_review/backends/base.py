@@ -25,8 +25,11 @@ class ReviewJob:
 
 def run_command(cmd: list[str], *, stdin: str | None = None, timeout: int = TIMEOUT) -> str:
     try:
+        # errors="replace": backend output may quote non-UTF8 bytes from reviewed
+        # files; a stray byte must not turn a finished review into a decode crash.
         result = subprocess.run(
-            cmd, input=stdin, capture_output=True, text=True, timeout=timeout,
+            cmd, input=stdin, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         raise BackendError(f"{cmd[0]} timed out after {timeout // 60} minutes")
@@ -42,7 +45,7 @@ def run_command(cmd: list[str], *, stdin: str | None = None, timeout: int = TIME
 def write_prompt_file(prompt: str) -> Path:
     # File indirection instead of argv keeps large prompts under ARG_MAX.
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".md", delete=False, prefix="rr-prompt-",
+        mode="w", suffix=".md", delete=False, prefix="rr-prompt-", encoding="utf-8",
     ) as f:
         f.write(prompt)
         return Path(f.name)

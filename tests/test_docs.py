@@ -68,3 +68,16 @@ def test_collect_docs_dedupes_repeated_paths(tmp_path, monkeypatch):
 
 def test_collect_docs_nothing_given_is_none():
     assert collect_docs(None, None) is None
+
+
+def test_read_doc_blocks_sibling_prefix_escape(tmp_path, capsys):
+    project = tmp_path / "proj"
+    sibling = tmp_path / "proj-secret"
+    project.mkdir()
+    sibling.mkdir()
+    (sibling / "leak.md").write_text("s3cret")
+    llms = project / "llms.txt"
+    llms.write_text("[x](../proj-secret/leak.md)")
+    out = read_doc_with_links(llms)
+    assert "s3cret" not in out  # /proj-secret must not pass as inside /proj
+    assert "outside project" in capsys.readouterr().err

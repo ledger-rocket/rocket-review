@@ -27,7 +27,11 @@ def _load_env_file() -> None:
         return
     for candidate in [Path.cwd() / ".env", Path.home() / ".env"]:
         if candidate.is_file():
-            for line in candidate.read_text().splitlines():
+            try:
+                lines = candidate.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            for line in lines:
                 line = line.strip()
                 if line.startswith("#") or "=" not in line:
                     continue
@@ -42,7 +46,7 @@ def _get_repo_root() -> Path | None:
     """Get the git repo root, or None if not in a repo."""
     result = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if result.returncode == 0:
         return Path(result.stdout.strip()).resolve()
@@ -63,13 +67,14 @@ def extract_referenced_files(text: str, max_size: int = 100_000) -> str:
     seen = set()
     for c in sorted(candidates):
         p = Path(c).resolve()
-        # Only include files within the repo/cwd
-        if not str(p).startswith(str(repo_root)):
+        # Only include files within the repo/cwd. is_relative_to, not a string-prefix
+        # check: /repo-sibling must not pass as inside /repo.
+        if not p.is_relative_to(repo_root):
             continue
         if p.is_file() and p not in seen:
             try:
                 if p.stat().st_size <= max_size:
-                    parts.append(f"=== {c} ===\n{p.read_text()}")
+                    parts.append(f"=== {c} ===\n{p.read_text(encoding='utf-8')}")
                     seen.add(p)
             except (OSError, UnicodeDecodeError):
                 continue

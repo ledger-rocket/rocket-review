@@ -1,10 +1,20 @@
 import json
+import subprocess
+import sys
 import types
 
 import pytest
 
 from rocket_review.backends.base import BackendError
-from rocket_review.cli import RAW_TRUNCATE_LIMIT, detect_mode, main, parse_backend_arg
+from rocket_review.cli import (
+    RAW_TRUNCATE_LIMIT,
+    detect_mode,
+    ensure_commit_exists,
+    ensure_diff_exists,
+    main,
+    parse_backend_arg,
+    run_capture,
+)
 
 TEXT_HINT = "help: rr --diff --json --fail-on high (CI gate)"
 
@@ -45,6 +55,7 @@ def patch_backends(monkeypatch, reviews):
     monkeypatch.setattr("rocket_review.cli.BACKENDS", fakes)
     monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
     monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
 
 
 def test_fail_on_requires_json(monkeypatch, capsys):
@@ -162,6 +173,7 @@ def test_fanout_unexpected_worker_exception_surfaces_as_backend_error(monkeypatc
     monkeypatch.setattr("rocket_review.cli.BACKENDS", fakes)
     monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
     monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
 
     code = run_main(monkeypatch, ["--diff", "--backend", "codex,claude"])
     out = capsys.readouterr()
@@ -254,3 +266,73 @@ def test_text_mode_all_fail_omits_hint(monkeypatch, capsys):
     out = capsys.readouterr()
     assert code == 1
     assert TEXT_HINT not in out.err  # no next-step hint on the error path
+
+
+def test_diff_and_staged_conflict(monkeypatch, capsys):
+    code = run_cli(monkeypatch, ["--diff", "--staged"])
+    assert code == 1
+    assert "only one of --diff or --staged" in capsys.readouterr().err
+
+
+def test_full_requires_json(monkeypatch, capsys):
+    code = run_cli(monkeypatch, ["--diff", "--full"])
+    assert code == 1
+    assert "--full requires --json" in capsys.readouterr().err
+
+
+def test_repo_requires_pr(monkeypatch, capsys):
+    code = run_cli(monkeypatch, ["--diff", "--repo", "acme/api"])
+    assert code == 1
+    assert "--repo only applies with --pr" in capsys.readouterr().err
+
+
+def _git_repo(tmp_path):
+    def git(*args):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t.io", "-c", "user.name=t",
+             "-c", "commit.gpgsign=false", *args],
+            cwd=tmp_path, check=True, capture_output=True,
+        )
+    (tmp_path / "f.txt").write_text("one\n")
+    git("init", "-q")
+    git("add", "f.txt")
+    git("commit", "-q", "-m", "init")
+
+
+def test_ensure_diff_exists_clean_tree_errors(tmp_path, monkeypatch, capsys):
+    _git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as e:
+        ensure_diff_exists(False)
+    assert e.value.code == 1
+    assert "no uncommitted changes" in capsys.readouterr().err
+
+
+def test_ensure_diff_exists_dirty_tree_passes(tmp_path, monkeypatch):
+    _git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "f.txt").write_text("two\n")
+    ensure_diff_exists(False)  # must not exit
+
+
+def test_ensure_commit_exists_unknown_sha_errors(tmp_path, monkeypatch, capsys):
+    _git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        ensure_commit_exists("deadbeef")
+    assert "unknown commit" in capsys.readouterr().err
+
+
+def test_ensure_commit_exists_head_passes(tmp_path, monkeypatch):
+    _git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    ensure_commit_exists("HEAD")  # must not exit
+
+
+def test_run_capture_replaces_non_utf8_output():
+    result = run_capture([
+        sys.executable, "-c",
+        "import sys; sys.stdout.buffer.write(b'ok \\xff end')",
+    ])
+    assert result.returncode == 0
+    assert "ok" in result.stdout and "end" in result.stdout  # no UnicodeDecodeError
