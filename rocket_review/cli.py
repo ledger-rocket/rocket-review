@@ -23,6 +23,29 @@ from rocket_review.models import (
 
 RAW_TRUNCATE_LIMIT = 4000
 
+# Bounds git/gh preflight calls so a hung credential helper or network fetch
+# can't stall a CI gate indefinitely; backend runs have their own longer timeout.
+SUBPROCESS_TIMEOUT = 300
+
+
+def run_capture(cmd: list[str]) -> subprocess.CompletedProcess:
+    """Run a git/gh command with a timeout and total decoding.
+
+    Diffs legitimately contain non-UTF8 bytes (files in other encodings), so
+    decode with errors="replace" rather than letting a stray byte raise.
+    """
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=SUBPROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"Error: {' '.join(cmd)} timed out after {SUBPROCESS_TIMEOUT}s", file=sys.stderr)
+        sys.exit(1)
+    except FileNotFoundError:
+        print(f"Error: {cmd[0]} not found on PATH", file=sys.stderr)
+        sys.exit(1)
+
 
 def truncate_raw(results: list[BackendResult]) -> None:
     """Spill oversized raw output to a temp file, leaving a pointer marker inline.
@@ -37,7 +60,7 @@ def truncate_raw(results: list[BackendResult]) -> None:
         head = r.raw[:RAW_TRUNCATE_LIMIT]
         try:
             with tempfile.NamedTemporaryFile(
-                mode="w", delete=False, prefix="rr-raw-", suffix=".txt"
+                mode="w", delete=False, prefix="rr-raw-", suffix=".txt", encoding="utf-8"
             ) as tf:
                 tf.write(r.raw)
                 path = tf.name
@@ -66,7 +89,7 @@ def read_files(paths: list[str]) -> str:
             print(f"Error: not a file: {p}", file=sys.stderr)
             sys.exit(1)
         try:
-            text = path.read_text()
+            text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
             print(f"Error: could not read {p}: {e}", file=sys.stderr)
             sys.exit(1)
@@ -81,7 +104,11 @@ def read_doc_with_links(doc_path: Path) -> str:
         sys.exit(1)
 
     base_dir = doc_path.parent.resolve()
-    doc_text = doc_path.read_text()
+    try:
+        doc_text = doc_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"Error: could not read {doc_path}: {e}", file=sys.stderr)
+        sys.exit(1)
     parts = [f"--- {doc_path.name} ---\n{doc_text}"]
 
     links = re.findall(r"\[[^\]]*\]\(([^)]+)\)", doc_text)
@@ -92,13 +119,14 @@ def read_doc_with_links(doc_path: Path) -> str:
         if not link:
             continue
         linked_path = (base_dir / link).resolve()
-        # Prevent path traversal outside the doc's directory
-        if not str(linked_path).startswith(str(base_dir)):
+        # Prevent path traversal outside the doc's directory. is_relative_to, not a
+        # string-prefix check: /a/b-sibling must not pass as inside /a/b.
+        if not linked_path.is_relative_to(base_dir):
             print(f"Warning: skipping link outside project: {raw_link}", file=sys.stderr)
             continue
         if linked_path.is_file():
             try:
-                text = linked_path.read_text()
+                text = linked_path.read_text(encoding="utf-8")
                 parts.append(f"--- {link} ---\n{text}")
             except (OSError, UnicodeDecodeError) as e:
                 print(f"Warning: could not read {link}: {e}", file=sys.stderr)
@@ -144,7 +172,7 @@ def get_diff(staged: bool) -> str:
         cmd.append("--staged")
     else:
         cmd.append("HEAD")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = run_capture(cmd)
     if result.returncode != 0:
         print(f"Error: {' '.join(cmd)} failed: {result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
@@ -156,8 +184,31 @@ def get_diff(staged: bool) -> str:
     return diff
 
 
+def ensure_diff_exists(staged: bool) -> None:
+    """Preflight for agentic backends: fail fast on an empty diff instead of
+    launching a multi-minute backend run that reviews nothing."""
+    cmd = ["git", "diff", "--quiet"]
+    cmd.append("--staged" if staged else "HEAD")
+    result = run_capture(cmd)
+    if result.returncode == 0:
+        label = "staged changes" if staged else "uncommitted changes"
+        print(f"Error: no {label} found.", file=sys.stderr)
+        sys.exit(1)
+    if result.returncode != 1:
+        print(f"Error: {' '.join(cmd)} failed: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+
+
+def ensure_commit_exists(sha: str) -> None:
+    """Preflight for agentic backends: verify the SHA before delegating `git show`."""
+    result = run_capture(["git", "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"])
+    if result.returncode != 0:
+        print(f"Error: unknown commit {sha}.", file=sys.stderr)
+        sys.exit(1)
+
+
 def get_commit_diff(sha: str) -> str:
-    result = subprocess.run(["git", "show", sha], capture_output=True, text=True)
+    result = run_capture(["git", "show", sha])
     if result.returncode != 0:
         print(f"Error: git show {sha} failed: {result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
@@ -176,23 +227,23 @@ def get_pr_content(pr_ref: str, repo: str | None = None) -> tuple[str, str]:
 
     repo_args = ["--repo", repo] if repo else []
 
-    view_result = subprocess.run(
+    view_result = run_capture(
         ["gh", "pr", "view", pr_ref, "--json", "title,body,number,url"] + repo_args,
-        capture_output=True, text=True,
     )
     if view_result.returncode != 0:
         print(f"Error: gh pr view failed: {view_result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
 
-    pr_info = json.loads(view_result.stdout)
+    try:
+        pr_info = json.loads(view_result.stdout)
+    except json.JSONDecodeError:
+        print("Error: could not parse gh pr view output as JSON.", file=sys.stderr)
+        sys.exit(1)
     description = f"PR #{pr_info['number']}: {pr_info['title']}\n{pr_info.get('url', '')}"
     if pr_info.get("body"):
         description += f"\n\n{pr_info['body']}"
 
-    diff_result = subprocess.run(
-        ["gh", "pr", "diff", pr_ref] + repo_args,
-        capture_output=True, text=True,
-    )
+    diff_result = run_capture(["gh", "pr", "diff", pr_ref] + repo_args)
     if diff_result.returncode != 0:
         print(f"Error: gh pr diff failed: {diff_result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
@@ -342,6 +393,19 @@ def main():
         )
         sys.exit(1)
 
+    if args.full and not args.json:
+        print("Error: --full requires --json (text mode never truncates).", file=sys.stderr)
+        sys.exit(1)
+
+    if args.repo and not args.pr:
+        print("Error: --repo only applies with --pr.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.diff and args.staged:
+        # Not silently staged-only: the user likely expects both sets reviewed.
+        print("Error: specify only one of --diff or --staged.", file=sys.stderr)
+        sys.exit(1)
+
     if args.api:
         if args.backend != "codex":
             print(
@@ -380,12 +444,14 @@ def main():
         mode = "diff"
     elif args.commit:
         if all_agentic:
+            ensure_commit_exists(args.commit)
             content = None  # let the agentic backend run git show itself
         else:
             content = get_commit_diff(args.commit)
         mode = "diff"
     elif args.diff or args.staged:
         if all_agentic:
+            ensure_diff_exists(args.staged)
             content = None
             git_cmd = "git diff --staged" if args.staged else "git diff HEAD"
         else:
@@ -395,6 +461,12 @@ def main():
         content = read_files(args.files)
         mode = detect_mode(args.files)
     elif not sys.stdin.isatty():
+        # Piped diffs can carry non-UTF8 bytes (files in other encodings); decode
+        # with replacement instead of crashing mid-pipe.
+        try:
+            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass  # non-reconfigurable stdin (e.g. a test harness shim)
         content = sys.stdin.read().strip()
         if not content:
             print("Error: empty input from stdin.", file=sys.stderr)

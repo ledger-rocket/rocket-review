@@ -149,3 +149,27 @@ def test_opencode_empty_output_raises(monkeypatch):
     monkeypatch.setattr(base, "run_command", lambda cmd, *, stdin=None, timeout=900: "  ")
     with pytest.raises(BackendError):
         opencode.review(job())
+
+
+def test_extract_referenced_files_blocks_sibling_prefix_escape(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    sibling = tmp_path / "repo-secret"
+    repo.mkdir()
+    sibling.mkdir()
+    (sibling / "leak.py").write_text("SECRET = 1")
+    (repo / "ok.py").write_text("OK = 1")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(api, "_get_repo_root", lambda: repo.resolve())
+    out = api.extract_referenced_files("see `ok.py` and `../repo-secret/leak.py`")
+    assert "OK = 1" in out
+    assert "SECRET" not in out  # /repo-secret must not pass as inside /repo
+
+
+def test_run_command_replaces_non_utf8_output():
+    import sys
+
+    out = base.run_command([
+        sys.executable, "-c",
+        "import sys; sys.stdout.buffer.write(b'review \\xff done')",
+    ])
+    assert "review" in out and "done" in out  # no UnicodeDecodeError
