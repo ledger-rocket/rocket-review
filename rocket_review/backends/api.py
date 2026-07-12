@@ -9,7 +9,8 @@ from rocket_review.prompts import get_prompt
 NAME = "api"
 BINARY = None  # SDK, not a CLI
 INSTALL_HINT = "set OPENAI_API_KEY (or put it in .env)"
-DEFAULT_MODEL = "gpt-5.5"
+# Canonical API model name; _resolve_model maps it to the latest dated snapshot.
+DEFAULT_MODEL = "gpt-5.6"
 
 
 def review(job: ReviewJob) -> str:
@@ -18,7 +19,7 @@ def review(job: ReviewJob) -> str:
         content = (f"=== PROJECT STANDARDS ===\n{job.docs_content}\n"
                    f"=== END PROJECT STANDARDS ===\n\n{content}")
     system_prompt = get_prompt(job.mode, job.docs_content, job.json_output)
-    return _call_openai(content, system_prompt, job.model or DEFAULT_MODEL, job.extra)
+    return _call_openai(content, system_prompt, job.model or DEFAULT_MODEL, job.extra, job.effort)
 
 
 def _load_env_file() -> None:
@@ -95,7 +96,9 @@ def _resolve_model(client, model: str) -> str:
     return candidates[-1] if candidates else model
 
 
-def _call_openai(content: str, system_prompt: str, model: str, extra: str | None) -> str:
+def _call_openai(
+    content: str, system_prompt: str, model: str, extra: str | None, effort: str | None = None
+) -> str:
     _load_env_file()
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -115,11 +118,15 @@ def _call_openai(content: str, system_prompt: str, model: str, extra: str | None
     if extra:
         user_message = f"Additional review instructions: {extra}\n\n---\n\n{user_message}"
 
+    kwargs = {}
+    if effort:
+        kwargs["reasoning"] = {"effort": effort}
     try:
         response = client.responses.create(
             model=model,
             instructions=system_prompt,
             input=user_message,
+            **kwargs,
         )
     except Exception as exc:
         raise BackendError(f"OpenAI API call failed: {exc}")
