@@ -10,7 +10,9 @@ from rocket_review.prompts import build_agent_prompt
 NAME = "codex"
 BINARY = "codex"
 INSTALL_HINT = "npm install -g @openai/codex (https://github.com/openai/codex)"
-DEFAULT_MODEL = "gpt-5.5"
+# The ChatGPT-account-accessible 5.6 variant; plain gpt-5.6 is API-key-only
+# (codex with a ChatGPT account rejects gpt-5.6 and gpt-5.6-codex).
+DEFAULT_MODEL = "gpt-5.6-sol"
 
 
 def review(job: ReviewJob) -> str:
@@ -21,6 +23,8 @@ def review(job: ReviewJob) -> str:
     try:
         cmd = ["codex", "exec", "-s", "read-only", "-o", str(outfile),
                "-m", job.model or DEFAULT_MODEL]
+        if job.effort:
+            cmd += ["-c", f"model_reasoning_effort={job.effort}"]
         if job.json_output:
             with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as sf:
                 json.dump(REVIEW_SCHEMA, sf)

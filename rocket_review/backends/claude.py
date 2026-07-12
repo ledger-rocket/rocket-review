@@ -18,6 +18,8 @@ def review(job: ReviewJob) -> str:
     cmd = ["claude", "-p", "--allowedTools", READ_ONLY_TOOLS]
     if job.model:
         cmd += ["--model", job.model]
+    if job.effort:
+        cmd += ["--effort", job.effort]
     # Prompt goes via stdin: no ARG_MAX concern and no temp file needed.
     output = base.run_command(cmd, stdin=build_agent_prompt(job)).strip()
     if not output:

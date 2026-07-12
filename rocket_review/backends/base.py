@@ -21,6 +21,9 @@ class ReviewJob:
     git_cmd: str | None
     model: str | None
     json_output: bool = False
+    # Free-form reasoning-effort string passed through to the backend; each backend
+    # maps it to its own flag and lets invalid values fail loudly downstream.
+    effort: str | None = None
 
 
 def run_command(cmd: list[str], *, stdin: str | None = None, timeout: int = TIMEOUT) -> str:

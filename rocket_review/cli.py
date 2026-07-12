@@ -342,12 +342,12 @@ def main():
     parser.add_argument(
         "--backend", default="codex",
         help="Comma-separated backends: codex, claude, opencode, api. "
-             "Per-backend model via name:model (e.g. codex:gpt-5.5,claude).",
+             "Per-backend model via name:model (e.g. codex:gpt-5.6-sol,claude).",
     )
     parser.add_argument(
         "--model", default=None,
-        help="Model for the single selected backend (codex/api default to gpt-5.5; "
-             "claude/opencode use the tool's own default). "
+        help="Model for the single selected backend (codex defaults to gpt-5.6-sol, "
+             "api to gpt-5.6; claude/opencode use the tool's own default). "
              "With multiple backends use --backend name:model instead.",
     )
     parser.add_argument(
@@ -356,6 +356,12 @@ def main():
         help="Review mode (auto-detected if omitted)",
     )
     parser.add_argument("--prompt", help="Additional review instructions")
+    parser.add_argument(
+        "--effort", default=None, metavar="LEVEL",
+        help="Reasoning effort, passed through to the backend (values differ per backend: "
+             "codex/api e.g. minimal|low|medium|high; claude low|medium|high|xhigh|max). "
+             "Not supported by opencode; invalid values fail loudly downstream.",
+    )
     parser.add_argument(
         "--docs", nargs="*", metavar="PATH",
         help="Project standards docs to review against; relative markdown links inside them are "
@@ -416,6 +422,10 @@ def main():
         args.backend = "api"
 
     specs = parse_backend_arg(args.backend, args.model)
+    if args.effort and any(name == "opencode" for name, _ in specs):
+        # opencode has no reasoning-effort flag; drop nothing silently.
+        print("Error: --effort is not supported by the opencode backend.", file=sys.stderr)
+        sys.exit(1)
     for name, _ in specs:
         hint = missing_binary(name)
         if hint:
@@ -493,6 +503,7 @@ def main():
         git_cmd=git_cmd,
         model=None,
         json_output=args.json,
+        effort=args.effort,
     )
 
     with ThreadPoolExecutor(max_workers=len(specs)) as pool:

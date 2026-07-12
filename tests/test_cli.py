@@ -139,6 +139,44 @@ def test_fanout_partial_fail_warns_and_exits_0(monkeypatch, capsys):
     assert "some backends failed" in out.err
 
 
+def test_effort_with_opencode_errors_before_backends_run(monkeypatch, capsys):
+    ran = []
+
+    def review(job):
+        ran.append(job)
+        return "REVIEW"
+
+    fakes = {
+        "codex": types.SimpleNamespace(review=review),
+        "opencode": types.SimpleNamespace(review=review),
+    }
+    monkeypatch.setattr("rocket_review.cli.BACKENDS", fakes)
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    code = run_cli(monkeypatch, ["--diff", "--backend", "codex,opencode", "--effort", "high"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "--effort is not supported by the opencode backend" in err
+    assert ran == []  # errored before any backend executed
+
+
+def test_effort_without_opencode_threads_to_job(monkeypatch, capsys):
+    captured = {}
+
+    def review(job):
+        captured["effort"] = job.effort
+        return "REVIEW"
+
+    monkeypatch.setattr("rocket_review.cli.BACKENDS", {"codex": types.SimpleNamespace(review=review)})
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex", "--effort", "medium"])
+    assert code == 0
+    assert captured["effort"] == "medium"
+
+
 def test_fanout_gate_exits_2(monkeypatch):
     review_json = (
         '{"verdict": "needs_fixes", "summary": "s", "findings": '

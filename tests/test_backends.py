@@ -34,6 +34,113 @@ def test_codex_builds_readonly_exec_command(monkeypatch, tmp_path):
     assert "-m" in captured["cmd"] and "gpt-5.5" in captured["cmd"]
 
 
+def test_codex_default_models():
+    assert codex.DEFAULT_MODEL == "gpt-5.6-sol"
+    assert api.DEFAULT_MODEL == "gpt-5.6"
+
+
+def test_codex_effort_inserts_reasoning_config(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"] = cmd
+        out = cmd[cmd.index("-o") + 1]
+        with open(out, "w") as f:
+            f.write("REVIEW")
+        return ""
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    codex.review(job(effort="high"))
+    cmd = captured["cmd"]
+    idx = cmd.index("-c")
+    assert cmd[idx + 1] == "model_reasoning_effort=high"
+    # the -c pair precedes the positional prompt (the last argv element)
+    assert idx + 1 < len(cmd) - 1
+
+
+def test_codex_no_effort_omits_reasoning_config(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"] = cmd
+        out = cmd[cmd.index("-o") + 1]
+        with open(out, "w") as f:
+            f.write("REVIEW")
+        return ""
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    codex.review(job())
+    assert "model_reasoning_effort=" not in " ".join(captured["cmd"])
+
+
+def test_claude_effort_appends_flag(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"] = cmd
+        return "ok"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    claude.review(job(effort="xhigh"))
+    cmd = captured["cmd"]
+    assert "--effort" in cmd and cmd[cmd.index("--effort") + 1] == "xhigh"
+
+
+def test_claude_no_effort_omits_flag(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"] = cmd
+        return "ok"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    claude.review(job())
+    assert "--effort" not in captured["cmd"]
+
+
+class _FakeOpenAI:
+    """Captures responses.create kwargs so the api backend's request can be asserted."""
+
+    last_create_kwargs = None
+
+    def __init__(self, api_key=None):
+        pass
+
+    class models:
+        @staticmethod
+        def list():
+            return []
+
+    class responses:
+        @staticmethod
+        def create(**kwargs):
+            _FakeOpenAI.last_create_kwargs = kwargs
+            return type("R", (), {"output_text": "ok"})()
+
+
+def _install_fake_openai(monkeypatch):
+    import types as _types
+
+    _FakeOpenAI.last_create_kwargs = None
+    fake_module = _types.SimpleNamespace(OpenAI=_FakeOpenAI)
+    monkeypatch.setitem(__import__("sys").modules, "openai", fake_module)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(api, "_load_env_file", lambda: None)
+    monkeypatch.setattr(api, "extract_referenced_files", lambda content: "")
+
+
+def test_api_effort_passes_reasoning_kwarg(monkeypatch):
+    _install_fake_openai(monkeypatch)
+    api._call_openai("content", "instructions", "gpt-5.6", None, "low")
+    assert _FakeOpenAI.last_create_kwargs["reasoning"] == {"effort": "low"}
+
+
+def test_api_no_effort_omits_reasoning_kwarg(monkeypatch):
+    _install_fake_openai(monkeypatch)
+    api._call_openai("content", "instructions", "gpt-5.6", None, None)
+    assert "reasoning" not in _FakeOpenAI.last_create_kwargs
+
+
 def test_codex_empty_output_raises(monkeypatch):
     def fake_run(cmd, *, stdin=None, timeout=900):
         out = cmd[cmd.index("-o") + 1]
@@ -49,7 +156,7 @@ def test_codex_empty_output_raises(monkeypatch):
 def test_api_review_prepends_docs_and_passes_model_extra(monkeypatch):
     captured = {}
 
-    def fake_call(content, system_prompt, model, extra):
+    def fake_call(content, system_prompt, model, extra, effort=None):
         captured.update(content=content, system_prompt=system_prompt, model=model, extra=extra)
         return "ok"
 
@@ -90,7 +197,7 @@ def test_codex_json_mode_passes_output_schema(monkeypatch):
 def test_api_json_mode_adds_output_override_to_system_prompt(monkeypatch):
     captured = {}
 
-    def fake_call(content, system_prompt, model, extra):
+    def fake_call(content, system_prompt, model, extra, effort=None):
         captured["system_prompt"] = system_prompt
         return "ok"
 

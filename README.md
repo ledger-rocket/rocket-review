@@ -86,8 +86,17 @@ rr src/auth.py --docs             # review files against your documented standar
 rr --diff --backend claude                     # Claude reviews (read-only sandbox)
 rr --diff --backend opencode:ollama/qwen3      # fully local (opencode → Ollama)
 rr --diff --backend codex,claude               # both, side by side
-rr --diff --backend codex:gpt-5.5,claude:claude-opus-4-8
+rr --diff --backend codex:gpt-5.6-sol,claude:claude-opus-4-8
+rr --diff --effort high                        # more reasoning effort (per-backend flag)
 ```
+
+Model names: the codex backend defaults to `gpt-5.6-sol`, the ChatGPT-account-accessible
+5.6 variant — codex signed into a ChatGPT account rejects plain `gpt-5.6` and
+`gpt-5.6-codex`. The `--backend api` path uses the canonical `gpt-5.6` (API-key auth).
+Use `--effort` to set reasoning effort; values differ per backend (codex/api accept
+e.g. `minimal|low|medium|high`, claude `low|medium|high|xhigh|max`) and an unsupported
+value fails loudly at the backend. opencode has no effort flag, so `--effort` errors
+if opencode is among the selected backends.
 
 The CLI backends (Codex, Claude, opencode) run agentically in read-only mode: they
 navigate your project — imports, tests, related files — before judging. That context
