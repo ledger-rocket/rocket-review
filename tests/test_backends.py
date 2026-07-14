@@ -35,8 +35,23 @@ def test_codex_builds_readonly_exec_command(monkeypatch, tmp_path):
 
 
 def test_codex_default_models():
-    assert codex.DEFAULT_MODEL == "gpt-5.6-sol"
+    assert codex.DEFAULT_MODEL is None
     assert api.DEFAULT_MODEL == "gpt-5.6"
+
+
+def test_codex_default_model_omits_flag(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"] = cmd
+        out = cmd[cmd.index("-o") + 1]
+        with open(out, "w") as f:
+            f.write("REVIEW")
+        return ""
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    codex.review(job())
+    assert "-m" not in captured["cmd"]
 
 
 def test_codex_effort_inserts_reasoning_config(monkeypatch):

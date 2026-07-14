@@ -346,8 +346,9 @@ def main():
     )
     parser.add_argument(
         "--model", default=None,
-        help="Model for the single selected backend (codex defaults to gpt-5.6-sol, "
-             "api to gpt-5.6; claude/opencode use the tool's own default). "
+        help="Model for the single selected backend (codex uses your codex default "
+             "from ~/.codex/config.toml, e.g. gpt-5.6-sol on ChatGPT plans; api defaults "
+             "to gpt-5.6; claude/opencode use the tool's own default). "
              "With multiple backends use --backend name:model instead.",
     )
     parser.add_argument(
