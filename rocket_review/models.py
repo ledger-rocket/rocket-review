@@ -113,7 +113,12 @@ def _severity_rank(severity: str) -> int:
 
 def should_fail(results: list[BackendResult], threshold: str) -> bool:
     # Fail closed: a backend that errored or produced unparsable output blocks the gate.
-    if any(r.error or r.parse_error for r in results):
+    if any(r.error is not None or r.parse_error for r in results):
+        return True
+    # A `blocker` verdict is the model's top-level "do not merge"; honor it even when
+    # no individual finding reaches the threshold, or the gate could pass a review that
+    # explicitly concluded the change must be blocked.
+    if any(r.verdict == "blocker" for r in results):
         return True
     limit = SEVERITIES.index(threshold)
     return any(

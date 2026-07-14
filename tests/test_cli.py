@@ -9,10 +9,10 @@ from rocket_review.backends.base import BackendError
 from rocket_review.cli import (
     RAW_TRUNCATE_LIMIT,
     detect_mode,
-    ensure_commit_exists,
     ensure_diff_exists,
     main,
     parse_backend_arg,
+    resolve_commit,
     run_capture,
 )
 
@@ -353,18 +353,27 @@ def test_ensure_diff_exists_dirty_tree_passes(tmp_path, monkeypatch):
     ensure_diff_exists(False)  # must not exit
 
 
-def test_ensure_commit_exists_unknown_sha_errors(tmp_path, monkeypatch, capsys):
+def test_resolve_commit_unknown_sha_errors(tmp_path, monkeypatch, capsys):
     _git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
     with pytest.raises(SystemExit):
-        ensure_commit_exists("deadbeef")
+        resolve_commit("deadbeef")
     assert "unknown commit" in capsys.readouterr().err
 
 
-def test_ensure_commit_exists_head_passes(tmp_path, monkeypatch):
+def test_resolve_commit_head_returns_full_oid(tmp_path, monkeypatch):
     _git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
-    ensure_commit_exists("HEAD")  # must not exit
+    oid = resolve_commit("HEAD")
+    assert len(oid) == 40 and all(c in "0123456789abcdef" for c in oid)
+
+
+def test_resolve_commit_rejects_option_shaped_revision(tmp_path, monkeypatch, capsys):
+    _git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        resolve_commit("--no-patch")
+    assert "invalid commit revision" in capsys.readouterr().err
 
 
 def test_run_capture_replaces_non_utf8_output():

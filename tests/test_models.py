@@ -50,6 +50,12 @@ def test_should_fail_closed_on_errors():
     assert should_fail([parse_backend_output("not json", "codex", None)], "critical")
 
 
+def test_should_fail_on_blocker_verdict_without_findings():
+    # A blocker verdict must trip the gate even when no finding reaches the threshold.
+    txt = '{"verdict": "blocker", "summary": "blocked", "findings": []}'
+    assert should_fail([parse_backend_output(txt, "codex", None)], "critical")
+
+
 def test_parse_missing_verdict_is_parse_error():
     r = parse_backend_output('{"findings": []}', "api", None)
     assert r.parse_error

@@ -199,28 +199,44 @@ def ensure_diff_exists(staged: bool) -> None:
         sys.exit(1)
 
 
-def ensure_commit_exists(sha: str) -> None:
-    """Preflight for agentic backends: verify the SHA before delegating `git show`."""
-    result = run_capture(["git", "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"])
-    if result.returncode != 0:
-        print(f"Error: unknown commit {sha}.", file=sys.stderr)
+def resolve_commit(rev: str) -> str:
+    """Resolve a commit revision to its full object ID, failing closed on unknown input.
+
+    Rejecting a leading dash and pinning with --end-of-options stops a value like
+    --no-patch from being read as a git option. The canonical OID — not the raw
+    argument — is what flows into `git show` and the agent's `git show <oid>`
+    instruction, so a crafted --commit can neither inject options nor a shell command.
+    """
+    if rev.startswith("-"):
+        print(f"Error: invalid commit revision {rev!r}.", file=sys.stderr)
         sys.exit(1)
+    result = run_capture(
+        ["git", "rev-parse", "--verify", "--quiet", "--end-of-options", f"{rev}^{{commit}}"]
+    )
+    oid = result.stdout.strip()
+    if result.returncode != 0 or not oid:
+        print(f"Error: unknown commit {rev}.", file=sys.stderr)
+        sys.exit(1)
+    return oid
 
 
-def get_commit_diff(sha: str) -> str:
-    result = run_capture(["git", "show", sha])
+def get_commit_diff(oid: str) -> str:
+    result = run_capture(["git", "show", oid])
     if result.returncode != 0:
-        print(f"Error: git show {sha} failed: {result.stderr.strip()}", file=sys.stderr)
+        print(f"Error: git show {oid} failed: {result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
     diff = result.stdout.strip()
     if not diff:
-        print(f"Error: no output for commit {sha}.", file=sys.stderr)
+        print(f"Error: no output for commit {oid}.", file=sys.stderr)
         sys.exit(1)
     return diff
 
 
 def get_pr_content(pr_ref: str, repo: str | None = None) -> tuple[str, str]:
     """Fetch PR metadata and diff using gh CLI. Returns (description, diff)."""
+    if pr_ref.startswith("-"):
+        print(f"Error: invalid PR reference {pr_ref!r}.", file=sys.stderr)
+        sys.exit(1)
     if not shutil.which("gh"):
         print("Error: gh CLI not found. Install it from https://cli.github.com", file=sys.stderr)
         sys.exit(1)
@@ -306,14 +322,35 @@ def run_one(
 ) -> tuple[str, str | None, str | None, str | None]:
     job = replace(job_template, model=model)
     try:
-        return name, model, BACKENDS[name].review(job), None
+        raw = BACKENDS[name].review(job)
+        # Central fail-closed check: the CLI backends already reject empty output, but
+        # the API backend can return a blank string. An empty error would also read as
+        # success under the downstream truthiness checks, so never emit one.
+        if not isinstance(raw, str) or not raw.strip():
+            raise BackendError(f"{name} produced no review output")
+        return name, model, raw, None
     except BackendError as e:
-        return name, model, None, str(e)
+        return name, model, None, str(e) or f"{name} backend failed"
     except Exception as e:
         return name, model, None, f"{type(e).__name__}: {e}"
 
 
 def main():
+    try:
+        _run()
+    except BrokenPipeError:
+        # A downstream reader (e.g. `rr ... | head`) closed the pipe. Redirect stdout
+        # to devnull so the interpreter's final flush can't raise a second BrokenPipeError,
+        # and exit quietly instead of dumping a traceback into a normal Unix pipeline.
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        except OSError:
+            pass
+        sys.exit(0)
+
+
+def _run():
     parser = argparse.ArgumentParser(
         prog="rr",
         description="rocket-review: get GPT review of plans, code, or diffs",
@@ -449,16 +486,17 @@ def main():
     # Gather content to review
     content: str | None = None
     git_cmd: str | None = None
+    commit_oid: str | None = None
     if args.pr:
         pr_description, diff = get_pr_content(args.pr, repo=args.repo)
         content = f"=== PULL REQUEST ===\n{pr_description}\n=== END PULL REQUEST ===\n\n{diff}"
         mode = "diff"
     elif args.commit:
+        commit_oid = resolve_commit(args.commit)
         if all_agentic:
-            ensure_commit_exists(args.commit)
             content = None  # let the agentic backend run git show itself
         else:
-            content = get_commit_diff(args.commit)
+            content = get_commit_diff(commit_oid)
         mode = "diff"
     elif args.diff or args.staged:
         if all_agentic:
@@ -499,7 +537,7 @@ def main():
         content=content,
         docs_content=docs_content,
         extra=args.prompt,
-        commit=args.commit,
+        commit=commit_oid,
         pr=bool(args.pr),
         git_cmd=git_cmd,
         model=None,
