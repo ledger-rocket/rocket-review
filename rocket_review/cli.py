@@ -6,13 +6,12 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import unquote, urldefrag
 
-from rocket_review.backends import BACKENDS, missing_binary
+from rocket_review.backends import BACKENDS, base, missing_binary
 from rocket_review.backends.base import BackendError, ReviewJob
 from rocket_review.models import (
     BackendResult,
@@ -48,37 +47,22 @@ def run_capture(cmd: list[str]) -> subprocess.CompletedProcess:
 
 
 def truncate_raw(results: list[BackendResult]) -> None:
-    """Spill oversized raw output to a temp file, leaving a pointer marker inline.
+    """Truncate oversized raw output inline; never spill it to disk.
 
-    Agent-ergonomic (axi P3): truncate, never omit — the full text stays reachable
-    on disk and via --full, so a bounded envelope never loses recoverable context.
+    A truncated review can quote proprietary code or secrets, so it must not be written
+    to a world-readable temp file that nothing ever cleans up. The envelope stays bounded
+    by dropping the tail (agent-ergonomic axi P3: the marker names the full length and
+    points at --full, which inlines the complete text on demand).
     """
     for r in results:
         if len(r.raw) <= RAW_TRUNCATE_LIMIT:
             continue
         total = len(r.raw)
-        head = r.raw[:RAW_TRUNCATE_LIMIT]
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", delete=False, prefix="rr-raw-", suffix=".txt", encoding="utf-8"
-            ) as tf:
-                tf.write(r.raw)
-                path = tf.name
-        except OSError as e:
-            # A read-only/full TMPDIR must not sink an otherwise-good review: still
-            # truncate (the envelope stays bounded) and note why the spill failed.
-            r.raw = (
-                head
-                + f"\n(truncated, {total} chars total; could not write full text: {e}; "
-                "use --full to inline)"
-            )
-            r.raw_file = None
-            continue
         r.raw = (
-            head
-            + f"\n(truncated, {total} chars total — full text: {path}; use --full to inline)"
+            r.raw[:RAW_TRUNCATE_LIMIT]
+            + f"\n(truncated, {total} chars total; use --full to inline)"
         )
-        r.raw_file = path
+        r.raw_file = None
 
 
 def read_files(paths: list[str]) -> str:
@@ -176,12 +160,14 @@ def get_diff(staged: bool) -> str:
     if result.returncode != 0:
         print(f"Error: {' '.join(cmd)} failed: {result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
-    diff = result.stdout.strip()
-    if not diff:
+    # Return the diff verbatim (strip only decides emptiness): trailing whitespace on the
+    # last changed line is part of the patch, and this snapshot must be byte-identical to
+    # what every backend reviews.
+    if not result.stdout.strip():
         label = "staged changes" if staged else "uncommitted changes"
         print(f"Error: no {label} found.", file=sys.stderr)
         sys.exit(1)
-    return diff
+    return result.stdout
 
 
 def ensure_diff_exists(staged: bool) -> None:
@@ -225,11 +211,12 @@ def get_commit_diff(oid: str) -> str:
     if result.returncode != 0:
         print(f"Error: git show {oid} failed: {result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
-    diff = result.stdout.strip()
-    if not diff:
+    # Verbatim (strip only decides emptiness); see get_diff — the snapshot must be
+    # byte-identical to what every backend reviews.
+    if not result.stdout.strip():
         print(f"Error: no output for commit {oid}.", file=sys.stderr)
         sys.exit(1)
-    return diff
+    return result.stdout
 
 
 def get_pr_content(pr_ref: str, repo: str | None = None) -> tuple[str, str]:
@@ -325,9 +312,15 @@ def parse_backend_arg(value: str, single_model: str | None) -> list[tuple[str, s
 
 
 def run_one(
-    name: str, model: str | None, job_template: ReviewJob
+    name: str, model: str | None, job_template: ReviewJob, commit_content: str | None
 ) -> tuple[str, str | None, str | None, str | None]:
     job = replace(job_template, model=model)
+    # A commit OID is immutable, so codex/claude keep it and `git show` the exact commit
+    # (no snapshot-drift risk, and they don't front-load a large diff into the prompt).
+    # api/opencode can't run git, so they get the commit materialized instead. A mutable
+    # working-tree diff is already captured once into job.content and shared by everyone.
+    if commit_content is not None and name in {"api", "opencode"}:
+        job = replace(job, content=commit_content, commit=None)
     try:
         raw = BACKENDS[name].review(job)
         # Central fail-closed check: the CLI backends already reject empty output, but
@@ -481,7 +474,13 @@ def _run():
         if hint:
             print(f"Error: backend '{name}' unavailable — {hint}", file=sys.stderr)
             sys.exit(1)
-    all_agentic = all(name != "api" for name, _ in specs)
+    # api has no repo to navigate, and opencode's read-only `plan` agent may be denied the
+    # tools it would need to run git itself in non-interactive mode — so if either is
+    # selected we materialize content for them. A mutable working-tree diff is captured
+    # ONCE and shared by every backend (so a cross-model fan-out judges identical bytes,
+    # not each re-running git at a slightly different instant). A commit is immutable, so
+    # only api/opencode get it materialized (run_one) while codex/claude git-show the OID.
+    needs_content = any(name in {"api", "opencode"} for name, _ in specs)
 
     # Validate mutually exclusive sources
     explicit_sources = sum([
@@ -495,8 +494,12 @@ def _run():
         print("Error: specify only one review source (files, --diff, --staged, --commit, --pr, or stdin).", file=sys.stderr)
         sys.exit(1)
 
-    # Gather content to review
+    # Gather content to review. For a mutable working-tree diff, needs_content captures one
+    # `content` shared by every backend; otherwise it stays None and codex/claude run git.
+    # For a commit, codex/claude always git-show the OID (commit_oid) and api/opencode get
+    # the diff via commit_content (run_one). Files, stdin, and PR sources are materialized.
     content: str | None = None
+    commit_content: str | None = None
     git_cmd: str | None = None
     commit_oid: str | None = None
     if args.pr:
@@ -505,18 +508,15 @@ def _run():
         mode = "diff"
     elif args.commit:
         commit_oid = resolve_commit(args.commit)
-        if all_agentic:
-            content = None  # let the agentic backend run git show itself
-        else:
-            content = get_commit_diff(commit_oid)
+        if needs_content:
+            commit_content = get_commit_diff(commit_oid)  # for api/opencode
         mode = "diff"
     elif args.diff or args.staged:
-        if all_agentic:
-            ensure_diff_exists(args.staged)
-            content = None
-            git_cmd = "git diff --staged" if args.staged else "git diff HEAD"
+        if needs_content:
+            content = get_diff(args.staged)  # one snapshot for every backend
         else:
-            content = get_diff(args.staged)
+            ensure_diff_exists(args.staged)
+            git_cmd = "git diff --staged" if args.staged else "git diff HEAD"
         mode = "diff"
     elif args.files:
         content = read_files(args.files)
@@ -559,8 +559,21 @@ def _run():
     )
 
     with ThreadPoolExecutor(max_workers=len(specs)) as pool:
-        futures = [pool.submit(run_one, name, model, job) for name, model in specs]
-        outputs = [f.result() for f in futures]  # preserves --backend order
+        futures = [
+            pool.submit(run_one, name, model, job, commit_content) for name, model in specs
+        ]
+        try:
+            outputs = [f.result() for f in futures]  # preserves --backend order
+        except KeyboardInterrupt:
+            # SIGINT lands here on the main thread, not in the workers blocked on their
+            # subprocesses. Tear the backend process groups down before the executor's
+            # __exit__ waits on the workers, or Ctrl-C hangs until each backend times out.
+            # Best-effort by design: this kills registered subprocess groups
+            # (codex/claude/opencode); an in-flight `api` HTTP request has no process to
+            # signal and finishes or hits its own client timeout, and a subprocess launched
+            # during teardown may survive to its own timeout.
+            base.terminate_active_commands()
+            raise
 
     results = []
     for name, model, raw, error in outputs:

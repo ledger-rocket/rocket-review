@@ -62,7 +62,7 @@ Requires Python 3.13+ and at least one backend:
 
 - [Codex CLI](https://github.com/openai/codex) (default backend)
 - [Claude Code](https://claude.com/claude-code) (`--backend claude`)
-- [opencode](https://opencode.ai) (`--backend opencode` — any provider, including local models)
+- [opencode](https://opencode.ai) (`--backend opencode` — any provider, including local models; **experimental**, see below)
 - or none of the above: `--backend api` (or the `--api` shorthand) calls the OpenAI API directly (`OPENAI_API_KEY`)
 
 `--pr` also needs the [gh CLI](https://cli.github.com). Not on PyPI yet — install from Git as above.
@@ -105,11 +105,19 @@ if opencode is among the selected backends. Heavy `--effort high` reviews — es
 on reasoning models — can outrun the default 900s (15 min) subprocess timeout; raise it
 with `--timeout 1800`.
 
-The CLI backends (Codex, Claude, opencode) run agentically in read-only mode: they
-navigate your project — imports, tests, related files — before judging. That context
-is what makes the review worth reading. The `api` backend is the exception — it calls
-the OpenAI API directly on the supplied content plus any files it references, without
-navigating your project.
+The Codex and Claude backends run agentically in read-only mode: they navigate your
+project — imports, tests, related files — before judging. That context is what makes the
+review worth reading. The `api` backend is the exception — it calls the OpenAI API
+directly on the supplied content plus any files it references, without navigating your
+project.
+
+> **opencode is experimental.** The integration works, but end-to-end review
+> reliability depends on the provider you have configured, and non-interactive
+> `opencode run` can restrict the read-only `plan` agent's tools. `rr` materializes the
+> diff and feeds the prompt to opencode on stdin so it always reviews the real change,
+> but for a gated CI check prefer `codex` or `claude`. The local-model value prop stands
+> — point opencode at Ollama to keep everything on your machine — just verify its output
+> before trusting it as a gate.
 
 ### Structured output
 
@@ -123,8 +131,9 @@ The envelope leads with a `summary` block — `findings_total`, per-severity cou
 (explicit zeros for absent severities), `worst_severity`, per-backend verdicts, and
 the `gate` result when `--fail-on` is set — so an agent gets the counts and the
 gate answer without parsing the findings array. Backend output over 4000 chars is
-spilled to a temp file, with `raw` holding a truncation marker and `raw_file` its
-path; pass `--full` to inline the untruncated output instead. Parse failures and
+truncated inline — `raw` keeps the head plus a marker naming the full length — so the
+envelope stays bounded and no review text (which may quote proprietary code) is written
+to disk; pass `--full` to inline the untruncated output instead. Parse failures and
 backend errors fail the gate closed.
 
 ## Review modes

@@ -114,16 +114,20 @@ def test_claude_no_effort_omits_flag(monkeypatch):
 
 
 class _FakeOpenAI:
-    """Captures responses.create kwargs so the api backend's request can be asserted."""
+    """Captures constructor + responses.create kwargs and any models.list() call so the
+    api backend's request bounding and canonical-model short-circuit can be asserted."""
 
+    last_init_kwargs = None
     last_create_kwargs = None
+    listed = False
 
-    def __init__(self, api_key=None):
-        pass
+    def __init__(self, **kwargs):
+        _FakeOpenAI.last_init_kwargs = kwargs
 
     class models:
         @staticmethod
         def list():
+            _FakeOpenAI.listed = True
             return []
 
     class responses:
@@ -136,7 +140,9 @@ class _FakeOpenAI:
 def _install_fake_openai(monkeypatch):
     import types as _types
 
+    _FakeOpenAI.last_init_kwargs = None
     _FakeOpenAI.last_create_kwargs = None
+    _FakeOpenAI.listed = False
     fake_module = _types.SimpleNamespace(OpenAI=_FakeOpenAI)
     monkeypatch.setitem(__import__("sys").modules, "openai", fake_module)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -159,7 +165,8 @@ def test_api_no_effort_omits_reasoning_kwarg(monkeypatch):
 def test_api_timeout_passes_timeout_kwarg(monkeypatch):
     _install_fake_openai(monkeypatch)
     api._call_openai("content", "instructions", "gpt-5.6-terra", None, None, 1800)
-    assert _FakeOpenAI.last_create_kwargs["timeout"] == 1800
+    # the response call gets the budget left after (near-instant) resolution
+    assert 0 < _FakeOpenAI.last_create_kwargs["timeout"] <= 1800
 
 
 def test_api_no_timeout_omits_timeout_kwarg(monkeypatch):
@@ -171,7 +178,88 @@ def test_api_no_timeout_omits_timeout_kwarg(monkeypatch):
 def test_api_review_threads_job_timeout_into_call(monkeypatch):
     _install_fake_openai(monkeypatch)
     api.review(job(timeout=42))
-    assert _FakeOpenAI.last_create_kwargs["timeout"] == 42
+    assert 0 < _FakeOpenAI.last_create_kwargs["timeout"] <= 42
+
+
+def test_api_timeout_deadline_shared_across_resolution_and_create(monkeypatch):
+    # Resolution and the response call share one budget: time spent listing models is
+    # subtracted from what responses.create() gets, so the total stays within --timeout.
+    _install_fake_openai(monkeypatch)
+    clock = [1000.0]
+    monkeypatch.setattr(api.time, "monotonic", lambda: clock[0])
+
+    def slow_list():
+        clock[0] += 20  # resolution burns 20s of the 30s budget
+        _FakeOpenAI.listed = True
+        return []
+
+    monkeypatch.setattr(_FakeOpenAI.models, "list", slow_list)
+    api._call_openai("content", "instructions", "o5-mini", None, None, 30)
+    assert _FakeOpenAI.last_create_kwargs["timeout"] == pytest.approx(10)
+
+
+def test_api_timeout_exhausted_by_resolution_fails_closed(monkeypatch):
+    # If resolution alone consumes the whole budget, fail rather than starting an
+    # unbounded response call.
+    _install_fake_openai(monkeypatch)
+    clock = [1000.0]
+    monkeypatch.setattr(api.time, "monotonic", lambda: clock[0])
+
+    def slow_list():
+        clock[0] += 30
+        return []
+
+    monkeypatch.setattr(_FakeOpenAI.models, "list", slow_list)
+    with pytest.raises(BackendError, match="timed out"):
+        api._call_openai("content", "instructions", "o5-mini", None, None, 30)
+
+
+def test_api_client_bounds_every_call_when_timeout_set(monkeypatch):
+    # The whole backend (incl. any listing) must sit under --timeout: the client carries
+    # the deadline and disables retries so nothing silently backs off past it.
+    _install_fake_openai(monkeypatch)
+    api._call_openai("content", "instructions", "gpt-5.6-sol", None, None, 1800)
+    assert _FakeOpenAI.last_init_kwargs == {
+        "api_key": "sk-test", "max_retries": 0, "timeout": 1800,
+    }
+
+
+def test_api_client_keeps_retries_without_timeout(monkeypatch):
+    # No deadline to protect: the SDK's default retries stay on for reliability.
+    _install_fake_openai(monkeypatch)
+    api._call_openai("content", "instructions", "gpt-5.6-sol", None, None, None)
+    assert _FakeOpenAI.last_init_kwargs == {"api_key": "sk-test"}
+
+
+def test_api_timeout_preserves_alias_resolution(monkeypatch):
+    # A deadline must not change which model is selected: a non-canonical alias still
+    # resolves (the list call is simply bounded by the client timeout), so adding --timeout
+    # can never turn a working model name into a failing one.
+    _install_fake_openai(monkeypatch)
+    api._call_openai("content", "instructions", "o5-mini", None, None, 30)
+    assert _FakeOpenAI.listed
+
+
+def test_api_canonical_model_skips_models_list(monkeypatch):
+    _install_fake_openai(monkeypatch)
+    for canonical in ("gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+        _FakeOpenAI.listed = False
+        api._call_openai("content", "instructions", canonical, None, None, None)
+        assert not _FakeOpenAI.listed
+        assert _FakeOpenAI.last_create_kwargs["model"] == canonical
+
+
+def test_api_dated_snapshot_skips_models_list(monkeypatch):
+    _install_fake_openai(monkeypatch)
+    api._call_openai("content", "instructions", "gpt-5.6-2026-01-01", None, None, None)
+    assert not _FakeOpenAI.listed
+
+
+def test_api_aliased_model_still_lists(monkeypatch):
+    # A genuinely short/aliased name that isn't canonical keeps the resolution path.
+    _install_fake_openai(monkeypatch)
+    api._call_openai("content", "instructions", "o5-mini", None, None, None)
+    assert _FakeOpenAI.listed
 
 
 def test_codex_empty_output_raises(monkeypatch):
@@ -274,6 +362,7 @@ def test_opencode_run_command_with_model(monkeypatch):
 
     def fake_run(cmd, *, stdin=None, timeout=900):
         captured["cmd"] = cmd
+        captured["stdin"] = stdin
         return "OPENCODE REVIEW"
 
     monkeypatch.setattr(base, "run_command", fake_run)
@@ -282,13 +371,35 @@ def test_opencode_run_command_with_model(monkeypatch):
     assert cmd[:2] == ["opencode", "run"]
     assert "--agent" in cmd and "plan" in cmd
     assert "--model" in cmd and "google/gemini-3-pro" in cmd
-    assert "Do not modify any files" in cmd[-1]
+    assert "Do not modify any files" in captured["stdin"]  # prompt travels via stdin
 
 
 def test_opencode_empty_output_raises(monkeypatch):
     monkeypatch.setattr(base, "run_command", lambda cmd, *, stdin=None, timeout=900: "  ")
     with pytest.raises(BackendError):
         opencode.review(job())
+
+
+def test_opencode_delivers_materialized_content_via_stdin(monkeypatch):
+    # The prompt (with the diff embedded) reaches the model on stdin — not as a path the
+    # read-only plan agent must open (which it may be denied, then review nothing), not
+    # inline in argv (ps-visible, ARG_MAX-bounded), and not via --file (opencode's
+    # array-valued flag swallows the message, and its Read tool truncates large attachments).
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"] = cmd
+        captured["stdin"] = stdin
+        return "OPENCODE REVIEW"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    marker = "MATERIALIZED-DIFF-9f3a2b"
+    opencode.review(job(content=f"diff --git a b\n+{marker}"))
+    assert marker in captured["stdin"]  # full diff delivered on stdin
+    assert "--file" not in captured["cmd"]
+    assert marker not in " ".join(captured["cmd"])  # not exposed in argv
+    # no positional message, so opencode reads the prompt from stdin
+    assert captured["cmd"][-1] == "plan"
 
 
 def test_extract_referenced_files_blocks_sibling_prefix_escape(tmp_path, monkeypatch):
@@ -315,22 +426,84 @@ def test_run_command_replaces_non_utf8_output():
     assert "review" in out and "done" in out  # no UnicodeDecodeError
 
 
-def test_run_command_timeout_message_uses_seconds_when_not_whole_minutes(monkeypatch):
-    def fake_run(*a, **kw):
-        raise base.subprocess.TimeoutExpired(cmd="x", timeout=30)
+class _FakeProc:
+    """Stands in for a Popen handle. `first` is raised by the initial communicate();
+    later communicate() calls (the reap after a kill) return quietly."""
 
-    monkeypatch.setattr(base.subprocess, "run", fake_run)
+    def __init__(self, pid=4321, first=None, returncode=0):
+        self.pid = pid
+        self.returncode = returncode
+        self._first = first
+        self._calls = 0
+        self.communicate_timeouts = []
+
+    def communicate(self, input=None, timeout=None):
+        self._calls += 1
+        if self._calls == 1:
+            self.communicate_timeouts.append(timeout)
+            if self._first is not None:
+                raise self._first
+        return ("", "")
+
+
+def _patch_group_signals(monkeypatch):
+    """Record every real (pgid, signal) sent; report the fake group dead to liveness probes
+    (killpg(pid, 0)) so terminate escalation doesn't spin on a nonexistent process."""
+    signals = []
+
+    def fake_killpg(pgid, sig):
+        if sig == 0:
+            raise ProcessLookupError
+        signals.append((pgid, sig))
+
+    monkeypatch.setattr(base.os, "killpg", fake_killpg)
+    return signals
+
+
+def test_run_command_timeout_message_uses_seconds_when_not_whole_minutes(monkeypatch):
+    proc = _FakeProc(first=base.subprocess.TimeoutExpired(cmd="x", timeout=30))
+    monkeypatch.setattr(base.subprocess, "Popen", lambda *a, **k: proc)
+    _patch_group_signals(monkeypatch)
     with pytest.raises(BackendError, match=r"timed out after 30 seconds"):
         base.run_command(["x"], timeout=30)
 
 
 def test_run_command_timeout_message_uses_minutes_for_whole_minutes(monkeypatch):
-    def fake_run(*a, **kw):
-        raise base.subprocess.TimeoutExpired(cmd="x", timeout=120)
-
-    monkeypatch.setattr(base.subprocess, "run", fake_run)
+    proc = _FakeProc(first=base.subprocess.TimeoutExpired(cmd="x", timeout=120))
+    monkeypatch.setattr(base.subprocess, "Popen", lambda *a, **k: proc)
+    _patch_group_signals(monkeypatch)
     with pytest.raises(BackendError, match=r"timed out after 2 minutes"):
         base.run_command(["x"], timeout=120)
+
+
+def test_run_command_timeout_kills_process_group(monkeypatch):
+    proc = _FakeProc(first=base.subprocess.TimeoutExpired(cmd="x", timeout=30))
+    monkeypatch.setattr(base.subprocess, "Popen", lambda *a, **k: proc)
+    signals = _patch_group_signals(monkeypatch)
+    with pytest.raises(BackendError):
+        base.run_command(["x"], timeout=30)
+    assert (proc.pid, base.signal.SIGTERM) in signals
+
+
+def test_run_command_keyboardinterrupt_kills_group_and_propagates(monkeypatch):
+    proc = _FakeProc(first=KeyboardInterrupt())
+    monkeypatch.setattr(base.subprocess, "Popen", lambda *a, **k: proc)
+    signals = _patch_group_signals(monkeypatch)
+    with pytest.raises(KeyboardInterrupt):
+        base.run_command(["sleep"], timeout=900)
+    assert (proc.pid, base.signal.SIGTERM) in signals  # group torn down, not left running
+
+
+def test_run_command_unexpected_error_kills_and_unregisters(monkeypatch):
+    # An OSError (or any exception) from communicate() must still tear the group down and
+    # drop it from the registry, not leak a running child.
+    proc = _FakeProc(first=OSError("boom"))
+    monkeypatch.setattr(base.subprocess, "Popen", lambda *a, **k: proc)
+    signals = _patch_group_signals(monkeypatch)
+    with pytest.raises(OSError):
+        base.run_command(["x"], timeout=30)
+    assert (proc.pid, base.signal.SIGTERM) in signals
+    assert proc not in base._active_procs
 
 
 @pytest.mark.parametrize(
@@ -365,22 +538,63 @@ def test_run_command_zero_timeout_falsy_still_honored_by_codex_and_claude_null_c
     assert captured["timeout"] == 0
 
 
+def test_terminate_active_commands_signals_registered_groups(monkeypatch):
+    signals = _patch_group_signals(monkeypatch)  # group reports dead after SIGTERM
+    proc = _FakeProc(pid=555)
+    base._active_procs.add(proc)
+    try:
+        base.terminate_active_commands()
+    finally:
+        base._active_procs.discard(proc)
+    assert (555, base.signal.SIGTERM) in signals  # main-thread teardown reaches the group
+    assert (555, base.signal.SIGKILL) not in signals  # died on SIGTERM, no escalation
+
+
+def test_terminate_active_commands_escalates_to_sigkill(monkeypatch):
+    # A group that survives SIGTERM must be SIGKILLed so it can't block the exit.
+    monkeypatch.setattr(base, "_TERM_GRACE_SECONDS", 0.0)
+    signals = []
+    monkeypatch.setattr(  # every probe/ signal succeeds → group stays "alive"
+        base.os, "killpg", lambda pgid, sig: signals.append((pgid, sig))
+    )
+    proc = _FakeProc(pid=777)
+    base._active_procs.add(proc)
+    try:
+        base.terminate_active_commands()
+    finally:
+        base._active_procs.discard(proc)
+    assert (777, base.signal.SIGTERM) in signals
+    assert (777, base.signal.SIGKILL) in signals
+
+
+def test_run_command_unregisters_proc_after_run(monkeypatch):
+    proc = _FakeProc(returncode=0)
+    monkeypatch.setattr(base.subprocess, "Popen", lambda *a, **k: proc)
+    _patch_group_signals(monkeypatch)
+    base.run_command(["echo", "hi"])
+    assert proc not in base._active_procs  # no leak into the active-process registry
+
+
 def test_run_command_passes_timeout_to_subprocess(monkeypatch):
-    captured = {}
-
-    class FakeCompleted:
-        returncode = 0
-        stdout = "ok"
-        stderr = ""
-
-    def fake_run(cmd, *, input=None, capture_output=None, text=None,
-                 encoding=None, errors=None, timeout=None):
-        captured["timeout"] = timeout
-        return FakeCompleted()
-
-    monkeypatch.setattr(base.subprocess, "run", fake_run)
+    proc = _FakeProc(returncode=0)
+    monkeypatch.setattr(base.subprocess, "Popen", lambda *a, **k: proc)
+    _patch_group_signals(monkeypatch)
     base.run_command(["echo", "hi"], timeout=1800)
-    assert captured["timeout"] == 1800
+    assert proc.communicate_timeouts == [1800]  # deadline bounds the wait
+
+
+def test_run_command_uses_new_session_for_group_kill(monkeypatch):
+    captured = {}
+    proc = _FakeProc(returncode=0)
+
+    def fake_popen(*a, **k):
+        captured.update(k)
+        return proc
+
+    monkeypatch.setattr(base.subprocess, "Popen", fake_popen)
+    _patch_group_signals(monkeypatch)
+    base.run_command(["echo", "hi"])
+    assert captured["start_new_session"] is True
 
 
 def test_codex_default_timeout_is_900(monkeypatch):

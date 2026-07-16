@@ -1,9 +1,10 @@
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
-from rocket_review.backends.base import BackendError, ReviewJob
+from rocket_review.backends.base import BackendError, ReviewJob, format_duration
 from rocket_review.prompts import get_prompt
 
 NAME = "api"
@@ -86,9 +87,23 @@ def extract_referenced_files(text: str, max_size: int = 100_000) -> str:
     return "\n\n".join(parts)
 
 
+# Canonical 5.6 names (gpt-5.6, gpt-5.6-sol/terra/luna, …) and already-dated snapshots
+# are accepted by the API verbatim, so they need no models.list() round-trip to resolve.
+_CANONICAL_MODEL_RE = re.compile(r"^gpt-5\.6(-[a-z]+)?$")
+
+
+def _is_canonical(model: str) -> bool:
+    return "-202" in model or bool(_CANONICAL_MODEL_RE.match(model))
+
+
 def _resolve_model(client, model: str) -> str:
-    """Resolve short model alias to available dated ID."""
-    if "-202" in model:
+    """Resolve a short model alias to an available dated ID.
+
+    Canonical names pass straight through without listing: models.list() would run
+    under the SDK's own default deadline and retries, escaping the caller's --timeout
+    bound before the (bounded) responses.create even starts.
+    """
+    if _is_canonical(model):
         return model
     try:
         available = {m.id for m in client.models.list()}
@@ -115,7 +130,20 @@ def _call_openai(
 
     from openai import OpenAI
 
-    client = OpenAI(api_key=api_key)
+    client_kwargs = {"api_key": api_key}
+    if timeout is not None:
+        # Bound every call this client makes — including any models.list() — to --timeout,
+        # with retries off so the SDK can't back off past the deadline. For the default
+        # canonical model, resolution skips listing, so that single responses.create is the
+        # whole budget; a non-canonical alias adds one bounded list call.
+        client_kwargs.update(timeout=timeout, max_retries=0)
+    client = OpenAI(**client_kwargs)
+    # One deadline spans the whole backend, so --timeout bounds resolution + the response
+    # call together rather than allowing each up to a full timeout.
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    # Always resolve, so adding --timeout never changes which model is selected. Canonical
+    # names short-circuit without a list call; without a deadline the SDK's default retries
+    # stay on for reliability.
     model = _resolve_model(client, model)
 
     # Extract referenced files and append as context
@@ -130,10 +158,14 @@ def _call_openai(
     kwargs = {}
     if effort:
         kwargs["reasoning"] = {"effort": effort}
-    if timeout is not None:
-        # Per-request override; omitted entirely (not passed as None) so the
-        # SDK's own default applies when the caller didn't ask for a deadline.
-        kwargs["timeout"] = timeout
+    if deadline is not None:
+        # Give the response call only the budget left after resolution, so the two together
+        # stay within --timeout. Omitted entirely (not None) when no deadline was requested,
+        # so the SDK's own default applies.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BackendError(f"OpenAI API call timed out after {format_duration(timeout)}")
+        kwargs["timeout"] = remaining
     try:
         response = client.responses.create(
             model=model,
