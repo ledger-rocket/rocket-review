@@ -341,8 +341,35 @@ def test_claude_uses_readonly_allowlist_and_stdin(monkeypatch):
     assert cmd[:2] == ["claude", "-p"]
     allow = cmd[cmd.index("--allowedTools") + 1]
     assert "Read" in allow and "Write" not in allow and "Edit" not in allow
+    # The allowlist is only restrictive under manual permission mode: without it,
+    # headless Claude Code auto-approves unlisted (mutating) tools.
+    assert cmd[cmd.index("--permission-mode") + 1] == "manual"
+    # Never a wildcard git rule: git diff/show/log all accept --output=<file>, so a
+    # `Bash(git diff:*)` allow rule would be a write vector. This job inlines content
+    # (no git_cmd/commit), so no Bash rule at all.
+    assert "Bash(git" not in allow
     assert "--model" in cmd and "claude-sonnet-5" in cmd
     assert "DIFF TO REVIEW" in captured["stdin"]  # prompt travels via stdin, not argv
+
+
+def test_claude_git_view_rule_is_exact_match_not_wildcard(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"] = cmd
+        return "ok"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+
+    # --diff/--staged: the exact git command is allow-listed so --output can't be appended.
+    claude.review(job(content=None, git_cmd="git diff HEAD"))
+    allow = captured["cmd"][captured["cmd"].index("--allowedTools") + 1]
+    assert "Bash(git diff HEAD)" in allow and "Bash(git diff:*)" not in allow
+
+    # --commit: git-show the exact reviewed OID, nothing wider.
+    claude.review(job(content=None, commit="deadbeef"))
+    allow = captured["cmd"][captured["cmd"].index("--allowedTools") + 1]
+    assert "Bash(git show deadbeef)" in allow and "Bash(git show:*)" not in allow
 
 
 def test_claude_default_model_omits_flag(monkeypatch):
