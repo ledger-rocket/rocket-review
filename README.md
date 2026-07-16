@@ -93,8 +93,11 @@ rr --diff --effort high                        # more reasoning effort (per-back
 Model names: the codex backend passes no `-m`, so it honors your codex default
 (set `model` in `~/.codex/config.toml`). On ChatGPT plans use `gpt-5.6-sol`, the
 ChatGPT-account-accessible 5.6 variant — codex signed into a ChatGPT account rejects
-plain `gpt-5.6` and `gpt-5.6-codex`. The `--backend api` path uses the canonical
-`gpt-5.6` (API-key auth).
+the bare `gpt-5.6` alias and `gpt-5.6-codex`. The `--backend api` path (API-key auth)
+defaults to `gpt-5.6-terra` — balanced cost/quality. Use `--model gpt-5.6-sol` for
+max quality (flagship pricing) or `gpt-5.6-luna` for the cheapest tier. rr always
+uses explicit, suffixed model names and never relies on the bare `gpt-5.6` alias,
+which points at the flagship today but can be remapped by OpenAI.
 Use `--effort` to set reasoning effort; values differ per backend (codex/api accept
 e.g. `minimal|low|medium|high`, claude `low|medium|high|xhigh|max`) and an unsupported
 value fails loudly at the backend. opencode has no effort flag, so `--effort` errors

@@ -10,8 +10,10 @@ from rocket_review.prompts import get_prompt
 NAME = "api"
 BINARY = None  # SDK, not a CLI
 INSTALL_HINT = "set OPENAI_API_KEY (or put it in .env)"
-# Canonical API model name; _resolve_model maps it to the latest dated snapshot.
-DEFAULT_MODEL = "gpt-5.6"
+# Explicit balanced-tier model; _resolve_model maps it to the latest dated snapshot.
+# Never use the bare "gpt-5.6" alias here — it maps to the pricier flagship (sol)
+# and OpenAI can remap it out from under us.
+DEFAULT_MODEL = "gpt-5.6-terra"
 
 
 def review(job: ReviewJob) -> str:
