@@ -21,7 +21,10 @@ def review(job: ReviewJob) -> str:
     if job.effort:
         cmd += ["--effort", job.effort]
     # Prompt goes via stdin: no ARG_MAX concern and no temp file needed.
-    output = base.run_command(cmd, stdin=build_agent_prompt(job)).strip()
+    timeout = base.TIMEOUT if job.timeout is None else job.timeout
+    output = base.run_command(
+        cmd, stdin=build_agent_prompt(job), timeout=timeout
+    ).strip()
     if not output:
         raise BackendError("claude produced no output")
     return output

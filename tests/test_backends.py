@@ -295,3 +295,134 @@ def test_run_command_replaces_non_utf8_output():
         "import sys; sys.stdout.buffer.write(b'review \\xff done')",
     ])
     assert "review" in out and "done" in out  # no UnicodeDecodeError
+
+
+def test_run_command_timeout_message_uses_seconds_when_not_whole_minutes(monkeypatch):
+    def fake_run(*a, **kw):
+        raise base.subprocess.TimeoutExpired(cmd="x", timeout=30)
+
+    monkeypatch.setattr(base.subprocess, "run", fake_run)
+    with pytest.raises(BackendError, match=r"timed out after 30 seconds"):
+        base.run_command(["x"], timeout=30)
+
+
+def test_run_command_timeout_message_uses_minutes_for_whole_minutes(monkeypatch):
+    def fake_run(*a, **kw):
+        raise base.subprocess.TimeoutExpired(cmd="x", timeout=120)
+
+    monkeypatch.setattr(base.subprocess, "run", fake_run)
+    with pytest.raises(BackendError, match=r"timed out after 2 minutes"):
+        base.run_command(["x"], timeout=120)
+
+
+def test_run_command_zero_timeout_falsy_still_honored_by_codex_and_claude_null_check(monkeypatch):
+    # Regression: backends must use an explicit `is None` check, not truthiness,
+    # so a programmatically-constructed job(timeout=0) is not silently coerced to 900.
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["timeout"] = timeout
+        out = cmd[cmd.index("-o") + 1]
+        with open(out, "w") as f:
+            f.write("REVIEW")
+        return ""
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    codex.review(job(timeout=0))
+    assert captured["timeout"] == 0
+
+
+def test_run_command_passes_timeout_to_subprocess(monkeypatch):
+    captured = {}
+
+    class FakeCompleted:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(cmd, *, input=None, capture_output=None, text=None,
+                 encoding=None, errors=None, timeout=None):
+        captured["timeout"] = timeout
+        return FakeCompleted()
+
+    monkeypatch.setattr(base.subprocess, "run", fake_run)
+    base.run_command(["echo", "hi"], timeout=1800)
+    assert captured["timeout"] == 1800
+
+
+def test_codex_default_timeout_is_900(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["timeout"] = timeout
+        out = cmd[cmd.index("-o") + 1]
+        with open(out, "w") as f:
+            f.write("REVIEW")
+        return ""
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    codex.review(job())
+    assert captured["timeout"] == 900
+
+
+def test_codex_custom_timeout_passed_through(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["timeout"] = timeout
+        out = cmd[cmd.index("-o") + 1]
+        with open(out, "w") as f:
+            f.write("REVIEW")
+        return ""
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    codex.review(job(timeout=1800))
+    assert captured["timeout"] == 1800
+
+
+def test_claude_default_timeout_is_900(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["timeout"] = timeout
+        return "ok"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    claude.review(job())
+    assert captured["timeout"] == 900
+
+
+def test_claude_custom_timeout_passed_through(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["timeout"] = timeout
+        return "ok"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    claude.review(job(timeout=1800))
+    assert captured["timeout"] == 1800
+
+
+def test_opencode_default_timeout_is_900(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["timeout"] = timeout
+        return "ok"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    opencode.review(job())
+    assert captured["timeout"] == 900
+
+
+def test_opencode_custom_timeout_passed_through(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["timeout"] = timeout
+        return "ok"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    opencode.review(job(timeout=1800))
+    assert captured["timeout"] == 1800

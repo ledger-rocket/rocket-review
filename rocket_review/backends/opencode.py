@@ -20,7 +20,8 @@ def review(job: ReviewJob) -> str:
             f"Read the file {prompt_file} for your full instructions, then follow them. "
             "You are performing a code review: Do not modify any files."
         )
-        output = base.run_command(cmd).strip()
+        timeout = base.TIMEOUT if job.timeout is None else job.timeout
+        output = base.run_command(cmd, timeout=timeout).strip()
         if not output:
             raise BackendError("opencode produced no output")
         return output

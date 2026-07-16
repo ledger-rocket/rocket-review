@@ -24,6 +24,9 @@ class ReviewJob:
     # Free-form reasoning-effort string passed through to the backend; each backend
     # maps it to its own flag and lets invalid values fail loudly downstream.
     effort: str | None = None
+    # Per-backend subprocess timeout in seconds; None means the backend falls back
+    # to base.TIMEOUT. High-effort reasoning models can outrun the 900s default.
+    timeout: int | None = None
 
 
 def run_command(cmd: list[str], *, stdin: str | None = None, timeout: int = TIMEOUT) -> str:
@@ -35,7 +38,10 @@ def run_command(cmd: list[str], *, stdin: str | None = None, timeout: int = TIME
             encoding="utf-8", errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        raise BackendError(f"{cmd[0]} timed out after {timeout // 60} minutes")
+        # --timeout now takes arbitrary seconds; only render "N minutes" when it
+        # divides evenly, otherwise report the exact seconds so the message stays true.
+        duration = f"{timeout // 60} minutes" if timeout % 60 == 0 else f"{timeout} seconds"
+        raise BackendError(f"{cmd[0]} timed out after {duration}")
     except FileNotFoundError:
         raise BackendError(f"{cmd[0]} not found on PATH")
     if result.returncode != 0:
