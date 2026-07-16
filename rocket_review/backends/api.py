@@ -19,7 +19,9 @@ def review(job: ReviewJob) -> str:
         content = (f"=== PROJECT STANDARDS ===\n{job.docs_content}\n"
                    f"=== END PROJECT STANDARDS ===\n\n{content}")
     system_prompt = get_prompt(job.mode, job.docs_content, job.json_output)
-    return _call_openai(content, system_prompt, job.model or DEFAULT_MODEL, job.extra, job.effort)
+    return _call_openai(
+        content, system_prompt, job.model or DEFAULT_MODEL, job.extra, job.effort, job.timeout
+    )
 
 
 def _load_env_file() -> None:
@@ -97,7 +99,12 @@ def _resolve_model(client, model: str) -> str:
 
 
 def _call_openai(
-    content: str, system_prompt: str, model: str, extra: str | None, effort: str | None = None
+    content: str,
+    system_prompt: str,
+    model: str,
+    extra: str | None,
+    effort: str | None = None,
+    timeout: int | None = None,
 ) -> str:
     _load_env_file()
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -121,6 +128,10 @@ def _call_openai(
     kwargs = {}
     if effort:
         kwargs["reasoning"] = {"effort": effort}
+    if timeout is not None:
+        # Per-request override; omitted entirely (not passed as None) so the
+        # SDK's own default applies when the caller didn't ask for a deadline.
+        kwargs["timeout"] = timeout
     try:
         response = client.responses.create(
             model=model,

@@ -296,6 +296,13 @@ def stdin_has_input() -> bool:
     return stat.S_ISFIFO(mode) or stat.S_ISREG(mode)
 
 
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}")
+    return parsed
+
+
 def parse_backend_arg(value: str, single_model: str | None) -> list[tuple[str, str | None]]:
     specs: list[tuple[str, str | None]] = []
     for item in value.split(","):
@@ -399,6 +406,11 @@ def _run():
         help="Reasoning effort, passed through to the backend (values differ per backend: "
              "codex/api e.g. minimal|low|medium|high; claude low|medium|high|xhigh|max). "
              "Not supported by opencode; invalid values fail loudly downstream.",
+    )
+    parser.add_argument(
+        "--timeout", type=positive_int, default=None, metavar="SECONDS",
+        help="Per-backend subprocess timeout in seconds (default: 900 = 15 min). "
+             "Raise for slow high-effort reviews, e.g. --timeout 1800.",
     )
     parser.add_argument(
         "--docs", nargs="*", metavar="PATH",
@@ -543,6 +555,7 @@ def _run():
         model=None,
         json_output=args.json,
         effort=args.effort,
+        timeout=args.timeout,
     )
 
     with ThreadPoolExecutor(max_workers=len(specs)) as pool:

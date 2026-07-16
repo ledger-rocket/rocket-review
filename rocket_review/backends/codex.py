@@ -31,7 +31,8 @@ def review(job: ReviewJob) -> str:
                 schema_file = Path(sf.name)
             cmd += ["--output-schema", str(schema_file)]
         cmd.append(f"Read the file {prompt_file} for your full instructions, then follow them.")
-        base.run_command(cmd)
+        timeout = base.TIMEOUT if job.timeout is None else job.timeout
+        base.run_command(cmd, timeout=timeout)
         output = outfile.read_text(encoding="utf-8", errors="replace").strip()
         if not output:
             raise BackendError("codex produced no output")

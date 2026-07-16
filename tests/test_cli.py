@@ -177,6 +177,50 @@ def test_effort_without_opencode_threads_to_job(monkeypatch, capsys):
     assert captured["effort"] == "medium"
 
 
+def test_timeout_zero_errors(monkeypatch, capsys):
+    code = run_cli(monkeypatch, ["--diff", "--timeout", "0"])
+    assert code != 0
+    assert "positive integer" in capsys.readouterr().err
+
+
+def test_timeout_negative_errors(monkeypatch, capsys):
+    code = run_cli(monkeypatch, ["--diff", "--timeout", "-5"])
+    assert code != 0
+    assert "positive integer" in capsys.readouterr().err
+
+
+def test_timeout_threads_to_job(monkeypatch, capsys):
+    captured = {}
+
+    def review(job):
+        captured["timeout"] = job.timeout
+        return "REVIEW"
+
+    monkeypatch.setattr("rocket_review.cli.BACKENDS", {"codex": types.SimpleNamespace(review=review)})
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex", "--timeout", "1800"])
+    assert code == 0
+    assert captured["timeout"] == 1800
+
+
+def test_timeout_unset_leaves_job_timeout_none(monkeypatch, capsys):
+    captured = {}
+
+    def review(job):
+        captured["timeout"] = job.timeout
+        return "REVIEW"
+
+    monkeypatch.setattr("rocket_review.cli.BACKENDS", {"codex": types.SimpleNamespace(review=review)})
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex"])
+    assert code == 0
+    assert captured["timeout"] is None
+
+
 def test_fanout_gate_exits_2(monkeypatch):
     review_json = (
         '{"verdict": "needs_fixes", "summary": "s", "findings": '

@@ -98,7 +98,9 @@ plain `gpt-5.6` and `gpt-5.6-codex`. The `--backend api` path uses the canonical
 Use `--effort` to set reasoning effort; values differ per backend (codex/api accept
 e.g. `minimal|low|medium|high`, claude `low|medium|high|xhigh|max`) and an unsupported
 value fails loudly at the backend. opencode has no effort flag, so `--effort` errors
-if opencode is among the selected backends.
+if opencode is among the selected backends. Heavy `--effort high` reviews — especially
+on reasoning models — can outrun the default 900s (15 min) subprocess timeout; raise it
+with `--timeout 1800`.
 
 The CLI backends (Codex, Claude, opencode) run agentically in read-only mode: they
 navigate your project — imports, tests, related files — before judging. That context
