@@ -36,7 +36,7 @@ def test_codex_builds_readonly_exec_command(monkeypatch, tmp_path):
 
 def test_codex_default_models():
     assert codex.DEFAULT_MODEL is None
-    assert api.DEFAULT_MODEL == "gpt-5.6"
+    assert api.DEFAULT_MODEL == "gpt-5.6-terra"
 
 
 def test_codex_default_model_omits_flag(monkeypatch):
@@ -146,25 +146,25 @@ def _install_fake_openai(monkeypatch):
 
 def test_api_effort_passes_reasoning_kwarg(monkeypatch):
     _install_fake_openai(monkeypatch)
-    api._call_openai("content", "instructions", "gpt-5.6", None, "low")
+    api._call_openai("content", "instructions", "gpt-5.6-terra", None, "low")
     assert _FakeOpenAI.last_create_kwargs["reasoning"] == {"effort": "low"}
 
 
 def test_api_no_effort_omits_reasoning_kwarg(monkeypatch):
     _install_fake_openai(monkeypatch)
-    api._call_openai("content", "instructions", "gpt-5.6", None, None)
+    api._call_openai("content", "instructions", "gpt-5.6-terra", None, None)
     assert "reasoning" not in _FakeOpenAI.last_create_kwargs
 
 
 def test_api_timeout_passes_timeout_kwarg(monkeypatch):
     _install_fake_openai(monkeypatch)
-    api._call_openai("content", "instructions", "gpt-5.6", None, None, 1800)
+    api._call_openai("content", "instructions", "gpt-5.6-terra", None, None, 1800)
     assert _FakeOpenAI.last_create_kwargs["timeout"] == 1800
 
 
 def test_api_no_timeout_omits_timeout_kwarg(monkeypatch):
     _install_fake_openai(monkeypatch)
-    api._call_openai("content", "instructions", "gpt-5.6", None, None, None)
+    api._call_openai("content", "instructions", "gpt-5.6-terra", None, None, None)
     assert "timeout" not in _FakeOpenAI.last_create_kwargs
 
 
