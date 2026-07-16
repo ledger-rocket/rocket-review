@@ -175,6 +175,19 @@ def test_api_no_timeout_omits_timeout_kwarg(monkeypatch):
     assert "timeout" not in _FakeOpenAI.last_create_kwargs
 
 
+def test_api_missing_openai_sdk_raises_precise_error(monkeypatch):
+    # Base install carries no OpenAI SDK; the api backend must fail with an actionable
+    # BackendError, not leak a bare ImportError. sys.modules[...] = None makes the lazy
+    # `from openai import OpenAI` raise ImportError.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(api, "_load_env_file", lambda: None)
+    monkeypatch.setitem(__import__("sys").modules, "openai", None)
+    with pytest.raises(BackendError) as exc:
+        api._call_openai("content", "instructions", "gpt-5.6-terra", None)
+    msg = str(exc.value)
+    assert "OpenAI SDK" in msg and "rocket-review[api]" in msg
+
+
 def test_api_review_threads_job_timeout_into_call(monkeypatch):
     _install_fake_openai(monkeypatch)
     api.review(job(timeout=42))
