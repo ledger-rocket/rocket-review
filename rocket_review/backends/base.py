@@ -29,6 +29,14 @@ class ReviewJob:
     timeout: int | None = None
 
 
+def format_duration(seconds: int) -> str:
+    """Render a second count as whole minutes when it divides evenly, else seconds."""
+    if seconds != 0 and seconds % 60 == 0:
+        minutes = seconds // 60
+        return f"{minutes} minute" if minutes == 1 else f"{minutes} minutes"
+    return f"{seconds} second" if seconds == 1 else f"{seconds} seconds"
+
+
 def run_command(cmd: list[str], *, stdin: str | None = None, timeout: int = TIMEOUT) -> str:
     try:
         # errors="replace": backend output may quote non-UTF8 bytes from reviewed
@@ -38,10 +46,7 @@ def run_command(cmd: list[str], *, stdin: str | None = None, timeout: int = TIME
             encoding="utf-8", errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        # --timeout now takes arbitrary seconds; only render "N minutes" when it
-        # divides evenly, otherwise report the exact seconds so the message stays true.
-        duration = f"{timeout // 60} minutes" if timeout % 60 == 0 else f"{timeout} seconds"
-        raise BackendError(f"{cmd[0]} timed out after {duration}")
+        raise BackendError(f"{cmd[0]} timed out after {format_duration(timeout)}")
     except FileNotFoundError:
         raise BackendError(f"{cmd[0]} not found on PATH")
     if result.returncode != 0:

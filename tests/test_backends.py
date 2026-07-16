@@ -156,6 +156,24 @@ def test_api_no_effort_omits_reasoning_kwarg(monkeypatch):
     assert "reasoning" not in _FakeOpenAI.last_create_kwargs
 
 
+def test_api_timeout_passes_timeout_kwarg(monkeypatch):
+    _install_fake_openai(monkeypatch)
+    api._call_openai("content", "instructions", "gpt-5.6", None, None, 1800)
+    assert _FakeOpenAI.last_create_kwargs["timeout"] == 1800
+
+
+def test_api_no_timeout_omits_timeout_kwarg(monkeypatch):
+    _install_fake_openai(monkeypatch)
+    api._call_openai("content", "instructions", "gpt-5.6", None, None, None)
+    assert "timeout" not in _FakeOpenAI.last_create_kwargs
+
+
+def test_api_review_threads_job_timeout_into_call(monkeypatch):
+    _install_fake_openai(monkeypatch)
+    api.review(job(timeout=42))
+    assert _FakeOpenAI.last_create_kwargs["timeout"] == 42
+
+
 def test_codex_empty_output_raises(monkeypatch):
     def fake_run(cmd, *, stdin=None, timeout=900):
         out = cmd[cmd.index("-o") + 1]
@@ -171,7 +189,7 @@ def test_codex_empty_output_raises(monkeypatch):
 def test_api_review_prepends_docs_and_passes_model_extra(monkeypatch):
     captured = {}
 
-    def fake_call(content, system_prompt, model, extra, effort=None):
+    def fake_call(content, system_prompt, model, extra, effort=None, timeout=None):
         captured.update(content=content, system_prompt=system_prompt, model=model, extra=extra)
         return "ok"
 
@@ -212,7 +230,7 @@ def test_codex_json_mode_passes_output_schema(monkeypatch):
 def test_api_json_mode_adds_output_override_to_system_prompt(monkeypatch):
     captured = {}
 
-    def fake_call(content, system_prompt, model, extra, effort=None):
+    def fake_call(content, system_prompt, model, extra, effort=None, timeout=None):
         captured["system_prompt"] = system_prompt
         return "ok"
 
@@ -313,6 +331,21 @@ def test_run_command_timeout_message_uses_minutes_for_whole_minutes(monkeypatch)
     monkeypatch.setattr(base.subprocess, "run", fake_run)
     with pytest.raises(BackendError, match=r"timed out after 2 minutes"):
         base.run_command(["x"], timeout=120)
+
+
+@pytest.mark.parametrize(
+    "seconds, expected",
+    [
+        (0, "0 seconds"),
+        (1, "1 second"),
+        (45, "45 seconds"),
+        (60, "1 minute"),
+        (120, "2 minutes"),
+        (900, "15 minutes"),
+    ],
+)
+def test_format_duration_boundaries(seconds, expected):
+    assert base.format_duration(seconds) == expected
 
 
 def test_run_command_zero_timeout_falsy_still_honored_by_codex_and_claude_null_check(monkeypatch):
