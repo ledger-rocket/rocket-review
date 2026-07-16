@@ -6,6 +6,9 @@
 
 **`rr` — a second opinion on your code, from a model that didn't write it.**
 
+> **v0.1 — experimental.** Interfaces and flags may change. Read
+> [Security & data flow](#security--data-flow) before pointing it at anything sensitive.
+
 One small CLI that sends your plan, diff, commit, or PR to an agentic reviewer
 (Codex CLI, Claude Code, or opencode) that explores your project before judging —
 then gives you prose or structured JSON you can gate CI on.
@@ -63,7 +66,7 @@ Requires Python 3.13+ and at least one backend:
 - [Codex CLI](https://github.com/openai/codex) (default backend)
 - [Claude Code](https://claude.com/claude-code) (`--backend claude`)
 - [opencode](https://opencode.ai) (`--backend opencode` — any provider, including local models; **experimental**, see below)
-- or none of the above: `--backend api` (or the `--api` shorthand) calls the OpenAI API directly (`OPENAI_API_KEY`)
+- or none of the above: `--backend api` (or the `--api` shorthand) calls the OpenAI API directly — set `OPENAI_API_KEY` and install the SDK extra: `pipx inject rocket-review openai` (or `pip install 'rocket-review[api]'`)
 
 `--pr` also needs the [gh CLI](https://cli.github.com). Not on PyPI yet — install from Git as above.
 
@@ -173,15 +176,34 @@ review request — the diff or plan, your standards docs, and any files the revi
 opens — sent to whichever backend and provider you chose. Point `rr` at a local
 opencode/Ollama model to keep everything on your machine.
 
+## Security & data flow
+
+`rr` runs the reviewer in a **read-only sandbox** (no writes to your files), but
+read-only is not the same as safe:
+
+- Your code leaves your machine. Each review sends the diff/plan, your standards
+  docs, and any files the reviewer opens to **that backend's provider** — codex/api →
+  OpenAI, claude → Anthropic, opencode → whichever provider you configured (point it
+  at a local Ollama model to keep everything on your machine).
+- Read-only stops *writes*, not *reads*. An agent can still read any secret your shell
+  can (`.env`, `~/.aws`, tokens) and send it upstream.
+- Untrusted input can prompt-inject the reviewer — a hostile PR body, diff, comment,
+  or `AGENTS.md` can try to steer an agentic backend. Be especially careful with `--pr`
+  on a dev machine.
+
+**Don't run agentic backends against untrusted repos or PRs on a machine where readable
+secrets exist.** See [SECURITY.md](SECURITY.md) for the full threat model and how to
+report a vulnerability.
+
 ## Requirements
 
 - **Python** ≥ 3.13
 - **OS** — macOS or Linux
 - **A backend CLI**, installed and authenticated — you only need the one(s) you use:
   - `codex` — [Codex CLI](https://github.com/openai/codex), signed in with your ChatGPT/OpenAI account
-  - `claude` — [Claude Code](https://claude.com/claude-code), on a Claude subscription or API key
+  - `claude` — [Claude Code](https://claude.com/claude-code), on a Claude subscription or API key. Needs a version supporting `--permission-mode manual` (Claude Code 2.1.x+); older CLIs fail the review closed with a usage error. Check with `claude --help | grep -A3 permission-mode`.
   - `opencode` — [opencode](https://opencode.ai), configured for any provider (including a local Ollama model)
-  - `api` — no CLI; set `OPENAI_API_KEY` and `rr` calls the OpenAI API directly
+  - `api` — no CLI, but needs the OpenAI SDK (`pipx inject rocket-review openai`, or `pip install 'rocket-review[api]'`); set `OPENAI_API_KEY` and `rr` calls the OpenAI API directly
 - `gh` CLI, authenticated, for `--pr`
 
 ## Agent integration
@@ -195,9 +217,12 @@ For plans, run `rr plan.md --docs` before implementing. Use a 900000ms timeout.
 
 ## Notes
 
-- Every backend is read-only on your project: Codex runs with `-s read-only`,
-  Claude Code with a read-only tool allowlist, and opencode with its built-in
-  read-only `plan` agent (edit/write denied at the tool level).
+- Every backend runs in a read-only sandbox on your project — **no writes**: Codex
+  runs with `-s read-only`, Claude Code with a read-only tool allowlist under
+  `--permission-mode manual`, and opencode with its built-in read-only `plan` agent
+  (edit/write denied at the tool level). Read-only stops writes; it does not stop the
+  agent *reading* readable secrets and sending them to the backend's provider — see
+  [Security & data flow](#security--data-flow).
 - `--fail-on` requires `--json`.
 - Exit codes: 0 no gate tripped · 1 operational error (or every backend failed) · 2 findings at/above `--fail-on`. A partial backend failure warns on stderr but still exits 0 — gate CI with `--json --fail-on` to fail closed.
 

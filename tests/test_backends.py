@@ -175,6 +175,19 @@ def test_api_no_timeout_omits_timeout_kwarg(monkeypatch):
     assert "timeout" not in _FakeOpenAI.last_create_kwargs
 
 
+def test_api_missing_openai_sdk_raises_precise_error(monkeypatch):
+    # Base install carries no OpenAI SDK; the api backend must fail with an actionable
+    # BackendError, not leak a bare ImportError. sys.modules[...] = None makes the lazy
+    # `from openai import OpenAI` raise ImportError.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(api, "_load_env_file", lambda: None)
+    monkeypatch.setitem(__import__("sys").modules, "openai", None)
+    with pytest.raises(BackendError) as exc:
+        api._call_openai("content", "instructions", "gpt-5.6-terra", None)
+    msg = str(exc.value)
+    assert "OpenAI SDK" in msg and "rocket-review[api]" in msg
+
+
 def test_api_review_threads_job_timeout_into_call(monkeypatch):
     _install_fake_openai(monkeypatch)
     api.review(job(timeout=42))
@@ -341,8 +354,35 @@ def test_claude_uses_readonly_allowlist_and_stdin(monkeypatch):
     assert cmd[:2] == ["claude", "-p"]
     allow = cmd[cmd.index("--allowedTools") + 1]
     assert "Read" in allow and "Write" not in allow and "Edit" not in allow
+    # The allowlist is only restrictive under manual permission mode: without it,
+    # headless Claude Code auto-approves unlisted (mutating) tools.
+    assert cmd[cmd.index("--permission-mode") + 1] == "manual"
+    # Never a wildcard git rule: git diff/show/log all accept --output=<file>, so a
+    # `Bash(git diff:*)` allow rule would be a write vector. This job inlines content
+    # (no git_cmd/commit), so no Bash rule at all.
+    assert "Bash(git" not in allow
     assert "--model" in cmd and "claude-sonnet-5" in cmd
     assert "DIFF TO REVIEW" in captured["stdin"]  # prompt travels via stdin, not argv
+
+
+def test_claude_git_view_rule_is_exact_match_not_wildcard(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"] = cmd
+        return "ok"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+
+    # --diff/--staged: the exact git command is allow-listed so --output can't be appended.
+    claude.review(job(content=None, git_cmd="git diff HEAD"))
+    allow = captured["cmd"][captured["cmd"].index("--allowedTools") + 1]
+    assert "Bash(git diff HEAD)" in allow and "Bash(git diff:*)" not in allow
+
+    # --commit: git-show the exact reviewed OID, nothing wider.
+    claude.review(job(content=None, commit="deadbeef"))
+    allow = captured["cmd"][captured["cmd"].index("--allowedTools") + 1]
+    assert "Bash(git show deadbeef)" in allow and "Bash(git show:*)" not in allow
 
 
 def test_claude_default_model_omits_flag(monkeypatch):

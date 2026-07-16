@@ -128,7 +128,14 @@ def _call_openai(
     if not api_key:
         raise BackendError("OPENAI_API_KEY not set. Export it or put it in .env")
 
-    from openai import OpenAI
+    # Lazy import so the base install stays SDK-free; only the api backend needs it.
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise BackendError(
+            "the api backend needs the OpenAI SDK — install with "
+            "`pipx inject rocket-review openai` or `pip install 'rocket-review[api]'`"
+        ) from exc
 
     client_kwargs = {"api_key": api_key}
     if timeout is not None:
