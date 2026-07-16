@@ -56,6 +56,80 @@ def test_should_fail_on_blocker_verdict_without_findings():
     assert should_fail([parse_backend_output(txt, "codex", None)], "critical")
 
 
+def test_needs_fixes_empty_findings_fails_closed_every_threshold():
+    # A needs_fixes verdict asserts changes are required, but zero findings leave the
+    # threshold gate nothing to measure — untrustworthy, so treat it as a parse_error.
+    txt = '{"verdict": "needs_fixes", "summary": "changes needed", "findings": []}'
+    r = parse_backend_output(txt, "codex", None)
+    assert r.parse_error and r.raw == txt
+    for threshold in SEVERITIES:
+        assert should_fail([r], threshold)
+
+
+def test_needs_fixes_sub_threshold_findings_still_passes():
+    # The boundary: needs_fixes WITH only findings below the threshold must still pass —
+    # the user explicitly chose to tolerate sub-threshold issues via --fail-on.
+    txt = (
+        '{"verdict": "needs_fixes", "summary": "s", "findings": ['
+        '{"severity": "low", "title": "t", "file": null, "line": null, "why": "w", "fix": "f"}'
+        ']}'
+    )
+    r = parse_backend_output(txt, "codex", None)
+    assert not r.parse_error
+    assert not should_fail([r], "high")
+
+
+def test_needs_fixes_at_threshold_findings_trips():
+    txt = (
+        '{"verdict": "needs_fixes", "summary": "s", "findings": ['
+        '{"severity": "high", "title": "t", "file": null, "line": null, "why": "w", "fix": "f"}'
+        ']}'
+    )
+    assert should_fail([parse_backend_output(txt, "codex", None)], "high")
+
+
+def test_blocker_empty_findings_fails_closed():
+    txt = '{"verdict": "blocker", "summary": "blocked", "findings": []}'
+    r = parse_backend_output(txt, "codex", None)
+    assert should_fail([r], "high")
+
+
+def test_blocker_sub_threshold_findings_still_trips():
+    # A blocker verdict trips the gate regardless of finding severity — unchanged.
+    txt = (
+        '{"verdict": "blocker", "summary": "s", "findings": ['
+        '{"severity": "low", "title": "t", "file": null, "line": null, "why": "w", "fix": "f"}'
+        ']}'
+    )
+    assert should_fail([parse_backend_output(txt, "codex", None)], "high")
+
+
+def test_approve_empty_findings_passes():
+    txt = '{"verdict": "approve", "summary": "clean", "findings": []}'
+    r = parse_backend_output(txt, "codex", None)
+    assert not r.parse_error
+    assert not should_fail([r], "high")
+
+
+def test_approve_with_critical_finding_trips():
+    # Findings win over an approve verdict: a critical finding still trips the gate.
+    txt = (
+        '{"verdict": "approve", "summary": "s", "findings": ['
+        '{"severity": "critical", "title": "t", "file": null, "line": null, "why": "w", "fix": "f"}'
+        ']}'
+    )
+    assert should_fail([parse_backend_output(txt, "codex", None)], "high")
+
+
+def test_envelope_surfaces_needs_fixes_empty_as_parse_error():
+    txt = '{"verdict": "needs_fixes", "summary": "changes needed", "findings": []}'
+    env = to_envelope([parse_backend_output(txt, "codex", None)], fail_on="high")
+    s = env["summary"]
+    assert s["backends_parse_failed"] == 1
+    assert s["findings_total"] == 0
+    assert s["gate"] == {"threshold": "high", "tripped": True}
+
+
 def test_parse_missing_verdict_is_parse_error():
     r = parse_backend_output('{"findings": []}', "api", None)
     assert r.parse_error

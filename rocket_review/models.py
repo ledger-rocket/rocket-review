@@ -98,6 +98,11 @@ def parse_backend_output(text: str, backend: str, model: str | None) -> BackendR
             backend=backend,
             model=model,
         ))
+    if verdict in ("needs_fixes", "blocker") and not findings:
+        # The verdict demands changes but gives the threshold gate nothing to measure:
+        # the gate can't confirm the asserted problems fall below --fail-on, so passing
+        # would be untrustworthy. Fail closed, same as unparsable output (raw preserved).
+        return BackendResult(backend=backend, model=model, raw=text, parse_error=True)
     return BackendResult(
         backend=backend, model=model,
         verdict=verdict, summary=obj.get("summary"),
