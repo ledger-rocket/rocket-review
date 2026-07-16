@@ -98,6 +98,12 @@ def parse_backend_output(text: str, backend: str, model: str | None) -> BackendR
             backend=backend,
             model=model,
         ))
+    # A needs_fixes verdict asserts changes are required but gives the --fail-on
+    # threshold no findings to measure, so it can't confirm the issues are below
+    # the caller's bar. Fail closed. (blocker+empty already fails closed via
+    # should_fail's blocker-verdict path, which keeps the structured verdict.)
+    if verdict == "needs_fixes" and not findings:
+        return BackendResult(backend=backend, model=model, raw=text, parse_error=True)
     return BackendResult(
         backend=backend, model=model,
         verdict=verdict, summary=obj.get("summary"),
@@ -113,7 +119,12 @@ def _severity_rank(severity: str) -> int:
 
 def should_fail(results: list[BackendResult], threshold: str) -> bool:
     # Fail closed: a backend that errored or produced unparsable output blocks the gate.
-    if any(r.error or r.parse_error for r in results):
+    if any(r.error is not None or r.parse_error for r in results):
+        return True
+    # A `blocker` verdict is the model's top-level "do not merge"; honor it even when
+    # no individual finding reaches the threshold, or the gate could pass a review that
+    # explicitly concluded the change must be blocked.
+    if any(r.verdict == "blocker" for r in results):
         return True
     limit = SEVERITIES.index(threshold)
     return any(

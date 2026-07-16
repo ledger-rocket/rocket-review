@@ -10,9 +10,7 @@ from rocket_review.prompts import build_agent_prompt
 NAME = "codex"
 BINARY = "codex"
 INSTALL_HINT = "npm install -g @openai/codex (https://github.com/openai/codex)"
-# The ChatGPT-account-accessible 5.6 variant; plain gpt-5.6 is API-key-only
-# (codex with a ChatGPT account rejects gpt-5.6 and gpt-5.6-codex).
-DEFAULT_MODEL = "gpt-5.6-sol"
+DEFAULT_MODEL = None  # honor the user's codex default (~/.codex/config.toml)
 
 
 def review(job: ReviewJob) -> str:
@@ -21,8 +19,10 @@ def review(job: ReviewJob) -> str:
         outfile = Path(f.name)
     schema_file = None
     try:
-        cmd = ["codex", "exec", "-s", "read-only", "-o", str(outfile),
-               "-m", job.model or DEFAULT_MODEL]
+        cmd = ["codex", "exec", "-s", "read-only", "-o", str(outfile)]
+        model = job.model or DEFAULT_MODEL
+        if model:
+            cmd += ["-m", model]
         if job.effort:
             cmd += ["-c", f"model_reasoning_effort={job.effort}"]
         if job.json_output:
@@ -31,7 +31,8 @@ def review(job: ReviewJob) -> str:
                 schema_file = Path(sf.name)
             cmd += ["--output-schema", str(schema_file)]
         cmd.append(f"Read the file {prompt_file} for your full instructions, then follow them.")
-        base.run_command(cmd)
+        timeout = base.TIMEOUT if job.timeout is None else job.timeout
+        base.run_command(cmd, timeout=timeout)
         output = outfile.read_text(encoding="utf-8", errors="replace").strip()
         if not output:
             raise BackendError("codex produced no output")

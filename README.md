@@ -90,13 +90,17 @@ rr --diff --backend codex:gpt-5.6-sol,claude:claude-opus-4-8
 rr --diff --effort high                        # more reasoning effort (per-backend flag)
 ```
 
-Model names: the codex backend defaults to `gpt-5.6-sol`, the ChatGPT-account-accessible
-5.6 variant — codex signed into a ChatGPT account rejects plain `gpt-5.6` and
-`gpt-5.6-codex`. The `--backend api` path uses the canonical `gpt-5.6` (API-key auth).
+Model names: the codex backend passes no `-m`, so it honors your codex default
+(set `model` in `~/.codex/config.toml`). On ChatGPT plans use `gpt-5.6-sol`, the
+ChatGPT-account-accessible 5.6 variant — codex signed into a ChatGPT account rejects
+plain `gpt-5.6` and `gpt-5.6-codex`. The `--backend api` path uses the canonical
+`gpt-5.6` (API-key auth).
 Use `--effort` to set reasoning effort; values differ per backend (codex/api accept
 e.g. `minimal|low|medium|high`, claude `low|medium|high|xhigh|max`) and an unsupported
 value fails loudly at the backend. opencode has no effort flag, so `--effort` errors
-if opencode is among the selected backends.
+if opencode is among the selected backends. Heavy `--effort high` reviews — especially
+on reasoning models — can outrun the default 900s (15 min) subprocess timeout; raise it
+with `--timeout 1800`.
 
 The CLI backends (Codex, Claude, opencode) run agentically in read-only mode: they
 navigate your project — imports, tests, related files — before judging. That context
