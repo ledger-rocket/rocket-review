@@ -10,6 +10,8 @@ from rocket_review.cli import (
     RAW_TRUNCATE_LIMIT,
     detect_mode,
     ensure_diff_exists,
+    get_commit_diff,
+    get_diff,
     main,
     parse_backend_arg,
     resolve_commit,
@@ -330,23 +332,41 @@ def test_mixed_diff_fanout_shares_single_snapshot(monkeypatch, capsys):
     assert jobs["codex"].git_cmd is None and jobs["opencode"].git_cmd is None
 
 
-def test_mixed_commit_fanout_shares_single_snapshot(monkeypatch):
+def test_get_diff_preserves_trailing_whitespace(monkeypatch):
+    # The materialized snapshot must be byte-identical: trailing whitespace on the last
+    # changed line is part of the patch and must survive to the reviewer.
+    raw = "diff --git a b\n@@ -1 +1 @@\n-x\n+line with trailing spaces   \n"
+    monkeypatch.setattr(
+        "rocket_review.cli.run_capture",
+        lambda cmd: types.SimpleNamespace(returncode=0, stdout=raw, stderr=""),
+    )
+    assert get_diff(staged=False) == raw
+
+
+def test_get_commit_diff_preserves_trailing_whitespace(monkeypatch):
+    raw = "commit abc123\n@@ -1 +1 @@\n+trailing   \n"
+    monkeypatch.setattr(
+        "rocket_review.cli.run_capture",
+        lambda cmd: types.SimpleNamespace(returncode=0, stdout=raw, stderr=""),
+    )
+    assert get_commit_diff("abc123") == raw
+
+
+def test_mixed_commit_fanout_specializes_per_backend(monkeypatch):
+    # A commit OID is immutable, so codex keeps it and `git show`s the exact commit while
+    # opencode (which can't run git) gets the commit diff materialized.
     oid = "a" * 40
     monkeypatch.setattr("rocket_review.cli.resolve_commit", lambda rev: oid)
-    calls = {"n": 0}
-
-    def fake_commit_diff(o):
-        calls["n"] += 1
-        return f"commit {o}\n+CSNAP-{calls['n']}"
-
-    monkeypatch.setattr("rocket_review.cli.get_commit_diff", fake_commit_diff)
+    monkeypatch.setattr(
+        "rocket_review.cli.get_commit_diff", lambda o: f"commit {o}\n+CSNAP-5d1e"
+    )
     jobs = _capture_jobs(monkeypatch, "codex", "opencode")
     code = run_main(monkeypatch, ["--commit", "deadbeef", "--backend", "codex,opencode"])
     assert code == 0
-    assert calls["n"] == 1
-    assert jobs["codex"].content == jobs["opencode"].content
-    assert "CSNAP-1" in jobs["codex"].content
-    assert jobs["codex"].commit is None and jobs["opencode"].commit is None
+    assert jobs["codex"].content is None
+    assert jobs["codex"].commit == oid  # codex git-shows the immutable commit
+    assert "CSNAP-5d1e" in jobs["opencode"].content
+    assert jobs["opencode"].commit is None  # opencode gets it materialized
 
 
 def test_keyboardinterrupt_during_fanout_terminates_active_commands(monkeypatch):

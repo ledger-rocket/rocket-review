@@ -160,12 +160,14 @@ def get_diff(staged: bool) -> str:
     if result.returncode != 0:
         print(f"Error: {' '.join(cmd)} failed: {result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
-    diff = result.stdout.strip()
-    if not diff:
+    # Return the diff verbatim (strip only decides emptiness): trailing whitespace on the
+    # last changed line is part of the patch, and this snapshot must be byte-identical to
+    # what every backend reviews.
+    if not result.stdout.strip():
         label = "staged changes" if staged else "uncommitted changes"
         print(f"Error: no {label} found.", file=sys.stderr)
         sys.exit(1)
-    return diff
+    return result.stdout
 
 
 def ensure_diff_exists(staged: bool) -> None:
@@ -209,11 +211,12 @@ def get_commit_diff(oid: str) -> str:
     if result.returncode != 0:
         print(f"Error: git show {oid} failed: {result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
-    diff = result.stdout.strip()
-    if not diff:
+    # Verbatim (strip only decides emptiness); see get_diff — the snapshot must be
+    # byte-identical to what every backend reviews.
+    if not result.stdout.strip():
         print(f"Error: no output for commit {oid}.", file=sys.stderr)
         sys.exit(1)
-    return diff
+    return result.stdout
 
 
 def get_pr_content(pr_ref: str, repo: str | None = None) -> tuple[str, str]:
@@ -309,9 +312,15 @@ def parse_backend_arg(value: str, single_model: str | None) -> list[tuple[str, s
 
 
 def run_one(
-    name: str, model: str | None, job_template: ReviewJob
+    name: str, model: str | None, job_template: ReviewJob, commit_content: str | None
 ) -> tuple[str, str | None, str | None, str | None]:
     job = replace(job_template, model=model)
+    # A commit OID is immutable, so codex/claude keep it and `git show` the exact commit
+    # (no snapshot-drift risk, and they don't front-load a large diff into the prompt).
+    # api/opencode can't run git, so they get the commit materialized instead. A mutable
+    # working-tree diff is already captured once into job.content and shared by everyone.
+    if commit_content is not None and name in {"api", "opencode"}:
+        job = replace(job, content=commit_content, commit=None)
     try:
         raw = BACKENDS[name].review(job)
         # Central fail-closed check: the CLI backends already reject empty output, but
@@ -467,10 +476,10 @@ def _run():
             sys.exit(1)
     # api has no repo to navigate, and opencode's read-only `plan` agent may be denied the
     # tools it would need to run git itself in non-interactive mode — so if either is
-    # selected we materialize the diff/commit once and hand the SAME snapshot to every
-    # backend. That both fixes opencode (it can't review nothing) and keeps a cross-model
-    # fan-out honest: all backends judge identical bytes rather than each re-running git at
-    # a slightly different instant. Pure codex/claude runs stay agentic (content=None).
+    # selected we materialize content for them. A mutable working-tree diff is captured
+    # ONCE and shared by every backend (so a cross-model fan-out judges identical bytes,
+    # not each re-running git at a slightly different instant). A commit is immutable, so
+    # only api/opencode get it materialized (run_one) while codex/claude git-show the OID.
     needs_content = any(name in {"api", "opencode"} for name, _ in specs)
 
     # Validate mutually exclusive sources
@@ -485,10 +494,12 @@ def _run():
         print("Error: specify only one review source (files, --diff, --staged, --commit, --pr, or stdin).", file=sys.stderr)
         sys.exit(1)
 
-    # Gather content to review. When needs_content, the diff/commit is materialized into a
-    # single `content` shared by every backend; otherwise it stays None and codex/claude
-    # run git themselves. Files, stdin, and PR sources are always materialized.
+    # Gather content to review. For a mutable working-tree diff, needs_content captures one
+    # `content` shared by every backend; otherwise it stays None and codex/claude run git.
+    # For a commit, codex/claude always git-show the OID (commit_oid) and api/opencode get
+    # the diff via commit_content (run_one). Files, stdin, and PR sources are materialized.
     content: str | None = None
+    commit_content: str | None = None
     git_cmd: str | None = None
     commit_oid: str | None = None
     if args.pr:
@@ -496,11 +507,9 @@ def _run():
         content = f"=== PULL REQUEST ===\n{pr_description}\n=== END PULL REQUEST ===\n\n{diff}"
         mode = "diff"
     elif args.commit:
-        oid = resolve_commit(args.commit)
+        commit_oid = resolve_commit(args.commit)
         if needs_content:
-            content = get_commit_diff(oid)  # one snapshot for every backend
-        else:
-            commit_oid = oid  # let the agentic backend run git show itself
+            commit_content = get_commit_diff(commit_oid)  # for api/opencode
         mode = "diff"
     elif args.diff or args.staged:
         if needs_content:
@@ -550,16 +559,19 @@ def _run():
     )
 
     with ThreadPoolExecutor(max_workers=len(specs)) as pool:
-        futures = [pool.submit(run_one, name, model, job) for name, model in specs]
+        futures = [
+            pool.submit(run_one, name, model, job, commit_content) for name, model in specs
+        ]
         try:
             outputs = [f.result() for f in futures]  # preserves --backend order
         except KeyboardInterrupt:
             # SIGINT lands here on the main thread, not in the workers blocked on their
             # subprocesses. Tear the backend process groups down before the executor's
             # __exit__ waits on the workers, or Ctrl-C hangs until each backend times out.
-            # Best-effort: this kills registered subprocess groups (codex/claude/opencode);
-            # an in-flight `api` HTTP request has no process to signal and finishes or hits
-            # its own client timeout.
+            # Best-effort by design: this kills registered subprocess groups
+            # (codex/claude/opencode); an in-flight `api` HTTP request has no process to
+            # signal and finishes or hits its own client timeout, and a subprocess launched
+            # during teardown may survive to its own timeout.
             base.terminate_active_commands()
             raise
 
