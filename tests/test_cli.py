@@ -265,23 +265,139 @@ def test_fanout_unexpected_worker_exception_surfaces_as_backend_error(monkeypatc
     assert "some backends failed" in out.err
 
 
+def _capture_jobs(monkeypatch, *backend_names):
+    """Swap in fake backends that each record the ReviewJob they are handed, keyed by name."""
+    jobs = {}
+
+    def make(name):
+        def review(job):
+            jobs[name] = job
+            return "OK REVIEW"
+        return review
+
+    monkeypatch.setattr(
+        "rocket_review.cli.BACKENDS",
+        {name: types.SimpleNamespace(review=make(name)) for name in backend_names},
+    )
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    return jobs
+
+
+def test_opencode_diff_materializes_content_at_cli(monkeypatch, capsys):
+    # opencode can't be trusted to run git itself in a locked-down plan agent, so the CLI
+    # must hand it the diff materialized (content set), never content=None.
+    marker = "UNIQUE-DIFF-MARKER-9f3a"
+    monkeypatch.setattr(
+        "rocket_review.cli.get_diff", lambda staged: f"diff --git a b\n+{marker}"
+    )
+    jobs = _capture_jobs(monkeypatch, "opencode")
+    code = run_main(monkeypatch, ["--diff", "--backend", "opencode"])
+    assert code == 0
+    job = jobs["opencode"]
+    assert job.content is not None
+    assert marker in job.content
+    assert job.git_cmd is None  # not told to fetch the diff itself
+
+
+def test_codex_diff_stays_agentic_at_cli(monkeypatch, capsys):
+    # codex keeps the agentic path (content=None + a git_cmd) — Fix 1 must not regress it.
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    jobs = _capture_jobs(monkeypatch, "codex")
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex"])
+    assert code == 0
+    job = jobs["codex"]
+    assert job.content is None
+    assert job.git_cmd == "git diff HEAD"
+
+
+def test_mixed_diff_fanout_shares_single_snapshot(monkeypatch, capsys):
+    # When one backend forces materialization, the diff is captured ONCE and the identical
+    # bytes go to every backend — no per-backend git re-run that could see a different tree.
+    calls = {"n": 0}
+
+    def fake_get_diff(staged):
+        calls["n"] += 1
+        return f"diff --git a b\n+SNAPSHOT-{calls['n']}"
+
+    monkeypatch.setattr("rocket_review.cli.get_diff", fake_get_diff)
+    jobs = _capture_jobs(monkeypatch, "codex", "opencode")
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex,opencode"])
+    assert code == 0
+    assert calls["n"] == 1  # captured once, so no post-capture divergence is possible
+    assert jobs["codex"].content == jobs["opencode"].content  # identical bytes
+    assert "SNAPSHOT-1" in jobs["codex"].content
+    assert jobs["codex"].git_cmd is None and jobs["opencode"].git_cmd is None
+
+
+def test_mixed_commit_fanout_shares_single_snapshot(monkeypatch):
+    oid = "a" * 40
+    monkeypatch.setattr("rocket_review.cli.resolve_commit", lambda rev: oid)
+    calls = {"n": 0}
+
+    def fake_commit_diff(o):
+        calls["n"] += 1
+        return f"commit {o}\n+CSNAP-{calls['n']}"
+
+    monkeypatch.setattr("rocket_review.cli.get_commit_diff", fake_commit_diff)
+    jobs = _capture_jobs(monkeypatch, "codex", "opencode")
+    code = run_main(monkeypatch, ["--commit", "deadbeef", "--backend", "codex,opencode"])
+    assert code == 0
+    assert calls["n"] == 1
+    assert jobs["codex"].content == jobs["opencode"].content
+    assert "CSNAP-1" in jobs["codex"].content
+    assert jobs["codex"].commit is None and jobs["opencode"].commit is None
+
+
+def test_keyboardinterrupt_during_fanout_terminates_active_commands(monkeypatch):
+    # Ctrl-C reaches the main thread at f.result(); the CLI must tear down the backend
+    # process groups before the executor waits on the workers, or it hangs until timeout.
+    killed = {"called": False}
+    monkeypatch.setattr(
+        "rocket_review.cli.base.terminate_active_commands",
+        lambda: killed.__setitem__("called", True),
+    )
+
+    def review(job):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        "rocket_review.cli.BACKENDS",
+        {"codex": types.SimpleNamespace(review=review)},
+    )
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    monkeypatch.setattr("sys.argv", ["rr", "--diff", "--backend", "codex"])
+    with pytest.raises(KeyboardInterrupt):
+        main()
+    assert killed["called"]
+
+
 def _json_envelope(monkeypatch, capsys, review_output, extra_args=()):
     patch_backends(monkeypatch, {"codex": review_output})
     code = run_main(monkeypatch, ["--diff", "--backend", "codex", "--json", *extra_args])
     return code, json.loads(capsys.readouterr().out)
 
 
-def test_json_truncates_long_raw_and_writes_full_to_file(monkeypatch, capsys):
-    from pathlib import Path
+def test_json_truncates_long_raw_inline_without_spilling_to_disk(monkeypatch, capsys):
+    import tempfile
 
+    def boom(*a, **k):
+        raise AssertionError("truncation must not spill review text to a temp file")
+
+    # Any attempt to create a spill file fails the test outright — no reliance on scanning
+    # the shared system temp dir (which a concurrent process could perturb).
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", boom)
     long = REVIEW_JSON.format(body="x" * 5000)
     assert len(long) > RAW_TRUNCATE_LIMIT
     code, env = _json_envelope(monkeypatch, capsys, long)
     assert code == 0
     r = env["results"][0]
     assert "(truncated," in r["raw"] and "use --full to inline" in r["raw"]
+    assert str(len(long)) in r["raw"]  # marker names the full length
     assert len(r["raw"]) < len(long)
-    assert Path(r["raw_file"]).read_text() == long  # full original preserved on disk
+    assert r["raw_file"] is None  # nothing written to disk; no secret-leaking spill file
 
 
 def test_json_short_raw_untouched(monkeypatch, capsys):
@@ -291,20 +407,6 @@ def test_json_short_raw_untouched(monkeypatch, capsys):
     r = env["results"][0]
     assert r["raw"] == short
     assert r["raw_file"] is None
-
-
-def test_json_truncation_survives_tempfile_failure(monkeypatch, capsys):
-    def boom(*a, **k):
-        raise OSError("read-only fs")
-
-    monkeypatch.setattr("rocket_review.cli.tempfile.NamedTemporaryFile", boom)
-    long = REVIEW_JSON.format(body="x" * 5000)
-    code, env = _json_envelope(monkeypatch, capsys, long)
-    assert code == 0  # a full/read-only TMPDIR must not crash a good review
-    r = env["results"][0]
-    assert "could not write full text" in r["raw"]
-    assert r["raw_file"] is None
-    assert len(r["raw"]) < len(long)
 
 
 def test_json_full_flag_inlines_everything(monkeypatch, capsys):
