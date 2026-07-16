@@ -98,6 +98,12 @@ def parse_backend_output(text: str, backend: str, model: str | None) -> BackendR
             backend=backend,
             model=model,
         ))
+    # A needs_fixes verdict asserts changes are required but gives the --fail-on
+    # threshold no findings to measure, so it can't confirm the issues are below
+    # the caller's bar. Fail closed. (blocker+empty already fails closed via
+    # should_fail's blocker-verdict path, which keeps the structured verdict.)
+    if verdict == "needs_fixes" and not findings:
+        return BackendResult(backend=backend, model=model, raw=text, parse_error=True)
     return BackendResult(
         backend=backend, model=model,
         verdict=verdict, summary=obj.get("summary"),
