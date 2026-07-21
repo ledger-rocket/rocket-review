@@ -67,7 +67,8 @@ jobs:
         run: |
           uv venv
           uv pip install dist/*.whl
-          .venv/bin/python -c "import rocket_review.cli, rocket_review.review, rocket_review.prompts"
+          .venv/bin/python -c \
+            "import rocket_review.cli, rocket_review.models, rocket_review.prompts, rocket_review.backends"
 
   yaml-lint:
     runs-on: ubuntu-latest

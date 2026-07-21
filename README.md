@@ -13,9 +13,14 @@ One small CLI that sends your plan, diff, commit, or PR to an agentic reviewer
 (Codex CLI, Claude Code, or opencode) that explores your project before judging —
 then gives you prose or structured JSON you can gate CI on.
 
-Unlike editor-bound plugins (e.g. OpenAI's codex-plugin-cc, which does GPT reviews
-but only inside Claude Code), `rr` is a standalone CLI: call it from any shell, any
-editor, any agent, or CI.
+Single-model local review is built into the vendor CLIs now (`codex review`,
+Claude Code's `/code-review`) — `rr` exists for what a single vendor can't give
+you: a second opinion from a *different* vendor's model, in one command, from any
+shell, editor, agent, or CI.
+
+`rr` is deliberately **not a PR bot**. It reviews before you push — the point is
+that the issues get fixed before a PR exists. It posts nothing anywhere; if you
+want PR comments, pipe the `--json` envelope into whatever posts them.
 
 ## What a review looks like
 
@@ -44,9 +49,11 @@ flagging the regression — not a pattern match on the diff.
 
 ## Why
 
-- **Cross-model review** — the model that wrote the code shouldn't be the only one
-  grading it. Implement with Claude, review with GPT; implement with Codex, review
-  with Claude; or fan out to both and compare.
+- **Cross-vendor review** — the model that wrote the code shouldn't be the only one
+  grading it: a model reviewing its own output inherits its own blind spots, and a
+  vendor's built-in reviewer is always the same family that wrote the code. Implement
+  with Claude, review with GPT; implement with Codex, review with Claude; or
+  `--backend codex,claude` fans out to both and shows you where they disagree.
 - **Plans are reviewable too** — `rr plan.md` stress-tests a design doc *before*
   you build it. Most review tools only understand diffs.
 - **Standards-aware** — `--docs` auto-discovers `llms.txt`, `AGENTS.md`, or
@@ -66,7 +73,7 @@ Requires Python 3.13+ and at least one backend:
 - [Codex CLI](https://github.com/openai/codex) (default backend)
 - [Claude Code](https://claude.com/claude-code) (`--backend claude`)
 - [opencode](https://opencode.ai) (`--backend opencode` — any provider, including local models; **experimental**, see below)
-- or none of the above: `--backend api` (or the `--api` shorthand) calls the OpenAI API directly — set `OPENAI_API_KEY` and install the SDK extra: `pipx inject rocket-review openai` (or `pip install 'rocket-review[api]'`)
+- or none of the above: `--backend api` (or the `--api` shorthand) calls the OpenAI API directly — set `OPENAI_API_KEY` and install the SDK extra: `pipx inject rocket-review openai` (or, once installing from PyPI, `pip install 'rocket-review[api]'`)
 
 `--pr` also needs the [gh CLI](https://cli.github.com). Not on PyPI yet — install from Git as above.
 
@@ -203,7 +210,7 @@ report a vulnerability.
   - `codex` — [Codex CLI](https://github.com/openai/codex), signed in with your ChatGPT/OpenAI account
   - `claude` — [Claude Code](https://claude.com/claude-code), on a Claude subscription or API key. Needs a version supporting `--permission-mode manual` (Claude Code 2.1.x+); older CLIs fail the review closed with a usage error. Check with `claude --help | grep -A3 permission-mode`.
   - `opencode` — [opencode](https://opencode.ai), configured for any provider (including a local Ollama model)
-  - `api` — no CLI, but needs the OpenAI SDK (`pipx inject rocket-review openai`, or `pip install 'rocket-review[api]'`); set `OPENAI_API_KEY` and `rr` calls the OpenAI API directly
+  - `api` — no CLI, but needs the OpenAI SDK (`pipx inject rocket-review openai`, or once installing from PyPI, `pip install 'rocket-review[api]'`); set `OPENAI_API_KEY` and `rr` calls the OpenAI API directly
 - `gh` CLI, authenticated, for `--pr`
 
 ## Agent integration
@@ -233,11 +240,13 @@ Issues and PRs are welcome. To set up a dev environment:
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest -q      # run the tests
-.venv/bin/ruff check .   # lint
+.venv/bin/pytest -q                  # run the tests
+.venv/bin/ruff check .               # lint
+.venv/bin/mypy rocket_review/        # type-check
+.venv/bin/yamllint .                 # yaml lint
 ```
 
-Please run the tests and the linter before opening a PR.
+CI gates all four plus a package build — run them before opening a PR.
 
 ## License
 

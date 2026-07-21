@@ -10,7 +10,16 @@ requires-python = ">=3.13"
 license = "Apache-2.0"
 readme = "README.md"
 keywords = ["code-review", "llm", "ai", "cli", "developer-tools"]
-classifiers = ["Development Status :: 4 - Beta"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+]
 # Base install stays light: the CLI backends (codex/claude/opencode) shell out to
 # their own tools. Only the `api` backend needs the OpenAI SDK — see the [api] extra.
 dependencies = []
@@ -25,7 +34,7 @@ rr = "rocket_review.cli:main"
 [project.optional-dependencies]
 api = ["openai>=1.68"]
 # dev pulls in [api] so the api backend's tests run; single source for the openai pin.
-dev = ["pytest>=8", "ruff>=0.6", "rocket-review[api]"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.18", "yamllint>=1.37", "rocket-review[api]"]
 
 [tool.ruff]
 line-length = 100

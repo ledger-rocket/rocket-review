@@ -51,8 +51,8 @@ def truncate_raw(results: list[BackendResult]) -> None:
 
     A truncated review can quote proprietary code or secrets, so it must not be written
     to a world-readable temp file that nothing ever cleans up. The envelope stays bounded
-    by dropping the tail (agent-ergonomic axi P3: the marker names the full length and
-    points at --full, which inlines the complete text on demand).
+    by dropping the tail; the truncation marker names the full length and points at
+    --full, which inlines the complete text on demand.
     """
     for r in results:
         if len(r.raw) <= RAW_TRUNCATE_LIMIT:
@@ -599,7 +599,7 @@ def _run():
                 print(f"[backend error] {r.error}", file=sys.stderr)
             else:
                 print(r.raw)
-        # Next-step hint on stderr, not stdout (axi P9 places it on stdout): keeps a
+        # Next-step hint on stderr, not stdout: keeps a
         # piped `rr --diff > review.txt` clean. Text-mode success only — never in --json
         # (envelope purity), never when every backend errored (handled by the exit below).
         if not all(r.error for r in results):
