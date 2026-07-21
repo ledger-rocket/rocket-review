@@ -3,6 +3,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 from rocket_review.backends.base import BackendError, ReviewJob, format_duration
 from rocket_review.prompts import get_prompt
@@ -137,17 +138,17 @@ def _call_openai(
             "`pipx inject rocket-review openai` or `pip install 'rocket-review[api]'`"
         ) from exc
 
-    client_kwargs = {"api_key": api_key}
     if timeout is not None:
         # Bound every call this client makes — including any models.list() — to --timeout,
         # with retries off so the SDK can't back off past the deadline. For the default
         # canonical model, resolution skips listing, so that single responses.create is the
         # whole budget; a non-canonical alias adds one bounded list call.
-        client_kwargs.update(timeout=timeout, max_retries=0)
-    client = OpenAI(**client_kwargs)
+        client = OpenAI(api_key=api_key, timeout=timeout, max_retries=0)
+    else:
+        client = OpenAI(api_key=api_key)
     # One deadline spans the whole backend, so --timeout bounds resolution + the response
     # call together rather than allowing each up to a full timeout.
-    deadline = time.monotonic() + timeout if timeout is not None else None
+    start = time.monotonic()
     # Always resolve, so adding --timeout never changes which model is selected. Canonical
     # names short-circuit without a list call; without a deadline the SDK's default retries
     # stay on for reliability.
@@ -162,14 +163,14 @@ def _call_openai(
     if extra:
         user_message = f"Additional review instructions: {extra}\n\n---\n\n{user_message}"
 
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     if effort:
         kwargs["reasoning"] = {"effort": effort}
-    if deadline is not None:
+    if timeout is not None:
         # Give the response call only the budget left after resolution, so the two together
         # stay within --timeout. Omitted entirely (not None) when no deadline was requested,
         # so the SDK's own default applies.
-        remaining = deadline - time.monotonic()
+        remaining = timeout - (time.monotonic() - start)
         if remaining <= 0:
             raise BackendError(f"OpenAI API call timed out after {format_duration(timeout)}")
         kwargs["timeout"] = remaining
