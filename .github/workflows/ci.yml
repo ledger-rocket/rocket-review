@@ -1,19 +1,15 @@
 ---
 name: CI
 
-# Self-contained CI for the public rocket-review repo. Public repos cannot call
-# internal `.github-private` reusables (GitHub blocks internal->public reuse), so
-# every gate here runs on public, SHA-pinned actions with no secrets and
-# `contents: read` only — safe to run on fork PRs. Replaces the old minimal-ci.yml,
-# which composed internal reusables and leaked internal workflow paths.
+# Self-contained CI: every gate runs on public, SHA-pinned actions with no
+# secrets and `contents: read` only — safe to run on fork PRs.
 #
-# Gates: ruff (lint), mypy (type-check), package build + import smoke, and yamllint.
-# There is no unit-test suite yet — the `test` job builds the package and imports
-# every module to catch packaging/import breakage. A pytest suite is the follow-up
-# (PRO-3312).
+# Gates: ruff (lint), mypy (type-check), pytest (unit suite), package build +
+# import smoke, and yamllint.
 #
-# The `CI Success` aggregator is the single required status check (tier=standard),
-# so gates can be added or removed above without a ruleset edit.
+# The `CI Success` aggregator is the single required status check in the
+# branch ruleset, so gates can be added or removed above without a ruleset
+# edit.
 
 on:
   pull_request:
@@ -29,6 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
       - name: Ruff lint
         run: uvx ruff@0.14.0 check .
@@ -37,6 +35,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
       - name: Mypy type-check
         run: uvx --with openai mypy@1.18.2 rocket_review/
@@ -45,31 +45,49 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+      - name: Run test suite
+        run: |
+          uv venv
+          uv pip install -e ".[dev]"
+          .venv/bin/pytest -q
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
       - name: Build package
         run: uv build
       - name: Import smoke test
         run: |
           uv venv
-          uv pip install -e .
-          .venv/bin/python -c "import rocket_review.cli, rocket_review.review, rocket_review.prompts"
+          uv pip install dist/*.whl
+          .venv/bin/python -c \
+            "import rocket_review.cli, rocket_review.models, rocket_review.prompts, rocket_review.backends"
 
   yaml-lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
       - name: Yamllint
         run: uvx yamllint@1.37.1 .
 
-  # Single green/red target for branch protection. The standard-tier ruleset
-  # requires only this check by name. Every gate above runs unconditionally, so a
-  # `skipped` result is never expected — it means the run was cancelled or a gate
-  # was disabled, and it fails the aggregator.
+  # Single green/red target for branch protection. The ruleset requires only
+  # this check by name. Every gate above runs unconditionally, so a `skipped`
+  # result is never expected — it means the run was cancelled or a gate was
+  # disabled, and it fails the aggregator.
   ci-success:
     name: CI Success
     if: ${{ always() }}
-    needs: [lint, typecheck, test, yaml-lint]
+    needs: [lint, typecheck, test, build, yaml-lint]
     runs-on: ubuntu-latest
     steps:
       - name: Require every gate to have passed

@@ -1,3 +1,11 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from rocket_review.backends.base import ReviewJob
+
+
 PLAN_REVIEW_PROMPT = """\
 You are a principal engineer stress-testing an implementation plan. \
 Your job is to find gaps, risks, and over-engineering before the team starts building.
@@ -157,8 +165,29 @@ The reviewer has provided project standards documentation below. You MUST:
 - Treat documented project conventions as authoritative
 """
 
+JSON_OUTPUT_ADDENDUM = """\
+OUTPUT FORMAT OVERRIDE
+Ignore the output format instructions above. Output ONLY a single JSON object — no prose
+before or after it, no markdown fence — matching exactly this shape:
+{
+  "verdict": "approve" | "needs_fixes" | "blocker",
+  "summary": "recap in at most 200 words",
+  "findings": [
+    {
+      "severity": "critical" | "high" | "medium" | "low",
+      "title": "one-line issue statement",
+      "file": "path/to/file or null",
+      "line": 123 or null,
+      "why": "why it matters",
+      "fix": "concrete suggested fix, copy-pasteable when possible"
+    }
+  ]
+}
+An empty findings array with verdict "approve" is a valid review.
+"""
 
-def get_prompt(mode: str, docs_content: str | None = None) -> str:
+
+def get_prompt(mode: str, docs_content: str | None = None, json_output: bool = False) -> str:
     prompts = {
         "plan": PLAN_REVIEW_PROMPT,
         "code": CODE_REVIEW_PROMPT,
@@ -167,46 +196,43 @@ def get_prompt(mode: str, docs_content: str | None = None) -> str:
     prompt = prompts[mode]
     if docs_content:
         prompt += PROJECT_STANDARDS_ADDENDUM
+    if json_output:
+        prompt += JSON_OUTPUT_ADDENDUM
     return prompt
 
 
-def build_codex_prompt(
-    mode: str,
-    content: str | None,
-    docs_content: str | None = None,
-    extra: str | None = None,
-    commit: str | None = None,
-    pr: bool = False,
-    git_cmd: str | None = None,
-) -> str:
-    """Build a single prompt for codex exec."""
-    instructions = get_prompt(mode, docs_content)
+def build_agent_prompt(job: ReviewJob) -> str:
+    """Assemble the instruction prompt for an agentic (repo-navigating) backend."""
+    instructions = get_prompt(job.mode, job.docs_content, job.json_output)
 
     parts = [instructions.strip()]
 
-    if extra:
-        parts.append(f"Additional instructions: {extra}")
+    if job.extra:
+        parts.append(f"Additional instructions: {job.extra}")
 
     parts.append(
         "You have full read access to the project. "
-        "Inspect any referenced files, imports, tests, or related code to give a thorough review."
+        "Inspect any referenced files, imports, tests, or related code to give a thorough review. "
+        "Do not modify any files."
     )
 
-    if docs_content:
-        parts.append(f"=== PROJECT STANDARDS ===\n{docs_content}\n=== END PROJECT STANDARDS ===")
+    if job.docs_content:
+        parts.append(
+            f"=== PROJECT STANDARDS ===\n{job.docs_content}\n=== END PROJECT STANDARDS ==="
+        )
 
-    if pr and content:
+    if job.pr and job.content:
         parts.append(
             "You are reviewing a GitHub pull request. The PR description and diff are below. "
             "Explore the project files touched by the diff to understand context."
         )
-        parts.append(content)
-    elif commit:
-        parts.append(f"Run `git show {commit}` to see the commit, then review the changes.")
-    elif git_cmd:
-        parts.append(f"Run `{git_cmd}` to see the changes, then review them.")
-    elif content:
-        label = {"plan": "PLAN", "code": "CODE", "diff": "DIFF"}.get(mode, "CONTENT")
-        parts.append(f"=== {label} TO REVIEW ===\n{content}\n=== END {label} ===")
+        parts.append(job.content)
+    elif job.commit:
+        parts.append(f"Run `git show {job.commit}` to see the commit, then review the changes.")
+    elif job.git_cmd:
+        parts.append(f"Run `{job.git_cmd}` to see the changes, then review them.")
+    elif job.content:
+        label = {"plan": "PLAN", "code": "CODE", "diff": "DIFF"}.get(job.mode, "CONTENT")
+        parts.append(f"=== {label} TO REVIEW ===\n{job.content}\n=== END {label} ===")
 
     return "\n\n".join(parts)

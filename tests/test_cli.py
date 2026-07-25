@@ -1,0 +1,551 @@
+import json
+import subprocess
+import sys
+import types
+
+import pytest
+
+from rocket_review.backends.base import BackendError
+from rocket_review.cli import (
+    RAW_TRUNCATE_LIMIT,
+    detect_mode,
+    ensure_diff_exists,
+    get_commit_diff,
+    get_diff,
+    main,
+    parse_backend_arg,
+    resolve_commit,
+    run_capture,
+)
+
+TEXT_HINT = "help: rr --diff --json --fail-on high (CI gate)"
+
+REVIEW_JSON = (
+    '{{"verdict": "needs_fixes", "summary": "s", "findings": '
+    '[{{"severity": "high", "title": "t", "file": null, "line": null, '
+    '"why": "w", "fix": "{body}"}}]}}'
+)
+
+
+def run_cli(monkeypatch, argv):
+    monkeypatch.setattr("sys.argv", ["rr", *argv])
+    with pytest.raises(SystemExit) as e:
+        main()
+    return e.value.code
+
+
+def run_main(monkeypatch, argv):
+    """Drive main() tolerating the success path, which returns instead of exiting."""
+    monkeypatch.setattr("sys.argv", ["rr", *argv])
+    try:
+        main()
+    except SystemExit as e:
+        return e.code if e.code is not None else 0
+    return 0
+
+
+def patch_backends(monkeypatch, reviews):
+    """Swap in fake backends. reviews maps name -> output str, or a BackendError to raise."""
+    def make_review(behavior):
+        def review(job):
+            if isinstance(behavior, BackendError):
+                raise behavior
+            return behavior
+        return review
+
+    fakes = {name: types.SimpleNamespace(review=make_review(b)) for name, b in reviews.items()}
+    monkeypatch.setattr("rocket_review.cli.BACKENDS", fakes)
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+
+
+def test_fail_on_requires_json(monkeypatch, capsys):
+    code = run_cli(monkeypatch, ["--diff", "--fail-on", "high"])
+    assert code == 1
+    assert "--fail-on requires --json" in capsys.readouterr().err
+
+
+def test_detect_mode_plan_for_markdown():
+    assert detect_mode(["docs/plan.md"]) == "plan"
+    assert detect_mode(["a.md", "b.txt", "c.plan"]) == "plan"
+
+
+def test_detect_mode_code_for_source_files():
+    assert detect_mode(["src/auth.py"]) == "code"
+
+
+def test_detect_mode_mixed_is_code():
+    assert detect_mode(["plan.md", "src/auth.py"]) == "code"
+
+
+def test_backend_arg_single_default():
+    assert parse_backend_arg("codex", None) == [("codex", None)]
+
+
+def test_backend_arg_list_with_permodel():
+    assert parse_backend_arg("codex:gpt-5.5,claude", None) == [
+        ("codex", "gpt-5.5"), ("claude", None),
+    ]
+
+
+def test_backend_arg_global_model_single():
+    assert parse_backend_arg("claude", "claude-opus-4-8") == [("claude", "claude-opus-4-8")]
+
+
+def test_backend_arg_global_model_multi_errors():
+    with pytest.raises(SystemExit):
+        parse_backend_arg("codex,claude", "gpt-5.5")
+
+
+def test_backend_arg_unknown_errors():
+    with pytest.raises(SystemExit):
+        parse_backend_arg("gemini", None)
+
+
+def test_backend_arg_duplicate_errors():
+    with pytest.raises(SystemExit):
+        parse_backend_arg("codex,codex", None)
+
+
+def test_fanout_single_success_is_byte_identical(monkeypatch, capsys):
+    patch_backends(monkeypatch, {"codex": "PROSE REVIEW"})
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex"])
+    out = capsys.readouterr()
+    assert code == 0
+    assert out.out == "PROSE REVIEW\n"  # no "## codex" header for a single backend
+
+
+def test_fanout_all_fail_exits_1(monkeypatch, capsys):
+    patch_backends(monkeypatch, {
+        "codex": BackendError("codex boom"),
+        "claude": BackendError("claude boom"),
+    })
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex,claude"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "codex boom" in err and "claude boom" in err
+    assert "some backends failed" not in err  # all-fail exits 1, no partial warning
+
+
+def test_fanout_partial_fail_warns_and_exits_0(monkeypatch, capsys):
+    patch_backends(monkeypatch, {
+        "codex": "OK REVIEW",
+        "claude": BackendError("claude boom"),
+    })
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex,claude"])
+    out = capsys.readouterr()
+    assert code == 0
+    assert "OK REVIEW" in out.out  # successful prose stays on stdout
+    assert "claude boom" in out.err  # failed backend routed to stderr
+    assert "some backends failed" in out.err
+
+
+def test_effort_with_opencode_errors_before_backends_run(monkeypatch, capsys):
+    ran = []
+
+    def review(job):
+        ran.append(job)
+        return "REVIEW"
+
+    fakes = {
+        "codex": types.SimpleNamespace(review=review),
+        "opencode": types.SimpleNamespace(review=review),
+    }
+    monkeypatch.setattr("rocket_review.cli.BACKENDS", fakes)
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    code = run_cli(monkeypatch, ["--diff", "--backend", "codex,opencode", "--effort", "high"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "--effort is not supported by the opencode backend" in err
+    assert ran == []  # errored before any backend executed
+
+
+def test_effort_without_opencode_threads_to_job(monkeypatch, capsys):
+    captured = {}
+
+    def review(job):
+        captured["effort"] = job.effort
+        return "REVIEW"
+
+    monkeypatch.setattr("rocket_review.cli.BACKENDS", {"codex": types.SimpleNamespace(review=review)})
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex", "--effort", "medium"])
+    assert code == 0
+    assert captured["effort"] == "medium"
+
+
+def test_timeout_zero_errors(monkeypatch, capsys):
+    code = run_cli(monkeypatch, ["--diff", "--timeout", "0"])
+    assert code != 0
+    assert "positive integer" in capsys.readouterr().err
+
+
+def test_timeout_negative_errors(monkeypatch, capsys):
+    code = run_cli(monkeypatch, ["--diff", "--timeout", "-5"])
+    assert code != 0
+    assert "positive integer" in capsys.readouterr().err
+
+
+def test_timeout_threads_to_job(monkeypatch, capsys):
+    captured = {}
+
+    def review(job):
+        captured["timeout"] = job.timeout
+        return "REVIEW"
+
+    monkeypatch.setattr("rocket_review.cli.BACKENDS", {"codex": types.SimpleNamespace(review=review)})
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex", "--timeout", "1800"])
+    assert code == 0
+    assert captured["timeout"] == 1800
+
+
+def test_timeout_unset_leaves_job_timeout_none(monkeypatch, capsys):
+    captured = {}
+
+    def review(job):
+        captured["timeout"] = job.timeout
+        return "REVIEW"
+
+    monkeypatch.setattr("rocket_review.cli.BACKENDS", {"codex": types.SimpleNamespace(review=review)})
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex"])
+    assert code == 0
+    assert captured["timeout"] is None
+
+
+def test_fanout_gate_exits_2(monkeypatch):
+    review_json = (
+        '{"verdict": "needs_fixes", "summary": "s", "findings": '
+        '[{"severity": "high", "title": "t", "file": null, "line": null, '
+        '"why": "w", "fix": "f"}]}'
+    )
+    patch_backends(monkeypatch, {"codex": review_json})
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex", "--json", "--fail-on", "high"])
+    assert code == 2
+
+
+def test_fanout_results_in_backend_order(monkeypatch, capsys):
+    patch_backends(monkeypatch, {"codex": "FROM_CODEX", "claude": "FROM_CLAUDE"})
+    code = run_main(monkeypatch, ["--diff", "--backend", "claude,codex"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out.index("## claude") < out.index("## codex")  # --backend order preserved
+
+
+def test_fanout_unexpected_worker_exception_surfaces_as_backend_error(monkeypatch, capsys):
+    def make_review(behavior):
+        def review(job):
+            if isinstance(behavior, Exception):
+                raise behavior
+            return behavior
+        return review
+
+    fakes = {
+        "codex": types.SimpleNamespace(review=make_review(ValueError("boom"))),
+        "claude": types.SimpleNamespace(review=make_review("OK REVIEW")),
+    }
+    monkeypatch.setattr("rocket_review.cli.BACKENDS", fakes)
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex,claude"])
+    out = capsys.readouterr()
+    assert code == 0  # not a traceback crash
+    assert "OK REVIEW" in out.out  # sibling's completed review still delivered
+    assert "ValueError: boom" in out.err  # surfaced as a backend error, not a crash
+    assert "some backends failed" in out.err
+
+
+def _capture_jobs(monkeypatch, *backend_names):
+    """Swap in fake backends that each record the ReviewJob they are handed, keyed by name."""
+    jobs = {}
+
+    def make(name):
+        def review(job):
+            jobs[name] = job
+            return "OK REVIEW"
+        return review
+
+    monkeypatch.setattr(
+        "rocket_review.cli.BACKENDS",
+        {name: types.SimpleNamespace(review=make(name)) for name in backend_names},
+    )
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    return jobs
+
+
+def test_opencode_diff_materializes_content_at_cli(monkeypatch, capsys):
+    # opencode can't be trusted to run git itself in a locked-down plan agent, so the CLI
+    # must hand it the diff materialized (content set), never content=None.
+    marker = "UNIQUE-DIFF-MARKER-9f3a"
+    monkeypatch.setattr(
+        "rocket_review.cli.get_diff", lambda staged: f"diff --git a b\n+{marker}"
+    )
+    jobs = _capture_jobs(monkeypatch, "opencode")
+    code = run_main(monkeypatch, ["--diff", "--backend", "opencode"])
+    assert code == 0
+    job = jobs["opencode"]
+    assert job.content is not None
+    assert marker in job.content
+    assert job.git_cmd is None  # not told to fetch the diff itself
+
+
+def test_codex_diff_stays_agentic_at_cli(monkeypatch, capsys):
+    # codex keeps the agentic path (content=None + a git_cmd) — Fix 1 must not regress it.
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    jobs = _capture_jobs(monkeypatch, "codex")
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex"])
+    assert code == 0
+    job = jobs["codex"]
+    assert job.content is None
+    assert job.git_cmd == "git diff HEAD"
+
+
+def test_mixed_diff_fanout_shares_single_snapshot(monkeypatch, capsys):
+    # When one backend forces materialization, the diff is captured ONCE and the identical
+    # bytes go to every backend — no per-backend git re-run that could see a different tree.
+    calls = {"n": 0}
+
+    def fake_get_diff(staged):
+        calls["n"] += 1
+        return f"diff --git a b\n+SNAPSHOT-{calls['n']}"
+
+    monkeypatch.setattr("rocket_review.cli.get_diff", fake_get_diff)
+    jobs = _capture_jobs(monkeypatch, "codex", "opencode")
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex,opencode"])
+    assert code == 0
+    assert calls["n"] == 1  # captured once, so no post-capture divergence is possible
+    assert jobs["codex"].content == jobs["opencode"].content  # identical bytes
+    assert "SNAPSHOT-1" in jobs["codex"].content
+    assert jobs["codex"].git_cmd is None and jobs["opencode"].git_cmd is None
+
+
+def test_get_diff_preserves_trailing_whitespace(monkeypatch):
+    # The materialized snapshot must be byte-identical: trailing whitespace on the last
+    # changed line is part of the patch and must survive to the reviewer.
+    raw = "diff --git a b\n@@ -1 +1 @@\n-x\n+line with trailing spaces   \n"
+    monkeypatch.setattr(
+        "rocket_review.cli.run_capture",
+        lambda cmd: types.SimpleNamespace(returncode=0, stdout=raw, stderr=""),
+    )
+    assert get_diff(staged=False) == raw
+
+
+def test_get_commit_diff_preserves_trailing_whitespace(monkeypatch):
+    raw = "commit abc123\n@@ -1 +1 @@\n+trailing   \n"
+    monkeypatch.setattr(
+        "rocket_review.cli.run_capture",
+        lambda cmd: types.SimpleNamespace(returncode=0, stdout=raw, stderr=""),
+    )
+    assert get_commit_diff("abc123") == raw
+
+
+def test_mixed_commit_fanout_specializes_per_backend(monkeypatch):
+    # A commit OID is immutable, so codex keeps it and `git show`s the exact commit while
+    # opencode (which can't run git) gets the commit diff materialized.
+    oid = "a" * 40
+    monkeypatch.setattr("rocket_review.cli.resolve_commit", lambda rev: oid)
+    monkeypatch.setattr(
+        "rocket_review.cli.get_commit_diff", lambda o: f"commit {o}\n+CSNAP-5d1e"
+    )
+    jobs = _capture_jobs(monkeypatch, "codex", "opencode")
+    code = run_main(monkeypatch, ["--commit", "deadbeef", "--backend", "codex,opencode"])
+    assert code == 0
+    assert jobs["codex"].content is None
+    assert jobs["codex"].commit == oid  # codex git-shows the immutable commit
+    assert "CSNAP-5d1e" in jobs["opencode"].content
+    assert jobs["opencode"].commit is None  # opencode gets it materialized
+
+
+def test_keyboardinterrupt_during_fanout_terminates_active_commands(monkeypatch):
+    # Ctrl-C reaches the main thread at f.result(); the CLI must tear down the backend
+    # process groups before the executor waits on the workers, or it hangs until timeout.
+    killed = {"called": False}
+    monkeypatch.setattr(
+        "rocket_review.cli.base.terminate_active_commands",
+        lambda: killed.__setitem__("called", True),
+    )
+
+    def review(job):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        "rocket_review.cli.BACKENDS",
+        {"codex": types.SimpleNamespace(review=review)},
+    )
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    monkeypatch.setattr("sys.argv", ["rr", "--diff", "--backend", "codex"])
+    with pytest.raises(KeyboardInterrupt):
+        main()
+    assert killed["called"]
+
+
+def _json_envelope(monkeypatch, capsys, review_output, extra_args=()):
+    patch_backends(monkeypatch, {"codex": review_output})
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex", "--json", *extra_args])
+    return code, json.loads(capsys.readouterr().out)
+
+
+def test_json_truncates_long_raw_inline_without_spilling_to_disk(monkeypatch, capsys):
+    import tempfile
+
+    def boom(*a, **k):
+        raise AssertionError("truncation must not spill review text to a temp file")
+
+    # Any attempt to create a spill file fails the test outright — no reliance on scanning
+    # the shared system temp dir (which a concurrent process could perturb).
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", boom)
+    long = REVIEW_JSON.format(body="x" * 5000)
+    assert len(long) > RAW_TRUNCATE_LIMIT
+    code, env = _json_envelope(monkeypatch, capsys, long)
+    assert code == 0
+    r = env["results"][0]
+    assert "(truncated," in r["raw"] and "use --full to inline" in r["raw"]
+    assert str(len(long)) in r["raw"]  # marker names the full length
+    assert len(r["raw"]) < len(long)
+    assert r["raw_file"] is None  # nothing written to disk; no secret-leaking spill file
+
+
+def test_json_short_raw_untouched(monkeypatch, capsys):
+    short = REVIEW_JSON.format(body="short fix")
+    assert len(short) <= RAW_TRUNCATE_LIMIT
+    code, env = _json_envelope(monkeypatch, capsys, short)
+    r = env["results"][0]
+    assert r["raw"] == short
+    assert r["raw_file"] is None
+
+
+def test_json_full_flag_inlines_everything(monkeypatch, capsys):
+    long = REVIEW_JSON.format(body="x" * 5000)
+    code, env = _json_envelope(monkeypatch, capsys, long, extra_args=["--full"])
+    r = env["results"][0]
+    assert r["raw"] == long
+    assert r["raw_file"] is None
+    assert "(truncated" not in r["raw"]
+
+
+def test_help_shows_examples(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["rr", "--help"])
+    with pytest.raises(SystemExit) as e:
+        main()
+    assert e.value.code == 0
+    assert "examples:" in capsys.readouterr().out
+
+
+def test_text_mode_prints_stderr_hint(monkeypatch, capsys):
+    patch_backends(monkeypatch, {"codex": "PROSE REVIEW"})
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex"])
+    out = capsys.readouterr()
+    assert code == 0
+    assert TEXT_HINT in out.err  # next-step hint on stderr
+    assert TEXT_HINT not in out.out  # never pollutes piped stdout
+
+
+def test_json_mode_omits_hint(monkeypatch, capsys):
+    review = REVIEW_JSON.format(body="f")
+    patch_backends(monkeypatch, {"codex": review})
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex", "--json"])
+    out = capsys.readouterr()
+    assert code == 0
+    assert TEXT_HINT not in out.err and TEXT_HINT not in out.out
+
+
+def test_text_mode_all_fail_omits_hint(monkeypatch, capsys):
+    patch_backends(monkeypatch, {"codex": BackendError("codex boom")})
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex"])
+    out = capsys.readouterr()
+    assert code == 1
+    assert TEXT_HINT not in out.err  # no next-step hint on the error path
+
+
+def test_diff_and_staged_conflict(monkeypatch, capsys):
+    code = run_cli(monkeypatch, ["--diff", "--staged"])
+    assert code == 1
+    assert "only one of --diff or --staged" in capsys.readouterr().err
+
+
+def test_full_requires_json(monkeypatch, capsys):
+    code = run_cli(monkeypatch, ["--diff", "--full"])
+    assert code == 1
+    assert "--full requires --json" in capsys.readouterr().err
+
+
+def test_repo_requires_pr(monkeypatch, capsys):
+    code = run_cli(monkeypatch, ["--diff", "--repo", "acme/api"])
+    assert code == 1
+    assert "--repo only applies with --pr" in capsys.readouterr().err
+
+
+def _git_repo(tmp_path):
+    def git(*args):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t.io", "-c", "user.name=t",
+             "-c", "commit.gpgsign=false", *args],
+            cwd=tmp_path, check=True, capture_output=True,
+        )
+    (tmp_path / "f.txt").write_text("one\n")
+    git("init", "-q")
+    git("add", "f.txt")
+    git("commit", "-q", "-m", "init")
+
+
+def test_ensure_diff_exists_clean_tree_errors(tmp_path, monkeypatch, capsys):
+    _git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as e:
+        ensure_diff_exists(False)
+    assert e.value.code == 1
+    assert "no uncommitted changes" in capsys.readouterr().err
+
+
+def test_ensure_diff_exists_dirty_tree_passes(tmp_path, monkeypatch):
+    _git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "f.txt").write_text("two\n")
+    ensure_diff_exists(False)  # must not exit
+
+
+def test_resolve_commit_unknown_sha_errors(tmp_path, monkeypatch, capsys):
+    _git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        resolve_commit("deadbeef")
+    assert "unknown commit" in capsys.readouterr().err
+
+
+def test_resolve_commit_head_returns_full_oid(tmp_path, monkeypatch):
+    _git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    oid = resolve_commit("HEAD")
+    assert len(oid) == 40 and all(c in "0123456789abcdef" for c in oid)
+
+
+def test_resolve_commit_rejects_option_shaped_revision(tmp_path, monkeypatch, capsys):
+    _git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        resolve_commit("--no-patch")
+    assert "invalid commit revision" in capsys.readouterr().err
+
+
+def test_run_capture_replaces_non_utf8_output():
+    result = run_capture([
+        sys.executable, "-c",
+        "import sys; sys.stdout.buffer.write(b'ok \\xff end')",
+    ])
+    assert result.returncode == 0
+    assert "ok" in result.stdout and "end" in result.stdout  # no UnicodeDecodeError
