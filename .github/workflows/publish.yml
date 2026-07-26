@@ -27,6 +27,9 @@ jobs:
           fi
       # The release ref must prove itself: CI gates main, not tags.
       - run: python -m pip install -e ".[dev]" build
+      # Same pinned linter as ci.yml — an unpinned ruff here once failed a
+      # release with rules the CI gate doesn't enforce.
+      - run: python -m pip install ruff==0.14.0
       - run: ruff check .
       - run: pytest -q
       - run: python -m build
