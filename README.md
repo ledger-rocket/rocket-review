@@ -3,6 +3,7 @@
 [![CI](https://github.com/ledger-rocket/rocket-review/actions/workflows/ci.yml/badge.svg)](https://github.com/ledger-rocket/rocket-review/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
+[![PyPI](https://img.shields.io/pypi/v/rocket-review)](https://pypi.org/project/rocket-review/)
 
 **`rr` — a second opinion on your code, from a model that didn't write it.**
 
@@ -65,6 +66,12 @@ flagging the regression — not a pattern match on the diff.
 ## Install
 
 ```bash
+pipx install rocket-review
+```
+
+Or the latest from source:
+
+```bash
 pipx install git+https://github.com/ledger-rocket/rocket-review.git
 ```
 
@@ -73,9 +80,9 @@ Requires Python 3.13+ and at least one backend:
 - [Codex CLI](https://github.com/openai/codex) (default backend)
 - [Claude Code](https://claude.com/claude-code) (`--backend claude`)
 - [opencode](https://opencode.ai) (`--backend opencode` — any provider, including local models; **experimental**, see below)
-- or none of the above: `--backend api` (or the `--api` shorthand) calls the OpenAI API directly — set `OPENAI_API_KEY` and install the SDK extra: `pipx inject rocket-review openai` (or, once installing from PyPI, `pip install 'rocket-review[api]'`)
+- or none of the above: `--backend api` (or the `--api` shorthand) calls the OpenAI API directly — set `OPENAI_API_KEY` and install the SDK extra: `pipx install 'rocket-review[api]'` (or `pipx inject rocket-review openai` into an existing install)
 
-`--pr` also needs the [gh CLI](https://cli.github.com). Not on PyPI yet — install from Git as above.
+`--pr` also needs the [gh CLI](https://cli.github.com).
 
 ## Usage
 
@@ -210,7 +217,7 @@ report a vulnerability.
   - `codex` — [Codex CLI](https://github.com/openai/codex), signed in with your ChatGPT/OpenAI account
   - `claude` — [Claude Code](https://claude.com/claude-code), on a Claude subscription or API key. Needs a version supporting `--permission-mode manual` (Claude Code 2.1.x+); older CLIs fail the review closed with a usage error. Check with `claude --help | grep -A3 permission-mode`.
   - `opencode` — [opencode](https://opencode.ai), configured for any provider (including a local Ollama model)
-  - `api` — no CLI, but needs the OpenAI SDK (`pipx inject rocket-review openai`, or once installing from PyPI, `pip install 'rocket-review[api]'`); set `OPENAI_API_KEY` and `rr` calls the OpenAI API directly
+  - `api` — no CLI, but needs the OpenAI SDK (`pipx install 'rocket-review[api]'`, or `pipx inject rocket-review openai`); set `OPENAI_API_KEY` and `rr` calls the OpenAI API directly
 - `gh` CLI, authenticated, for `--pr`
 
 ## Agent integration
