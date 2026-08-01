@@ -208,3 +208,52 @@ def test_needs_fixes_empty_envelope_surfaces_parse_error():
     assert s["backends_parse_failed"] == 1
     assert s["findings_total"] == 0
     assert s["gate"] == {"threshold": "high", "tripped": True}
+
+
+def test_envelope_declares_schema_version_1():
+    assert to_envelope([])["schema_version"] == 1
+
+
+def test_envelope_golden_shape():
+    # Golden: the --json envelope is a consumed contract, so every key and type below is
+    # pinned. Changing this test is the moment to decide whether schema_version must bump.
+    populated = parse_backend_output(GOOD, "codex", "gpt-5.5")       # finding with file+line
+    nulls = parse_backend_output(_one("low"), "claude", None)        # finding with null file/line
+    errored = BackendResult(backend="api", model=None, error="boom")
+    env = to_envelope([populated, nulls, errored], fail_on="high")
+
+    assert set(env) == {"summary", "schema_version", "results", "findings"}
+    assert isinstance(env["schema_version"], int) and env["schema_version"] == 1
+    assert isinstance(env["results"], list) and isinstance(env["findings"], list)
+
+    assert env["summary"] == {
+        "findings_total": 2,
+        "by_severity": {"critical": 0, "high": 1, "medium": 0, "low": 1},
+        "worst_severity": "high",
+        "backends_total": 3,
+        "backends_errored": 1,
+        "backends_parse_failed": 0,
+        "verdicts": [
+            {"backend": "codex", "verdict": "needs_fixes"},
+            {"backend": "claude", "verdict": "needs_fixes"},
+            {"backend": "api", "verdict": None},
+        ],
+        "gate": {"threshold": "high", "tripped": True},
+    }
+
+    assert all(
+        set(f) == {"severity", "title", "file", "line", "why", "fix", "backend", "model"}
+        for f in env["findings"]
+    )
+    assert env["findings"][0]["file"] == "a.py" and env["findings"][0]["line"] == 3
+    assert env["findings"][1]["file"] is None and env["findings"][1]["line"] is None
+
+    assert all(
+        set(r) == {"backend", "model", "verdict", "summary", "findings", "raw", "error",
+                   "parse_error", "raw_file"}
+        for r in env["results"]
+    )
+    assert env["results"][2] == {
+        "backend": "api", "model": None, "verdict": None, "summary": None, "findings": [],
+        "raw": "", "error": "boom", "parse_error": False, "raw_file": None,
+    }
