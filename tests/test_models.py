@@ -219,7 +219,10 @@ def test_envelope_golden_shape():
     env = to_envelope([populated, nulls, errored], fail_on="high")
 
     assert set(env) == {"summary", "schema_version", "results", "findings"}
-    assert isinstance(env["schema_version"], int) and env["schema_version"] == 1
+    # Exact type: bool subclasses int and True == 1, so isinstance would let a
+    # schema_version that serializes as JSON `true` through.
+    assert type(env["schema_version"]) is int
+    assert env["schema_version"] == 1
     assert isinstance(env["results"], list) and isinstance(env["findings"], list)
 
     assert env["summary"] == {
