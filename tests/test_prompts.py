@@ -15,6 +15,14 @@ MODE_MARKERS = {
     "diff": "reviewing a code diff",
 }
 
+# A second marker from deep inside each body, so gutting a body while keeping its opening
+# line does not pass as the right prompt.
+MODE_INTERIOR_MARKERS = {
+    "plan": "PRAGMATISM — Is anything over-engineered",
+    "code": "Concurrency: race conditions, deadlocks",
+    "diff": "CONTRACTS — Does this break any API contracts",
+}
+
 STANDARDS_MARKER = "PROJECT STANDARDS CONTEXT"
 JSON_MARKER = "OUTPUT FORMAT OVERRIDE"
 DOCS = "# Standards\nno global mutable state"
@@ -32,7 +40,10 @@ def job(**kw):
 def test_mode_selects_only_its_own_body(mode):
     prompt = get_prompt(mode)
     assert MODE_MARKERS[mode] in prompt
-    assert not any(marker in prompt for m, marker in MODE_MARKERS.items() if m != mode)
+    assert MODE_INTERIOR_MARKERS[mode] in prompt
+    for other in (m for m in MODE_MARKERS if m != mode):
+        assert MODE_MARKERS[other] not in prompt
+        assert MODE_INTERIOR_MARKERS[other] not in prompt
 
 
 def test_unknown_mode_raises_key_error():
@@ -72,8 +83,11 @@ def test_json_addendum_overrides_rather_than_replaces_the_prose_format():
 
 def test_json_addendum_describes_the_findings_object_shape():
     prompt = get_prompt("code", json_output=True)
+    # Slice to the addendum: the mode bodies talk about verdicts and files too, so a
+    # whole-prompt search would not prove the keys come from the JSON instructions.
+    addendum = prompt[prompt.index(JSON_MARKER):]
     for key in ('"verdict"', '"summary"', '"findings"', '"severity"', '"file"', '"line"'):
-        assert key in prompt
+        assert key in addendum
 
 
 def test_addendum_order_is_body_then_standards_then_json():

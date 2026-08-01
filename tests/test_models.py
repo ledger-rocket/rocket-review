@@ -210,10 +210,6 @@ def test_needs_fixes_empty_envelope_surfaces_parse_error():
     assert s["gate"] == {"threshold": "high", "tripped": True}
 
 
-def test_envelope_declares_schema_version_1():
-    assert to_envelope([])["schema_version"] == 1
-
-
 def test_envelope_golden_shape():
     # Golden: the --json envelope is a consumed contract, so every key and type below is
     # pinned. Changing this test is the moment to decide whether schema_version must bump.

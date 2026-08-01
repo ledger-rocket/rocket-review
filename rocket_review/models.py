@@ -150,8 +150,8 @@ def to_envelope(results: list[BackendResult], fail_on: str | None = None) -> dic
         "gate": ({"threshold": fail_on, "tripped": should_fail(results, fail_on)} if fail_on else None),
     }
     return {
-        # summary leads so consumers get the counts and the gate answer without parsing the
-        # findings array; the version field follows rather than displacing it.
+        # summary must stay first — consumers read the counts and gate state off the head
+        # of the payload without parsing the findings array.
         "summary": summary,
         # Envelope contract: 1 is the first version; it is bumped only on a breaking change
         # (a field removed, a type changed, semantics changed). Additive optional fields do
