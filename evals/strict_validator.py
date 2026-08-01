@@ -14,10 +14,10 @@ the backends are actually sent.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
-from typing import Any
+from dataclasses import dataclass, field
 
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError
 
 from rocket_review.models import REVIEW_SCHEMA, extract_json
 
@@ -35,6 +35,11 @@ MAX_ERRORS = 5
 
 # The schema carries no $schema keyword, so pin the dialect rather than inheriting
 # whatever the installed jsonschema happens to default to.
+#
+# check_schema at import: REVIEW_SCHEMA is runtime code this module only observes, so a
+# future edit that makes it invalid under 2020-12 must fail loudly here rather than quietly
+# turn into nonsense validation output that a whole sweep then gets scored against.
+Draft202012Validator.check_schema(REVIEW_SCHEMA)
 _VALIDATOR = Draft202012Validator(REVIEW_SCHEMA)
 
 
@@ -51,16 +56,13 @@ class Classification:
     #: since the runtime accepts it, but the prompt asks for neither.
     bare_json: bool = False
 
-    def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
 
 def _excerpt(raw: str) -> str:
     head = raw[:EXCERPT_CHARS]
     return head + "…" if len(raw) > EXCERPT_CHARS else head
 
 
-def _format_error(error: Any) -> str:
+def _format_error(error: ValidationError) -> str:
     return f"{error.json_path}: {error.message}"
 
 

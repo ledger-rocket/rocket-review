@@ -69,8 +69,8 @@ set in the environment, and nothing in `.github/workflows/` invokes it. Only
 
 One JSONL file per sweep in `evals/results/`. The first line is a header (rr version,
 backend CLI versions, commits, backends, runs, timeout, concurrency); every line after it is
-one run: case id, backend, the exact command, exit code, wall time, the raw output, and the
-validator outcome with its errors or excerpt.
+one run: case id, backend, resolved model, the exact command, exit code, wall time, the raw
+output, and the validator outcome with its errors or excerpt.
 
 `results/` is gitignored and never committed — the records embed full review text for real
 commits, and they are measurements of a specific model version at a specific time rather
@@ -79,10 +79,22 @@ than anything a reader of this repo should treat as current.
 The script also prints a per-backend summary:
 
 ```
-backend             valid  schema_violation    decode_failure     backend_error  total
---------------------------------------------------------------------------------------
-codex                  15                 0                 0                 0     15
+backend             valid  schema_violation    decode_failure     backend_error    fenced/wrapped  total
+--------------------------------------------------------------------------------------------------------
+codex                  15                 0                 0                 0                 2     15
 ```
+
+The first four columns are the outcomes, and they are mutually exclusive. **`fenced/wrapped`
+is not** — it counts the `valid` and `schema_violation` runs whose JSON had to be dug out of a
+markdown fence or surrounding prose, and it is the reason the summary is not just four
+numbers. The prompt says "no prose before or after it, no markdown fence"; a backend that
+fences every response still scores 100% `valid`, because the object inside is compliant. The
+example above reads as: perfect schema compliance, but two runs ignored the format
+instruction.
+
+`decode_failure` and `backend_error` runs are excluded from that count: they never produced a
+JSON object, so their `bare_json` is a default rather than an observation, and counting them
+would report a refusal as a formatting problem.
 
 ## The decision this feeds
 
@@ -95,6 +107,8 @@ on `--json` output has to account for it before the results mean anything.
 ## Tests
 
 `evals/test_strict_validator.py` covers the validator with fixtures only (compliant review,
-extra property, invalid severity, missing required field, non-JSON prose, fenced JSON). It
-is collected by the repo's normal `pytest -q` run. Requires the `dev` extra, which is where
-`jsonschema` lives — runtime `dependencies` stays empty on purpose.
+extra property, invalid severity, missing required field, non-JSON prose, fenced JSON).
+`evals/test_m0_sweep.py` covers the sweep's pure parts — envelope extraction and the summary
+counts — without launching rr or a backend. Both are collected by the repo's normal
+`pytest -q` run. They require the `dev` extra, which is where `jsonschema` lives — runtime
+`dependencies` stays empty on purpose.

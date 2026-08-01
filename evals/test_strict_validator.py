@@ -8,6 +8,7 @@ import json
 
 from strict_validator import (
     DECODE_FAILURE,
+    MAX_ERRORS,
     SCHEMA_VIOLATION,
     VALID,
     classify_output,
@@ -87,10 +88,13 @@ def test_missing_required_finding_field_is_a_violation():
 
 
 def test_error_list_is_capped_and_path_prefixed():
+    # This fixture violates the schema 7 ways: a bad verdict, a bad severity, a
+    # non-string title, and four required finding fields left out. Asserting the exact
+    # cap rather than an upper bound is what proves MAX_ERRORS actually truncates.
     finding = {"severity": "urgent", "title": 7}
     result = classify_output(json.dumps(review(verdict="ship_it", findings=[finding])))
     assert result.outcome == SCHEMA_VIOLATION
-    assert len(result.errors) <= 5
+    assert len(result.errors) == MAX_ERRORS == 5
     assert any(e.startswith("$.findings[0]") for e in result.errors)
 
 

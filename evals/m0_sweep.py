@@ -30,7 +30,13 @@ from rocket_review.backends import BACKENDS
 # explicitly: `python -m evals.m0_sweep` would otherwise not find its sibling.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from strict_validator import BACKEND_ERROR, OUTCOMES, classify_output  # noqa: E402
+from strict_validator import (  # noqa: E402
+    BACKEND_ERROR,
+    OUTCOMES,
+    SCHEMA_VIOLATION,
+    VALID,
+    classify_output,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -56,6 +62,10 @@ class RunRecord:
     case_id: str
     commit: str
     backend: str
+    #: Resolved model as the envelope reports it. The backend CLI version in the sweep
+    #: header does not pin this — codex honours the user's ~/.codex/config.toml default,
+    #: so two sweeps from the same CLI can measure different models.
+    model: str | None
     run: int
     command: list[str]
     exit_code: int | None
@@ -151,44 +161,69 @@ def run_case(
 
     duration = round(time.monotonic() - start, 2)
     raw = ""
+    model: str | None = None
     if backend_error is None:
         result, envelope_error = _extract_backend_result(stdout, backend)
         if result is None:
             # rr failed before it could emit an envelope, so its stderr is the only
             # evidence of why.
             backend_error = f"{envelope_error} (exit {exit_code}): {stderr.strip()[:500]}"
-        elif result.get("error"):
-            backend_error = str(result["error"])
         else:
-            raw = result.get("raw") or ""
+            model = result.get("model")
+            if result.get("error"):
+                backend_error = str(result["error"])
+            else:
+                raw = result.get("raw") or ""
 
     if backend_error is not None:
         return RunRecord(
-            case_id=case_id, commit=commit, backend=backend, run=run, command=command,
-            exit_code=exit_code, duration_s=duration, raw=raw, outcome=BACKEND_ERROR,
-            errors=[], excerpt="", bare_json=False, backend_error=backend_error,
-            started_at=started_at,
+            case_id=case_id, commit=commit, backend=backend, model=model, run=run,
+            command=command, exit_code=exit_code, duration_s=duration, raw=raw,
+            outcome=BACKEND_ERROR, errors=[], excerpt="", bare_json=False,
+            backend_error=backend_error, started_at=started_at,
         )
 
     classification = classify_output(raw)
     return RunRecord(
-        case_id=case_id, commit=commit, backend=backend, run=run, command=command,
-        exit_code=exit_code, duration_s=duration, raw=raw,
+        case_id=case_id, commit=commit, backend=backend, model=model, run=run,
+        command=command, exit_code=exit_code, duration_s=duration, raw=raw,
         outcome=classification.outcome, errors=classification.errors,
         excerpt=classification.excerpt, bare_json=classification.bare_json,
         backend_error=None, started_at=started_at,
     )
 
 
+CELL = 16
+WRAPPED_COLUMN = "fenced/wrapped"
+
+
+def _count(rows: list[RunRecord], column: str) -> int:
+    # Not an outcome: a fenced or prose-wrapped object still validates, so the outcome
+    # counts alone would score a backend 100% compliant while it ignores the prompt's
+    # "no prose before or after it, no markdown fence" instruction. It overlaps `valid`
+    # and `schema_violation` by design, hence a separate column rather than a fifth
+    # mutually exclusive bucket.
+    #
+    # Only runs that actually yielded a JSON object can be judged on how it was wrapped.
+    # decode_failure and backend_error carry bare_json=False as a default rather than an
+    # observation, so counting them here would report a refusal as a formatting problem.
+    if column == WRAPPED_COLUMN:
+        return sum(
+            1 for r in rows
+            if r.outcome in (VALID, SCHEMA_VIOLATION) and not r.bare_json
+        )
+    return sum(1 for r in rows if r.outcome == column)
+
+
 def print_summary(records: list[RunRecord], backends: list[str]) -> None:
     width = max([len(b) for b in backends] + [len("backend")])
-    columns = list(OUTCOMES)
-    header = "backend".ljust(width) + "  " + "  ".join(c.rjust(16) for c in columns) + "  total"
+    columns = [*OUTCOMES, WRAPPED_COLUMN]
+    header = "backend".ljust(width) + "  " + "  ".join(c.rjust(CELL) for c in columns) + "  total"
     print("\n" + header)
     print("-" * len(header))
     for backend in backends:
         rows = [r for r in records if r.backend == backend]
-        counts = [str(sum(1 for r in rows if r.outcome == c)).rjust(16) for c in columns]
+        counts = [str(_count(rows, c)).rjust(CELL) for c in columns]
         print(backend.ljust(width) + "  " + "  ".join(counts) + f"  {len(rows):>5}")
 
 
@@ -223,7 +258,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--out", type=Path, default=RESULTS_DIR,
-        help="Directory for the JSONL result file (default: evals/results)",
+        help="Directory for the JSONL result file (default: evals/results, the only "
+             "path gitignored for this — records embed full review text, so any other "
+             "location inside the repo produces committable output)",
     )
     parser.add_argument(
         "--rr", default="rr",
