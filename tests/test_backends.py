@@ -328,7 +328,7 @@ def test_codex_json_mode_passes_output_schema(monkeypatch):
     assert "--output-schema" in captured["cmd"]
 
 
-def test_api_json_mode_adds_output_override_to_system_prompt(monkeypatch):
+def test_api_json_mode_puts_the_json_format_in_the_system_prompt(monkeypatch):
     captured = {}
 
     def fake_call(content, system_prompt, model, extra, effort=None, timeout=None):
@@ -337,7 +337,7 @@ def test_api_json_mode_adds_output_override_to_system_prompt(monkeypatch):
 
     monkeypatch.setattr(api, "_call_openai", fake_call)
     api.review(job(json_output=True))
-    assert "OUTPUT FORMAT OVERRIDE" in captured["system_prompt"]
+    assert "JSON RESPONSE FORMAT" in captured["system_prompt"]
 
 
 def test_claude_uses_readonly_allowlist_and_stdin(monkeypatch):

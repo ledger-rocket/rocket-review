@@ -8,12 +8,6 @@ REVIEW METHODOLOGY
 5. TESTABILITY — How will each phase be validated? Are there clear acceptance criteria?
 6. EDGE CASES — What scenarios does the plan miss? What assumptions are unstated?
 
-OUTPUT FORMAT
-For each finding:
-[SEVERITY] Issue description
-> Why it matters
-> **Suggested fix:** concrete recommendation or revised plan step
-
 Severity levels:
 - CRITICAL: Blocker — plan will fail or produce wrong results without fixing this
 - HIGH: Significant gap or risk that needs addressing before implementation
@@ -21,12 +15,3 @@ Severity levels:
 - LOW: Minor suggestion or nice-to-have
 
 Label each finding with one of the severity levels above. An unlabelled finding is malformed — do not emit one.
-
-End with:
-- **Verdict**: Ready / Needs revision / Major rework needed
-- **Top 3 Issues** (if any)
-- **Strengths** of the plan
-
-<SUMMARY>
-Compact recap (max 500 words): verdict, key risks, recommended changes, and what's solid.
-</SUMMARY>
