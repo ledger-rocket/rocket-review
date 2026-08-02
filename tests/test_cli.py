@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import types
@@ -16,7 +17,10 @@ from rocket_review.cli import (
     parse_backend_arg,
     resolve_commit,
     run_capture,
+    stdin_has_input,
+    truncate_raw,
 )
+from rocket_review.models import BackendResult
 
 TEXT_HINT = "help: rr --diff --json --fail-on high (CI gate)"
 
@@ -267,6 +271,16 @@ def test_fanout_unexpected_worker_exception_surfaces_as_backend_error(monkeypatc
     assert "some backends failed" in out.err
 
 
+def test_blank_backend_output_surfaces_as_an_error(monkeypatch, capsys):
+    # A backend that hands back only whitespace produced no review: the CLI must report a
+    # failure, not print an empty review and exit 0.
+    patch_backends(monkeypatch, {"codex": "   "})
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex"])
+    out = capsys.readouterr()
+    assert code == 1
+    assert "codex produced no review output" in out.err
+
+
 def _capture_jobs(monkeypatch, *backend_names):
     """Swap in fake backends that each record the ReviewJob they are handed, keyed by name."""
     jobs = {}
@@ -429,6 +443,16 @@ def test_json_short_raw_untouched(monkeypatch, capsys):
     assert r["raw_file"] is None
 
 
+def test_truncate_raw_keeps_exactly_the_limit_prefix():
+    # The kept text is the first RAW_TRUNCATE_LIMIT characters verbatim: an off-by-one
+    # would drop a character off the tail of every truncated review unnoticed.
+    raw = "".join(str(i % 10) for i in range(RAW_TRUNCATE_LIMIT + 500))
+    result = BackendResult(backend="codex", model=None, raw=raw)
+    truncate_raw([result])
+    kept, _, _ = result.raw.partition("\n(truncated,")
+    assert kept == raw[:RAW_TRUNCATE_LIMIT]
+
+
 def test_json_full_flag_inlines_everything(monkeypatch, capsys):
     long = REVIEW_JSON.format(body="x" * 5000)
     code, env = _json_envelope(monkeypatch, capsys, long, extra_args=["--full"])
@@ -488,6 +512,46 @@ def test_repo_requires_pr(monkeypatch, capsys):
     code = run_cli(monkeypatch, ["--diff", "--repo", "acme/api"])
     assert code == 1
     assert "--repo only applies with --pr" in capsys.readouterr().err
+
+
+def test_piped_stdin_with_an_explicit_source_is_rejected(monkeypatch, capsys):
+    # Piped content is a review source of its own, so it counts alongside --diff and the
+    # pair must be refused instead of one of them being silently ignored.
+    patch_backends(monkeypatch, {"codex": "PROSE REVIEW"})
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: True)
+    code = run_main(monkeypatch, ["--diff", "--backend", "codex"])
+    assert code == 1
+    assert "only one review source" in capsys.readouterr().err
+
+
+def test_stdin_has_input_true_for_a_pipe(monkeypatch):
+    read_fd, write_fd = os.pipe()
+    try:
+        with os.fdopen(read_fd) as piped_stdin:
+            monkeypatch.setattr(sys, "stdin", piped_stdin)
+            assert stdin_has_input()
+    finally:
+        os.close(write_fd)
+
+
+def test_stdin_has_input_true_for_a_redirected_regular_file(monkeypatch, tmp_path):
+    path = tmp_path / "changes.diff"
+    path.write_text("diff --git a b\n")
+    with path.open() as redirected_stdin:
+        monkeypatch.setattr(sys, "stdin", redirected_stdin)
+        assert stdin_has_input()
+
+
+def test_stdin_has_input_false_for_a_tty(monkeypatch):
+    # A real pty: an interactive stdin carries nothing to review, so it must not count as
+    # a source and collide with an explicit one.
+    controller_fd, terminal_fd = os.openpty()
+    try:
+        with os.fdopen(terminal_fd) as tty_stdin:
+            monkeypatch.setattr(sys, "stdin", tty_stdin)
+            assert not stdin_has_input()
+    finally:
+        os.close(controller_fd)
 
 
 def _git_repo(tmp_path):
