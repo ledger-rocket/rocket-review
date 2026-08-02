@@ -196,7 +196,9 @@ Two arms ship:
 - **`current/`** — a byte-exact export of the constants at HEAD. `test_arms.py` asserts it
   still matches the live `prompts.py`, so editing the runtime prompts without re-exporting
   (`python evals/arms.py export current`) fails CI rather than silently comparing against
-  stale text.
+  stale text. The export writes a complete, loadable arm: it drops files for constants the
+  runtime no longer has, and writes a provenance README stub for a new arm without ever
+  overwriting one that is already filled in.
 - **`pre-m3a/`** — the constants as of commit `41da0e8`, the last commit before the review
   prompts were rewritten. Frozen history; never re-exported.
 
@@ -273,9 +275,15 @@ How each source is materialized, and why:
   from the checkout. A plan is a standalone artifact rather than a repository snapshot, so
   `repo_commit` is provenance for it rather than something to check out.
 
-One worktree per case is created up front, serially, and shared by every run of that case:
-`git worktree add` mutates repo-level admin state, and each run only ever reads the tree.
-It is torn down in a `finally`, including when a patch fails to apply.
+One worktree per case is created up front, serially — `git worktree add` mutates
+repo-level admin state — and then shared by every run of that case. That sharing is not
+quite read-only: the backends review under read-only sandboxes, but `rr --diff` runs
+`git diff HEAD`, and git refreshes the index and takes `index.lock` to do it, so two
+concurrent runs of the same case can collide on **git's own writes** even with perfectly
+behaved backends. The retry absorbs that; a worktree per run would mean hundreds of
+checkouts for no other gain. Worktrees are torn down in a `finally`, including when a
+patch fails to apply, and a removal that fails says so on stderr rather than leaving admin
+state to be discovered later.
 
 `rr --mode` is always passed explicitly from the manifest rather than left to
 auto-detection, so the manifest decides which prompt constant the arm is measured on.
@@ -319,10 +327,13 @@ interpreter and launcher used, both arms with their paths and hashes, backend sp
 versions, the repo, every case with its mode/source/`repo_commit`/control flag, runs,
 timeout, concurrency, the alternation scheme in words, and the retry limit.
 
-Every subsequent line is one attempt: case id, mode, source, `repo_commit`, arm name, role
-and hash, backend, requested model, repetition, `order_index`, attempt number, the exact
-command, the working directory, exit code, wall time, the raw review text, and the strict
-validator's outcome with its errors or excerpt.
+Every subsequent line is one attempt: case id, mode, source, `repo_commit`, whether the case
+is a clean control, arm name, role and hash, backend, requested model, backend CLI version,
+harness rocket-review version, repetition, `order_index`, attempt number, the exact command,
+the working directory, exit code, wall time, the raw review text, and the strict validator's
+outcome with its errors or excerpt. The versions and the control flag are on every row as
+well as in the header, because rows get filtered and concatenated across files and a row
+that cannot say what produced it is not evidence of anything.
 
 ## Tier-1 metrics
 
@@ -336,14 +347,32 @@ is re-run, and every number is deterministic given the file. Per backend and arm
 - **strict-valid rate** — the Part 1 validator applied to each run's raw output.
 - **file:line resolution** — the share of line-bearing findings whose cited file exists at
   `repo_commit` and whose line falls inside that file. Findings with a null `file` or `line`
-  make no locatable claim, so they are exempt rather than counted as unresolved. Resolution
-  is against `repo_commit`, which for a mutant case is the *pre-patch* base: a finding citing
-  a line the patch appended past the original end of file would read as unresolvable. Mutants
-  are line-for-line edits by construction, which keeps that rare — but it is why this is a
-  hallucination tripwire and not an exact locator.
+  — or a `file` that is not even a string, which a schema-violating review can produce
+  because the runtime parser passes that field through uncoerced — make no locatable claim,
+  so they are exempt rather than counted as unresolved. Resolution is against `repo_commit`,
+  which for a mutant case is the *pre-patch* base: a finding citing a line the patch appended
+  past the original end of file would read as unresolvable. Mutants are line-for-line edits
+  by construction, which keeps that rare — but it is why this is a hallucination tripwire and
+  not an exact locator.
 - **DO-NOT-FLAG tripwire** — see below.
 - **findings per run, split by severity** — n, mean, median, and range, which is what shows
-  a prompt change trading a drop in noise for a drop in real findings.
+  a prompt change trading a drop in noise for a drop in real findings. Severities the model
+  invented land in an **`other`** bucket rather than falling out of the split: inventing a
+  label is one of the things this harness exists to notice, and without the bucket the
+  per-severity numbers would stop summing to the total.
+- **CRITICAL+HIGH per run**, reported as its own distribution because the median and range
+  of a sum cannot be recovered from the two severities separately. This is the veto rule's
+  input, before a human has adjudicated which of those findings are false positives.
+
+**Everything above is reported twice: pooled across an arm's cases, and per case.** The two
+decision rules read different levels — the success criterion aggregates, the veto is written
+per clean-control case — so the per-case breakdown ships with the metrics instead of being
+re-derived by hand at the moment someone is deciding whether to ship a prompt. Each row of
+the results file carries `case_is_control`, so the breakdown labels which rule applies
+without needing the header.
+
+An empty distribution reports `None` for mean, median and range, never `0` — same rule as
+the rates. A zero would read as "measured, and it was zero".
 
 ### The DO-NOT-FLAG tripwire
 
@@ -389,6 +418,10 @@ only if:
   than **0.5 findings**; **and**
 - **in aggregate** across clean-control cases, the treatment mean does not exceed the
   control mean at all.
+
+`tier1.py` prints the pre-adjudication form of both numbers directly — `critical+high/run`
+per arm and again per case, with each case labelled control or defect — so the only step
+left at decision time is the human adjudication itself.
 
 A prompt change that finds more real defects while also inventing more high-severity noise
 on clean code has not improved `rr`; it has moved the cost from missed bugs to wasted review
