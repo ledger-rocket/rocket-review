@@ -103,6 +103,9 @@ For each issue:
 > **Suggested fix:** provide the corrected code snippet or specific refactor. \
 Make fixes copy-pasteable when possible.
 
+Use `N/A` in place of `File:Line` only when the finding concerns an absent artifact and \
+no existing line can demonstrate the problem.
+
 End with:
 - **Overall Code Quality Summary** (one short paragraph)
 - **Top 3 Priority Fixes**
@@ -154,6 +157,9 @@ For each finding:
 > Why it matters
 > **Suggested fix:** provide the corrected code snippet or specific change. \
 Make fixes copy-pasteable when possible.
+
+Use `N/A` in place of `File:Line` only when the finding concerns an absent artifact and \
+no existing line can demonstrate the problem.
 
 End with:
 - **Change Assessment**: Safe to merge / Needs fixes / Do not merge

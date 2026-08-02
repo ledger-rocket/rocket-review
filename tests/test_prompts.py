@@ -69,8 +69,13 @@ def test_every_mode_makes_severity_mandatory(mode):
 def test_finding_format_has_a_line_slot_where_a_line_is_asked_for(mode):
     # These two modes tell the reviewer to cite a file and line; a finding format with no
     # slot for the line would contradict that. Plan findings cite neither, so it is exempt.
-    assert "cite a file and line" in get_prompt(mode)
-    assert "[SEVERITY] File:Line — Issue description" in get_prompt(mode)
+    prompt = get_prompt(mode)
+    assert "cite a file and line" in prompt
+    assert "[SEVERITY] File:Line — Issue description" in prompt
+    # Both also ask for absence-based findings — missing tests, forgotten files, absent
+    # migrations — which have no line to cite. An unconditional format would push the
+    # reviewer to drop those findings or invent a line for them.
+    assert "Use `N/A` in place of `File:Line`" in prompt
 
 
 def test_unknown_mode_raises_key_error():
