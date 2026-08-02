@@ -1,0 +1,22 @@
+---
+# One guard lifted out of a run of four sibling argument checks, so the block still reads
+# as complete. The removal is silent rather than loud: --fail-on keeps working, it just
+# never has anything to gate on. A deleted guard has no lines of its own, so the span is
+# where it belonged: argument parsing through the sibling check it used to sit beside.
+id: b-017
+mode: diff
+source: mutant
+diff: cases/b-017.patch
+repo_commit: c4fd306b4312f3c915766709a3468fbd13f0fc40
+defect:
+  class: dropped-guard
+  file: rocket_review/cli.py
+  span: [436, 440]
+  expected: >-
+    --fail-on is accepted without --json. Prose results carry no parsed findings, so
+    should_fail sees nothing to trip on and `rr --diff --fail-on critical` exits 0 on
+    every review — a CI gate written that way passes everything.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_cli.py::test_fail_on_requires_json

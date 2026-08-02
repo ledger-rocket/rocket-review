@@ -1,0 +1,13 @@
+diff --git a/rocket_review/backends/claude.py b/rocket_review/backends/claude.py
+index 6253418..2481abe 100644
+--- a/rocket_review/backends/claude.py
++++ b/rocket_review/backends/claude.py
+@@ -13,7 +13,7 @@ DEFAULT_MODEL = None  # honor the user's Claude Code default model
+ # runs unprompted. `--permission-mode manual` flips the default to deny: with no TTY
+ # to grant approval, only allow-listed tools execute. Now the allowlist bounds the
+ # sandbox.
+-PERMISSION_MODE = "manual"
++PERMISSION_MODE = "default"
+ 
+ # Layer 2: an allowlist of pure-read tools. Git is deliberately kept OFF this wildcard
+ # set. `git diff`, `git show`, and `git log` all accept `--output=<file>`, which git

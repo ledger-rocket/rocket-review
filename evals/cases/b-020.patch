@@ -1,0 +1,17 @@
+diff --git a/rocket_review/backends/api.py b/rocket_review/backends/api.py
+index 46bfdce..adf96d1 100644
+--- a/rocket_review/backends/api.py
++++ b/rocket_review/backends/api.py
+@@ -148,12 +148,6 @@ def _output_text(response) -> str:
+     review does lose the fragment, which is why the error says so — a partial review
+     presented as a whole one is worse than an error.
+     """
+-    status = getattr(response, "status", None)
+-    if status is not None and status != "completed":
+-        raise BackendError(
+-            f"OpenAI API returned an unfinished response "
+-            f"(status {status}){_status_detail(response)}; partial output discarded"
+-        )
+     if refusal := _refusal(response):
+         raise BackendError(f"OpenAI API refused the request: {refusal}")
+     text = response.output_text or ""

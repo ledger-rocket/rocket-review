@@ -1,0 +1,23 @@
+---
+# The unfinished-response guard is gone while the docstring immediately above still
+# explains why a fragment must never be returned as a review. What remains — the refusal
+# and empty-text checks — makes the function look like it still validates the response.
+id: b-020
+mode: diff
+source: mutant
+diff: cases/b-020.patch
+repo_commit: c4fd306b4312f3c915766709a3468fbd13f0fc40
+defect:
+  class: swallowed-error
+  file: rocket_review/backends/api.py
+  span: [151, 153]
+  expected: >-
+    _output_text no longer rejects a response whose status is not `completed`, so a
+    truncated review's fragment is returned as the finished review, and a failed response
+    is reported as an empty one with the API's stated cause discarded.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_backends.py::test_api_unfinished_response_raises_naming_the_cause[response0-fragments0]
+  - tests/test_backends.py::test_api_unfinished_response_raises_naming_the_cause[response1-fragments1]
+  - tests/test_backends.py::test_api_unfinished_response_raises_naming_the_cause[response2-fragments2]
