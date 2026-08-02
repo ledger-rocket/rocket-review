@@ -268,17 +268,94 @@ def test_different_cases_still_run_concurrently():
     assert peak > 2, "two cases with four slots should overlap"
 
 
-def test_only_a_bounded_number_of_runs_is_ever_queued():
+@pytest.mark.parametrize("concurrency", [1, 2, 4])
+def test_no_more_runs_are_in_flight_than_the_concurrency_limit(concurrency):
     started: list[str] = []
+    running = 0
+    peak = 0
     lock = Lock()
 
     def execute(task):
+        nonlocal running, peak
         with lock:
             started.append(task)
-        time.sleep(0.005)
+            running += 1
+            peak = max(peak, running)
+        time.sleep(0.01)
+        with lock:
+            running -= 1
 
-    run_groups(fake_groups(cases=("a", "b", "c"), runs=3), concurrency=2, execute=execute)
-    assert len(started) == 18
+    run_groups(
+        fake_groups(cases=("a", "b", "c"), runs=3), concurrency=concurrency, execute=execute,
+    )
+    assert peak <= concurrency
+    assert len(started) == 18  # and everything still runs
+
+
+@pytest.mark.parametrize("blow_up", [RuntimeError, KeyboardInterrupt])
+def test_runs_still_in_flight_when_a_sweep_fails_keep_their_rows(
+    tmp_path, git_repo, corpus, arms, monkeypatch, stub_backend, blow_up,
+):
+    """A row already paid for must survive the exception that ends the sweep.
+
+    The results file is open for the duration of the sweep, so abandoning workers that are
+    still inside `run_task` lets it close underneath them: their `fh.write` then raises
+    into a future nobody reads, and up to `--concurrency` billed runs vanish silently.
+    """
+    import paired_runner
+
+    calls: list[str] = []
+    lock = Lock()
+    real_record = None
+
+    def fake_run_task(task, provenance, python, timeout):
+        nonlocal real_record
+        with lock:
+            calls.append(task.role)
+            first = len(calls) == 1
+        if first:
+            time.sleep(0.1)  # let the sibling get picked up before we bring it all down
+            raise blow_up("stop")
+        time.sleep(0.4)  # still inside run_task when the failure propagates
+        real_record = paired_runner.PairedRecord(
+            sweep_id=provenance.sweep_id, case_id=task.case.id, mode=task.case.mode,
+            source=task.case.source, repo_commit=task.case.repo_commit,
+            case_is_control=task.case.is_control, arm=task.arm.name, arm_role=task.role,
+            arm_hash=task.arm.content_hash, backend=task.backend,
+            requested_model=task.model, backend_version=None,
+            harness_rr_version=None, runtime_rr_version=None, harness_commit=None,
+            rep=task.rep, order_index=task.order_index, attempt=1, command=["stub"],
+            cwd=str(task.materialized.cwd), exit_code=0, duration_s=0.4,
+            raw=json.dumps({"verdict": "approve", "summary": "s", "findings": []}),
+            outcome=VALID, errors=[], excerpt="", bare_json=True, backend_error=None,
+            started_at="2026-01-01T00:00:00+00:00",
+        )
+        return [real_record]
+
+    monkeypatch.delenv("CI", raising=False)
+    for key, value in stub_backend.env().items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(paired_runner, "run_task", fake_run_task)
+
+    control, treatment = arms
+    out = tmp_path / "results"
+    with pytest.raises(blow_up):
+        main([
+            "--control", str(control), "--treatment", str(treatment),
+            "--backends", "codex:stub-model", "--cases", str(corpus),
+            "--runs", "2", "--concurrency", "2", "--timeout", "60",
+            "--repo", str(git_repo), "--out", str(out),
+        ])
+
+    rows = [
+        json.loads(line)
+        for line in sorted(out.glob("paired-*.jsonl"))[0].read_text(encoding="utf-8")
+                    .splitlines()[1:]
+    ]
+    assert real_record is not None, "the sibling run never completed; test proves nothing"
+    assert len(rows) == 1, "the in-flight run's row was lost when the file closed"
+    assert rows[0]["arm_role"] == real_record.arm_role
+    assert rows[0]["outcome"] == VALID
 
 
 @pytest.mark.parametrize("blow_up", [RuntimeError, KeyboardInterrupt])

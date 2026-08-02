@@ -139,9 +139,13 @@ class Scores:
     per clean-control case.
     """
 
-    #: Final attempts that produced judgeable output. Runs still failing after their retry
-    #: are counted in runs_failed and kept out of every denominator below.
+    #: Final attempts that produced judgeable output, and the denominator of every rate
+    #: below.
     runs_scored: int
+    #: Failed runs among the rows handed to `score`. Through `compute` this is always 0:
+    #: a run that failed takes its whole repetition out before scoring, and the count a
+    #: reader wants is `GroupMetrics.excluded_unpaired`. It is non-zero only when `score`
+    #: is called directly on an unfiltered set of rows.
     runs_failed: int
     strict_valid: int
     strict_valid_rate: float | None

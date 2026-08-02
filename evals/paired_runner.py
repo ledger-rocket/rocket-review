@@ -335,7 +335,12 @@ def run_groups(
         # own timeout, and rr tears its own backend down when it is interrupted.
         for future in in_flight:
             future.cancel()
-        pool.shutdown(wait=False, cancel_futures=True)
+        # wait=True so the runs still executing can finish writing their rows. The caller
+        # records results inside an open file that closes as soon as this exception
+        # propagates, so returning early would strand up to `concurrency` already-billed
+        # runs mid-write and lose them. It costs no wall time either: the pool's threads
+        # are non-daemon, so the interpreter joins them at exit regardless.
+        pool.shutdown(wait=True, cancel_futures=True)
         raise
     pool.shutdown()
 
@@ -691,10 +696,13 @@ def _execute(
 
         try:
             run_groups(groups, args.concurrency, execute)
-        except KeyboardInterrupt:
+        except BaseException:
+            # Every exit here is expensive — a Ctrl-C or a harness bug partway through a
+            # billed sweep — and the runs that did complete are already on disk. Say so
+            # before the traceback, whichever way it ended.
             print(
-                f"\nInterrupted: no further units will start. Everything that finished is "
-                f"already in {out_path}.",
+                f"\nStopped early: no further units will start. Everything that finished "
+                f"is already in {out_path}.",
                 file=sys.stderr,
             )
             raise
