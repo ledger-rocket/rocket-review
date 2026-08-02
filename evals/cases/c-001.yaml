@@ -1,0 +1,8 @@
+---
+# Smoke case, and a clean control: a merged commit from this repo's own history with no
+# injected defect. CRITICAL/HIGH findings here are false-positive candidates — see the
+# clean-control adjudication rule in evals/README.md before scoring any of them.
+id: c-001
+mode: diff
+source: merged-pr
+repo_commit: 4923a444908103e700e178be7f9038aac32efe55

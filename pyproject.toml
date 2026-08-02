@@ -38,11 +38,12 @@ rr = "rocket_review.cli:main"
 [project.optional-dependencies]
 api = ["openai>=1.68"]
 # dev pulls in [api] so the api backend's tests run; single source for the openai pin.
-# jsonschema is for evals/ only — the runtime parser is intentionally lenient and
-# validates nothing strictly, so it must not become an install-time dependency.
+# jsonschema and pyyaml are for evals/ only — the runtime parser is intentionally lenient
+# and validates nothing strictly, and no runtime path reads YAML, so neither may become an
+# install-time dependency.
 dev = [
     "pytest>=8", "ruff>=0.6", "mypy>=1.18", "yamllint>=1.37",
-    "jsonschema>=4", "rocket-review[api]",
+    "jsonschema>=4", "pyyaml>=6", "rocket-review[api]",
 ]
 
 # Pin what ships. Flat-layout auto-discovery treats every top-level directory as a
