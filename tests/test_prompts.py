@@ -3,13 +3,11 @@ import pytest
 from rocket_review.backends.base import ReviewJob
 from rocket_review.prompts import build_agent_prompt, get_prompt
 
-# Two kinds of pin live here. Most are characterization tests: they pin how prompts are
-# assembled today, ahead of a planned refactor of prompt assembly, and assert what IS, not
-# what should be — including the quirks below. The rest pin deliberate content decisions
-# (which modes ask for praise, that severity is mandatory, that a format promising a line
-# citation offers a slot for one), so a later edit cannot quietly reverse them. Assertions
-# are substring/ordering only, so internals can be restructured and these break only when
-# the externally visible prompt changes.
+# These pin the deliberate decisions in prompt assembly — that a mode emits exactly one
+# output format, which modes ask for praise, that severity is mandatory, that a format
+# promising a line citation offers a slot for one — so a later edit cannot quietly reverse
+# them. Assertions are substring/ordering only, so internals can be restructured and these
+# break only when the externally visible prompt changes.
 
 # Distinctive opening phrase of each mode body; cheaper to keep in sync than the whole body.
 MODE_MARKERS = {
@@ -27,7 +25,8 @@ MODE_INTERIOR_MARKERS = {
 }
 
 STANDARDS_MARKER = "PROJECT STANDARDS CONTEXT"
-JSON_MARKER = "OUTPUT FORMAT OVERRIDE"
+PROSE_FORMAT_MARKER = "OUTPUT FORMAT"
+JSON_MARKER = "JSON RESPONSE FORMAT"
 DOCS = "# Standards\nno global mutable state"
 
 
@@ -61,8 +60,12 @@ def test_only_the_plan_prompt_asks_what_is_good():
 
 
 @pytest.mark.parametrize("mode", list(MODE_MARKERS))
-def test_every_mode_makes_severity_mandatory(mode):
-    assert "Label each finding with one of the severity levels above" in get_prompt(mode)
+@pytest.mark.parametrize("json_output", [False, True])
+def test_every_mode_makes_severity_mandatory(mode, json_output):
+    # The severity rules belong to the methodology, not to either output format, so
+    # neither format section can be swapped in without them.
+    prompt = get_prompt(mode, json_output=json_output)
+    assert "Label each finding with one of the severity levels above" in prompt
 
 
 @pytest.mark.parametrize("mode", ["code", "diff"])
@@ -104,13 +107,30 @@ def test_json_addendum_only_when_json_output():
     assert JSON_MARKER not in get_prompt("diff")
 
 
-def test_json_addendum_overrides_rather_than_replaces_the_prose_format():
-    # Status quo: the mode body's own OUTPUT FORMAT and <SUMMARY> instructions stay in the
-    # prompt and the addendum tells the model to ignore them, so both are sent.
-    prompt = get_prompt("diff", json_output=True)
-    assert "<SUMMARY>" in prompt
-    assert "Ignore the output format instructions above" in prompt
-    assert prompt.index("<SUMMARY>") < prompt.index(JSON_MARKER)
+@pytest.mark.parametrize("mode", list(MODE_MARKERS))
+def test_json_mode_replaces_the_prose_format_instead_of_overriding_it(mode):
+    # Exactly one format reaches the model. The prose instructions are not sent and then
+    # retracted: no OUTPUT FORMAT block, no <SUMMARY>, and nothing telling the model to
+    # disregard an instruction it was just given.
+    prompt = get_prompt(mode, json_output=True)
+    assert PROSE_FORMAT_MARKER not in prompt
+    assert "<SUMMARY>" not in prompt
+    assert "Ignore" not in prompt
+    assert prompt.count(JSON_MARKER) == 1
+
+
+@pytest.mark.parametrize("mode", list(MODE_MARKERS))
+@pytest.mark.parametrize(
+    "json_output, marker, tail",
+    [(False, PROSE_FORMAT_MARKER, "</SUMMARY>"),
+     (True, JSON_MARKER, 'An empty findings array with verdict "approve" is a valid review.')],
+)
+def test_the_format_section_is_the_last_thing_the_model_reads(mode, json_output, marker, tail):
+    # Whichever format is chosen goes last, after the methodology and any standards
+    # addendum, so the instruction nearest the model's own output describes its shape.
+    prompt = get_prompt(mode, docs_content=DOCS, json_output=json_output)
+    assert prompt.index(STANDARDS_MARKER) < prompt.index(marker)
+    assert prompt.rstrip().endswith(tail)
 
 
 def test_json_addendum_describes_the_findings_object_shape():

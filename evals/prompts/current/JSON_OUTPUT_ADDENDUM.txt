@@ -1,6 +1,7 @@
-OUTPUT FORMAT OVERRIDE
-Ignore the output format instructions above. Output ONLY a single JSON object — no prose
-before or after it, no markdown fence — matching exactly this shape:
+
+JSON RESPONSE FORMAT
+Output ONLY a single JSON object — no prose before or after it, no markdown fence —
+matching exactly this shape:
 {
   "verdict": "approve" | "needs_fixes" | "blocker",
   "summary": "recap in at most 200 words",

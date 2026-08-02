@@ -163,8 +163,13 @@ def test_non_prompt_files_are_ignored(tmp_path):
 def test_apply_arm_changes_what_get_prompt_returns(tmp_path, restore_prompts):
     arm = load_arm(write_arm(tmp_path / "arm", DIFF_REVIEW_PROMPT="ARM DIFF TEXT\n"))
     apply_arm(arm)
-    assert rr_prompts.get_prompt("diff") == "ARM DIFF TEXT\n"
-    assert "ARM DIFF TEXT" in rr_prompts.get_prompt("diff", json_output=True)
+    # The mode body is the arm's; get_prompt then appends one output-format section.
+    assert rr_prompts.get_prompt("diff").startswith("ARM DIFF TEXT\n")
+    # Under --json, which is how every measured run is made, the assembled prompt is
+    # entirely the arm's: its body plus its JSON section, with no live text in between.
+    assert rr_prompts.get_prompt("diff", json_output=True) == (
+        "ARM DIFF TEXT\n" + arm.texts["JSON_OUTPUT_ADDENDUM"]
+    )
 
 
 def test_apply_arm_reaches_build_agent_prompt(tmp_path, restore_prompts):

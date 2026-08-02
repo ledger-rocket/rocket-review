@@ -6,6 +6,16 @@ if TYPE_CHECKING:
     from rocket_review.backends.base import ReviewJob
 
 
+# A mode's prompt is a methodology body plus exactly one output-format section, chosen at
+# assembly time by get_prompt — so the prompt never states a format it then retracts.
+#
+# The public constants here are the surface the eval harness injects prompt arms into
+# (evals/arms.py treats every public string in this module as an arm-injectable constant,
+# and every shipped arm carries one file per name). The prose format sections are private
+# for that reason: a new public constant would demand a file the frozen historical arm has
+# no way to grow. Sections are concatenated verbatim, so a format section opens with a
+# blank line of its own.
+
 PLAN_REVIEW_PROMPT = """\
 You are a principal engineer stress-testing an implementation plan. \
 Your job is to find gaps, risks, and over-engineering before the team starts building.
@@ -18,12 +28,6 @@ REVIEW METHODOLOGY
 5. TESTABILITY — How will each phase be validated? Are there clear acceptance criteria?
 6. EDGE CASES — What scenarios does the plan miss? What assumptions are unstated?
 
-OUTPUT FORMAT
-For each finding:
-[SEVERITY] Issue description
-> Why it matters
-> **Suggested fix:** concrete recommendation or revised plan step
-
 Severity levels:
 - CRITICAL: Blocker — plan will fail or produce wrong results without fixing this
 - HIGH: Significant gap or risk that needs addressing before implementation
@@ -32,6 +36,14 @@ Severity levels:
 
 Label each finding with one of the severity levels above. An unlabelled finding is \
 malformed — do not emit one.
+"""
+
+_PLAN_PROSE_FORMAT = """
+OUTPUT FORMAT
+For each finding:
+[SEVERITY] Issue description
+> Why it matters
+> **Suggested fix:** concrete recommendation or revised plan step
 
 End with:
 - **Verdict**: Ready / Needs revision / Major rework needed
@@ -97,7 +109,9 @@ EVALUATION AREAS (apply as relevant)
 - Code quality: readability, idioms, error handling, modularity
 - Testing: coverage, edge cases, test reliability
 - Architecture: patterns, data flow, state management
+"""
 
+_CODE_PROSE_FORMAT = """
 OUTPUT FORMAT
 For each issue:
 [SEVERITY] File:Line — Issue description
@@ -153,7 +167,9 @@ SEVERITY LEVELS
 
 Label each finding with one of the severity levels above. An unlabelled finding is \
 malformed — do not emit one.
+"""
 
+_DIFF_PROSE_FORMAT = """
 OUTPUT FORMAT
 For each finding:
 [SEVERITY] File:Line — Issue description
@@ -182,10 +198,10 @@ The reviewer has provided project standards documentation below. You MUST:
 - Treat documented project conventions as authoritative
 """
 
-JSON_OUTPUT_ADDENDUM = """\
-OUTPUT FORMAT OVERRIDE
-Ignore the output format instructions above. Output ONLY a single JSON object — no prose
-before or after it, no markdown fence — matching exactly this shape:
+JSON_OUTPUT_ADDENDUM = """
+JSON RESPONSE FORMAT
+Output ONLY a single JSON object — no prose before or after it, no markdown fence —
+matching exactly this shape:
 {
   "verdict": "approve" | "needs_fixes" | "blocker",
   "summary": "recap in at most 200 words",
@@ -205,16 +221,23 @@ An empty findings array with verdict "approve" is a valid review.
 
 
 def get_prompt(mode: str, docs_content: str | None = None, json_output: bool = False) -> str:
-    prompts = {
+    """Compose a mode's methodology body with exactly one output-format section."""
+    bodies = {
         "plan": PLAN_REVIEW_PROMPT,
         "code": CODE_REVIEW_PROMPT,
         "diff": DIFF_REVIEW_PROMPT,
     }
-    prompt = prompts[mode]
+    prose_formats = {
+        "plan": _PLAN_PROSE_FORMAT,
+        "code": _CODE_PROSE_FORMAT,
+        "diff": _DIFF_PROSE_FORMAT,
+    }
+    prompt = bodies[mode]
     if docs_content:
         prompt += PROJECT_STANDARDS_ADDENDUM
-    if json_output:
-        prompt += JSON_OUTPUT_ADDENDUM
+    # Format last: the instruction the model reads closest to writing its answer is the one
+    # describing the answer's shape.
+    prompt += JSON_OUTPUT_ADDENDUM if json_output else prose_formats[mode]
     return prompt
 
 

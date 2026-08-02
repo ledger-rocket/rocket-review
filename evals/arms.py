@@ -23,7 +23,12 @@ import rocket_review.prompts as rr_prompts
 
 # The full prompt surface an arm has to supply. Order is canonical: the content hash
 # concatenates in exactly this sequence, so it must not be reordered casually — doing so
-# renames every existing arm's hash and breaks comparison with recorded results.
+# renames every existing arm's hash and breaks comparison with recorded results. Adding or
+# renaming a name is heavier still: every shipped arm needs a matching file, and the frozen
+# historical arm cannot grow one. That is why `rocket_review.prompts` keeps its prose
+# format sections private — under `--json`, which is how every measured run is made, the
+# assembled prompt is arm bytes throughout: the arm's mode body, its standards addendum
+# when the case supplies docs, and its JSON section.
 PROMPT_CONSTANTS = (
     "PLAN_REVIEW_PROMPT",
     "CODE_REVIEW_PROMPT",

@@ -25,19 +25,3 @@ SEVERITY LEVELS
 - LOW: Minor improvements (but not style — leave that to linters)
 
 Label each finding with one of the severity levels above. An unlabelled finding is malformed — do not emit one.
-
-OUTPUT FORMAT
-For each finding:
-[SEVERITY] File:Line — Issue description
-> Why it matters
-> **Suggested fix:** provide the corrected code snippet or specific change. Make fixes copy-pasteable when possible.
-
-Use `N/A` in place of `File:Line` only when the finding concerns an absent artifact and no existing line can demonstrate the problem.
-
-End with:
-- **Change Assessment**: Safe to merge / Needs fixes / Do not merge
-- **Top Issues** (if any)
-
-<SUMMARY>
-Compact recap (max 500 words): assessment, risks introduced, and fixes needed.
-</SUMMARY>
