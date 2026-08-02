@@ -1,9 +1,12 @@
 # Third-party notices
 
-Prompt-engineering patterns in `rocket_review/prompts.py` are adapted from GSD
-(<https://github.com/gsd-build/get-shit-done>). What is borrowed is technique, not text: no
-GSD wording is reproduced verbatim in the distributed code. The MIT licence below is
-included to attribute those adapted patterns.
+Prompt-engineering patterns in `rocket_review/prompts.py` and in the eval prompt arms
+(`evals/prompts/`) are adapted from GSD (<https://github.com/gsd-build/get-shit-done>).
+What is borrowed is technique, not text: no GSD wording is reproduced verbatim in either —
+the arms are checked by the same method as the shipped prompts, sentence by sentence
+against GSD's corpus. Only `rocket_review/` is packaged, but the arms are published here,
+so the attribution covers both. The MIT licence below is included to attribute those
+adapted patterns.
 
 ## GSD (get-shit-done)
 

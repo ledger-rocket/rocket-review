@@ -16,6 +16,7 @@ from arms import (
     load_arm,
     runtime_prompt_constants,
 )
+from conftest import STANCE_MARKER, WEAK_PATTERNS_HEADING, WEAK_PLAN_PATTERNS_HEADING
 
 
 @pytest.fixture
@@ -66,6 +67,80 @@ def test_pre_prompt_rewrite_arm_loads_and_differs_from_current():
     pre = load_arm("pre-prompt-rewrite")
     assert pre.content_hash != load_arm("current").content_hash
     assert set(pre.texts) == set(PROMPT_CONSTANTS)
+
+
+#: Same reasoning as above, for the treatment of the adversarial-stance experiment. It is
+#: pinned from the day it is written rather than once it has history: an arm whose text can
+#: move while a sweep is running is not a treatment, it is two treatments sharing a name.
+STANCE_HASH = (
+    "f2719b21a68e95de9ca04cb3a24022bb69c971d6ba43cf36c8516de12107f65f"
+)
+
+
+def test_the_stance_arm_is_frozen():
+    assert load_arm("stance").content_hash == STANCE_HASH
+
+
+#: `current/`'s hash at 285ec3b — the text `stance/` was derived from. Pinned as a number
+#: rather than read from `current/`, because `current/` tracks HEAD: the next legitimate
+#: prompt edit moves it, and a purity check written against a moving base would fail on a
+#: change that has nothing to do with this arm.
+STANCE_BASE_HASH = (
+    "14e3dcae19cb2a5da07bfe4ffda2d578082145acf757a7ff51eda5f3a52ca12e"
+)
+
+#: What `stance/` adds, by the heading of each inserted paragraph. Removing exactly these
+#: has to give back the base — so a paragraph added, moved between bodies, or left
+#: unregistered here is caught, and so is any edit to the text around them.
+STANCE_INSERTIONS = {
+    "CODE_REVIEW_PROMPT": ("STANCE", WEAK_PATTERNS_HEADING),
+    "DIFF_REVIEW_PROMPT": ("STANCE", WEAK_PATTERNS_HEADING),
+    "PLAN_REVIEW_PROMPT": (WEAK_PLAN_PATTERNS_HEADING,),
+}
+
+
+def without_paragraph(text: str, heading: str) -> str:
+    """Drop the one blank-line-delimited paragraph whose first line starts with `heading`."""
+    paragraphs = text.split("\n\n")
+    kept = [p for p in paragraphs if not p.split("\n", 1)[0].startswith(heading)]
+    assert len(kept) == len(paragraphs) - 1, (
+        f"{heading!r} heads {len(paragraphs) - len(kept)} paragraphs, expected exactly 1"
+    )
+    return "\n\n".join(kept)
+
+
+def test_the_stance_arm_inherits_its_base_text_unchanged():
+    """Strip the registered insertions and what is left must hash to `current/` at 285ec3b.
+
+    What the experiment rests on: the arm is meant to isolate two added blocks, so an edit
+    anywhere else — a reworded principle, a dropped bullet — would make a measured
+    difference unattributable to the thing under test. Reconstructing the base rather than
+    diffing against today's `current/` keeps that guarantee from expiring the next time the
+    live prompts legitimately change.
+    """
+    texts = dict(load_arm("stance").texts)
+    for name, headings in STANCE_INSERTIONS.items():
+        for heading in headings:
+            texts[name] = without_paragraph(texts[name], heading)
+    assert arm_hash(texts) == STANCE_BASE_HASH, (
+        "stance/ no longer reduces to current/ at 285ec3b: text outside the registered "
+        "insertions was edited, or an insertion is missing from STANCE_INSERTIONS"
+    )
+
+
+def test_the_stance_arm_carries_the_two_blocks_where_the_experiment_expects_them():
+    # Which body gets which block is the design: the plan reviewer is not reviewing code,
+    # so a stance about defective code would not apply to it.
+    stance = load_arm("stance")
+    for name in ("CODE_REVIEW_PROMPT", "DIFF_REVIEW_PROMPT"):
+        assert STANCE_MARKER in stance.texts[name]
+        assert WEAK_PATTERNS_HEADING in stance.texts[name]
+        assert WEAK_PLAN_PATTERNS_HEADING not in stance.texts[name]
+    plan = stance.texts["PLAN_REVIEW_PROMPT"]
+    assert STANCE_MARKER not in plan
+    assert WEAK_PLAN_PATTERNS_HEADING in plan
+    # The plan list is its own text, not the code one under a longer heading.
+    assert WEAK_PATTERNS_HEADING not in plan
 
 
 def test_every_shipped_arm_documents_its_provenance():
