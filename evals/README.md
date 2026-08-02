@@ -1,4 +1,25 @@
-# evals — backend JSON format compliance
+# evals — offline measurement for `rr`
+
+Developer tooling, never installed and never run in CI. Two harnesses live here:
+
+- **Format compliance** (`m0_sweep.py`) — how often backends really return
+  `REVIEW_SCHEMA`-compliant `--json` output.
+- **The paired prompt-arm harness** (`paired_runner.py`, `prompts/`, `cases/`, `tier1.py`)
+  — whether a prompt change made `rr` sharper or just noisier.
+
+Both spend real tokens, both refuse to start when `CI` is set in the environment, and
+nothing in `.github/workflows/` invokes either. Only the test modules run in CI, and none
+of them launches a backend. They need the `dev` extra, which is where `jsonschema` and
+`PyYAML` live — runtime `dependencies` stays empty on purpose, and no runtime path reads
+YAML or validates strictly.
+
+Shared plumbing (subprocess launch and timeout teardown, backend-spec parsing, envelope
+extraction, result-file naming) lives in `eval_common.py` so the two runners cannot drift
+apart on the parts that are subtle.
+
+---
+
+# Part 1 — backend JSON format compliance
 
 ## What this measures, and why
 
@@ -11,9 +32,8 @@ missing `why`/`fix` fields all pass. That leniency is right for the runtime — 
 review shouldn't be thrown away over a stray key — but it means the CLI cannot tell you how
 often backends actually comply.
 
-This directory answers that separately and offline. It changes nothing at runtime; it only
-re-reads output the CLI already produced, against the same schema object the backends were
-sent.
+This answers that separately and offline. It changes nothing at runtime; it only re-reads
+output the CLI already produced, against the same schema object the backends were sent.
 
 ## The four outcomes
 
@@ -25,7 +45,7 @@ sent.
   truncated response). The record keeps a 400-character excerpt so a human can triage what
   happened; nothing here guesses at the cause.
 - **`backend_error`** — the run never produced output that can be judged: timeout, non-zero
-  exit, crash, malformed envelope. Only the sweep runner can observe this, so only it records
+  exit, crash, malformed envelope. Only a runner can observe this, so only a runner records
   it; the validator never returns it.
 
 **Exit status is authoritative.** `rr` prints its envelope *before* exiting non-zero when a
@@ -69,10 +89,6 @@ backend, since case ids and the summary both key on the backend name.
 Other defaults: five representative commits from this repo's history, 3 runs each, a 900s
 per-run timeout passed through to `rr`, and up to 3 parallel `rr` subprocesses
 (`--concurrency`).
-
-**Every case is a real, billed backend review.** The script refuses to start when `CI` is
-set in the environment, and nothing in `.github/workflows/` invokes it. Only the two test
-modules run in CI, and neither launches a backend.
 
 A run that outlives its timeout is stopped with SIGINT, not SIGKILL. `rr` starts each backend
 CLI in its own process group and only tears those groups down from its own interrupt handler,
@@ -136,13 +152,312 @@ cleanup that can be scheduled on its own merits. A materially lower rate — or 
 far behind the others — means format compliance is a real variable, and any evaluation built
 on `--json` output has to account for it before the results mean anything.
 
+---
+
+# Part 2 — the paired prompt-arm harness
+
+## What it compares, and why it is paired
+
+Prompt edits are easy to make and hard to verify. Reviews are non-deterministic and models
+change under you, so "the prompt looks better and the reviews seem sharper" is not evidence
+of anything. This harness answers one question: did a prompt change make `rr` sharper, or
+just noisier?
+
+A **control** prompt set and a **treatment** prompt set are run on identical cases, with the
+same backend and the same model, alternating within each case, in one session. Never one arm
+today and the other next week — that would confound the prompt change with every other thing
+that moved in between, including the model itself.
+
+Running the *same* arm as both control and treatment is supported and useful: it measures
+the backend's own run-to-run noise floor, which is the number every real comparison has to
+beat. The runner says so on stderr rather than pretending it is a comparison.
+
+## Prompt arms
+
+An arm is a directory under `evals/prompts/<name>/` holding one plain-text file per prompt
+constant in `rocket_review/prompts.py`:
+
+```
+evals/prompts/current/
+  PLAN_REVIEW_PROMPT.txt
+  CODE_REVIEW_PROMPT.txt
+  DIFF_REVIEW_PROMPT.txt
+  PROJECT_STANDARDS_ADDENDUM.txt
+  JSON_OUTPUT_ADDENDUM.txt
+  README.md            <- one line naming where this arm came from
+```
+
+An arm is immutable input. The runner loads it, content-hashes it (sha256 over a canonical,
+length-prefixed concatenation in a fixed constant order), and writes that hash on **every**
+result row, so any row can be traced back to the exact prompt bytes that produced it.
+
+Two arms ship:
+
+- **`current/`** — a byte-exact export of the constants at HEAD. `test_arms.py` asserts it
+  still matches the live `prompts.py`, so editing the runtime prompts without re-exporting
+  (`python evals/arms.py export current`) fails CI rather than silently comparing against
+  stale text.
+- **`pre-m3a/`** — the constants as of commit `41da0e8`, the last commit before the review
+  prompts were rewritten. Frozen history; never re-exported.
+
+Adding a prompt constant to `rocket_review/prompts.py` without adding it to every arm is
+also caught: `PROMPT_CONSTANTS` is asserted against the constants the runtime actually
+defines, and `apply_arm` refuses an arm that does not cover all of them. Without that guard
+a new prompt would go un-injected, both arms would run the live text for it, and the
+comparison would quietly stop being a comparison.
+
+## The injection seam
+
+`rr` assembles prompts internally, and no runtime code has any notion of an eval. The
+harness makes a backend see an arm's text by launching
+
+```
+python evals/rr_arm_launcher.py <normal rr arguments>     # RR_EVAL_ARM=<arm dir>
+```
+
+The launcher rebinds the prompt constants on the imported `rocket_review.prompts` module and
+then calls `rocket_review.cli.main`. Everything downstream — source materialization,
+`ReviewJob`, the backend module, the subprocess, the `--json` envelope — is the production
+code path, unmodified.
+
+Three properties make this the right seam:
+
+- **It works at all.** `get_prompt` resolves the constants from module globals on every
+  call, so rebinding them reaches every backend. Rebinding `get_prompt` or
+  `build_agent_prompt` themselves would *not* work: the backend modules import those by
+  value at import time.
+- **Arms cannot leak into each other.** The rebinding is module-global state, so one
+  interpreter can only ever hold one arm. Each run is its own process and the runner's
+  concurrency is process-level.
+- **Provenance is airtight.** The prompts patched are those of the `rocket_review` importable
+  by the launching interpreter, which is also the `rr` that runs. `rr` on PATH is
+  deliberately never used, so injecting into an installation the arm was not applied to is
+  not merely unsupported, it is unrepresentable. `--python` selects the interpreter, and that
+  choice selects both.
+
+`test_paired_runner.py` proves it end to end: a stub executable named `codex`, first on
+PATH, records the exact prompt bytes `rr` hands it, and the test asserts the arm's marker
+text is present and the live prompt text is *absent* — substitution, not addition.
+
+## Case manifests
+
+One YAML file per case under `evals/cases/`. The file name is the case id.
+
+```yaml
+id: b-017
+mode: diff            # diff | code | plan — which prompt/mode this case exercises
+source: mutant        # mutant | merged-pr | seeded-plan
+diff: cases/b-017.patch     # mutant only; path relative to evals/
+path: cases/b-017-plan.md   # seeded-plan / code only; path relative to evals/
+repo_commit: <oid>    # exact snapshot the case is defined against
+defect:               # present for defect-bearing cases only (corpus B)
+  class: dropped-null-check
+  file: rocket_review/models.py
+  span: [84, 91]      # inclusive line range a correct finding must overlap
+  expected: one-line description of the injected defect
+```
+
+A case with no `defect` is a **clean control**; that absence is the whole definition.
+
+How each source is materialized, and why:
+
+- **`mutant`** — a detached `git worktree` at `repo_commit` with the patch applied to the
+  working tree, reviewed with `rr --diff`. That is the faithful shape: the agentic backends
+  are told to run `git diff HEAD` and can navigate the whole snapshot around the change,
+  exactly as on a real uncommitted edit. Feeding the patch on stdin instead would hand every
+  backend the same bytes but strip the repository context `rr`'s primary mode depends on, so
+  a prompt change affecting repo navigation would not show up at all.
+- **`merged-pr`** — `rr --commit <oid>` in the repo itself. A commit is immutable, so this
+  is already reproducible without a worktree, and it exercises rr's `git show` path.
+- **`seeded-plan`** (and standalone `code` files) — reviewed as an ordinary file argument
+  from the checkout. A plan is a standalone artifact rather than a repository snapshot, so
+  `repo_commit` is provenance for it rather than something to check out.
+
+One worktree per case is created up front, serially, and shared by every run of that case:
+`git worktree add` mutates repo-level admin state, and each run only ever reads the tree.
+It is torn down in a `finally`, including when a patch fails to apply.
+
+`rr --mode` is always passed explicitly from the manifest rather than left to
+auto-detection, so the manifest decides which prompt constant the arm is measured on.
+
+**Three smoke cases ship** (`b-001` mutant, `c-001` clean control, `p-001` plan) — enough to
+prove the pipeline end to end, one per source type. Populating real corpora is separate work;
+nothing here should be read as a corpus.
+
+## Running a paired sweep
+
+```
+python evals/paired_runner.py \
+    --control pre-m3a --treatment current \
+    --backends codex:gpt-5.6-sol --runs 3 --timeout 900
+```
+
+Run protocol:
+
+- **A model is mandatory.** Every `--backends` spec must be `name:model`, for the reason in
+  *Model provenance* above: `rr` reports the model *argument*, and a backend on its own
+  default reports `null`, which would leave rows describing nothing.
+- **Arms alternate within each case.** Odd repetitions run control then treatment, even
+  repetitions run treatment then control (C,T,T,C,C,T,…) per case and backend. Each row
+  records its `order_index` in that sequence, so the alternation can be checked after the
+  fact instead of taken on trust. Default `--concurrency 2` — one slot per arm — so a
+  repetition's two runs face the same backend conditions rather than starting minutes apart.
+  Above 2, interleaving relaxes to scheduling order; the pairing (same cases, same session,
+  equal repetitions) is what carries the design.
+- **Failures are retried once and never dropped.** A timeout or backend error is recorded as
+  such and retried; both attempts are written. `tier1` scores the last attempt of each unit
+  and excludes a unit still failing after its retry from every metric denominator, reporting
+  it under `runs_failed`.
+- A run that outlives its timeout is torn down exactly as in Part 1 (SIGINT, ten-second
+  grace, SIGKILL only as a last resort), using the same shared code.
+
+### Output
+
+One JSONL file per run in `evals/results/`, named `paired-<timestamp>-<random>.jsonl` and
+created exclusively. The header line records the harness rocket-review version, the
+interpreter and launcher used, both arms with their paths and hashes, backend specs and CLI
+versions, the repo, every case with its mode/source/`repo_commit`/control flag, runs,
+timeout, concurrency, the alternation scheme in words, and the retry limit.
+
+Every subsequent line is one attempt: case id, mode, source, `repo_commit`, arm name, role
+and hash, backend, requested model, repetition, `order_index`, attempt number, the exact
+command, the working directory, exit code, wall time, the raw review text, and the strict
+validator's outcome with its errors or excerpt.
+
+## Tier-1 metrics
+
+```
+python evals/tier1.py evals/results/paired-<...>.jsonl
+```
+
+Computed from the stored JSONL and the case's `repo_commit`. No backend is called, nothing
+is re-run, and every number is deterministic given the file. Per backend and arm:
+
+- **strict-valid rate** — the Part 1 validator applied to each run's raw output.
+- **file:line resolution** — the share of line-bearing findings whose cited file exists at
+  `repo_commit` and whose line falls inside that file. Findings with a null `file` or `line`
+  make no locatable claim, so they are exempt rather than counted as unresolved. Resolution
+  is against `repo_commit`, which for a mutant case is the *pre-patch* base: a finding citing
+  a line the patch appended past the original end of file would read as unresolvable. Mutants
+  are line-for-line edits by construction, which keeps that rare — but it is why this is a
+  hallucination tripwire and not an exact locator.
+- **DO-NOT-FLAG tripwire** — see below.
+- **findings per run, split by severity** — n, mean, median, and range, which is what shows
+  a prompt change trading a drop in noise for a drop in real findings.
+
+### The DO-NOT-FLAG tripwire
+
+The review prompts list things the model must not raise (formatting, import ordering, quote
+style, naming, missing annotations, docs-only). `tier1.py` carries a small keyword/regex
+taxonomy for those six categories and reports the share of findings matching it.
+
+**This is a heuristic tripwire, not a classifier and not a verdict.** It has no notion of
+whether a finding is correct. A jump in the rate between two arms means *go and read the
+findings*; it never on its own says anything about either arm's quality.
+
+Two design decisions keep it honest, both validated by
+`evals/fixtures/do_not_flag_labels.json`, a small hand-labelled set of finding titles that
+`test_tier1.py` asserts the taxonomy reproduces exactly:
+
+- **Only the title is classified.** The title is the claim a finding makes; the same words
+  inside `why` are usually part of a real argument — "stripping trailing whitespace would
+  corrupt the patch" is a correctness point, not a style nit.
+- **Bare nouns are not enough where a qualifier separates the two readings.** "Missing
+  semicolon" is a lint nit; "semicolon-separated PATH entries" is a claim about behaviour.
+  Same for trailing commas, and for annotations: an *absent* annotation is on the
+  DO-NOT-FLAG list, a *wrong* one is a real finding.
+
+The residual false-positive mode is known and deliberate: a genuine finding whose *title*
+happens to say "trailing whitespace" or "indentation" will trip the wire. Read the rate as a
+regression signal on prompt discipline, never as a count of bad findings.
+
+## Decision rules
+
+**These rules are pre-registered.** They are committed here before any real sweep has been
+executed against them, so that the threshold for shipping a prompt change cannot be chosen
+after seeing which threshold the change happens to clear. Changing a rule is a commit of its
+own, argued on its own merits, made before the sweep it governs — never in the same change
+as the results it would reinterpret.
+
+### Veto — must hold
+
+For each **clean-control** case, compare the mean count of CRITICAL and HIGH
+*adjudicated-false-positive* findings across the N runs of each arm. A gated change ships
+only if:
+
+- on **every** clean-control case, the treatment mean exceeds the control mean by no more
+  than **0.5 findings**; **and**
+- **in aggregate** across clean-control cases, the treatment mean does not exceed the
+  control mean at all.
+
+A prompt change that finds more real defects while also inventing more high-severity noise
+on clean code has not improved `rr`; it has moved the cost from missed bugs to wasted review
+cycles, and that trade is refused here by construction.
+
+### Success criterion — must also hold
+
+Defect recall improves on at least one defect class that has **≥5 independent cases**, by
+**≥20% relative AND ≥2 additional defects found**. Both conditions, not either.
+
+- Classes with fewer than 5 cases are reported but **cannot certify** a change. They are too
+  small to distinguish a real improvement from a run of luck.
+- A class whose control recall is zero uses the absolute condition alone (≥2 additional
+  defects found), since a relative improvement on zero is undefined rather than infinite.
+
+### Scoring rule — when a finding matches a defect
+
+A finding counts as detecting a manifest's defect only when **all three** hold:
+
+1. the finding's cited `file` equals the manifest's `defect.file`; **and**
+2. the finding's `line` overlaps `defect.span` — or, for a finding with a null line, the
+   evidence it quotes lies within that span; **and**
+3. the finding's `why` describes the injected defect rather than something else at the same
+   location.
+
+The third check is a **recorded human call**, made by reading the finding against
+`defect.expected`, and the call is written down with the result. It cannot be automated
+without building the very judgement being measured.
+
+Unrelated-but-real findings on a defect case are **ignored**: no recall credit, and no
+false-positive debit either. The case was constructed to test one thing, and the rest of the
+diff was never adjudicated.
+
+### Clean-control adjudication
+
+A CRITICAL or HIGH finding on a clean control is a false positive **only after human
+confirmation**. If adjudication finds it is a genuinely real problem, the case is not a clean
+control and is **removed from the corpus** — retroactively, for both arms, in every metric.
+Leaving it in would punish whichever arm was better at finding real bugs.
+
+### Caveats
+
+At the corpus sizes this harness is designed for (~15–20 cases), it detects **large effects
+only**. It is a regression guard on DO-NOT-FLAG discipline and false-positive rate, not a
+precision instrument, and it cannot resolve small differences in review quality at all. A
+result that "looks slightly better" is not a result. Every number is also specific to one
+model version at one moment: an arm comparison is valid only within the session that
+produced it, which is why both arms always run together.
+
+---
+
 ## Tests
 
-`evals/test_strict_validator.py` covers the validator with fixtures only (compliant review,
-extra property, invalid severity, missing required field, non-JSON prose, fenced JSON).
-`evals/test_m0_sweep.py` covers envelope extraction (including the malformed shapes that must
-degrade to a record rather than take the sweep down), backend-spec parsing, the summary
-counts, and `run_case` end to end against a generated stub `rr` — no real backend is ever
-launched. Both modules are collected by the repo's normal `pytest -q` run. They require the
-`dev` extra, which is where `jsonschema` lives — runtime `dependencies` stays empty on
-purpose.
+Everything under `evals/` is collected by the repo's normal `pytest -q` run, and none of it
+launches a real backend.
+
+- `test_strict_validator.py` — the validator against fixtures only (compliant review, extra
+  property, invalid severity, missing required field, non-JSON prose, fenced JSON).
+- `test_m0_sweep.py` — envelope extraction (including the malformed shapes that must degrade
+  to a record rather than take a sweep down), backend-spec parsing, the summary counts, and
+  `run_case` end to end against a generated stub `rr`.
+- `test_arms.py` — the `current/` drift guard, the constant-coverage guard, hash stability
+  and sensitivity, arm loading errors, and that applying an arm actually changes what
+  `get_prompt` and `build_agent_prompt` return.
+- `test_cases.py` — manifest validation, and materialization of all three source types
+  against a throwaway git repository, including that a patch which does not apply fails
+  loudly and leaves no worktree behind.
+- `test_paired_runner.py` — the injection proof, arm alternation, and complete paired runs
+  against a stub `codex` binary: result-file shape, per-row provenance, the retry path, CI
+  refusal, and worktree teardown.
+- `test_tier1.py` — every tier-1 metric on fixed rows, plus the hand-labelled DO-NOT-FLAG
+  fixture.
