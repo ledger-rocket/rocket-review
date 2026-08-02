@@ -4,8 +4,9 @@ Developer tooling, never installed and never run in CI. Two harnesses live here:
 
 - **Format compliance** (`m0_sweep.py`) — how often backends really return
   `REVIEW_SCHEMA`-compliant `--json` output.
-- **The paired prompt-arm harness** (`paired_runner.py`, `prompts/`, `cases/`, `tier1.py`)
-  — whether a prompt change made `rr` sharper or just noisier.
+- **The paired prompt-arm harness** (`paired_runner.py`, `prompts/`, `cases/`, `tier1.py`,
+  `adjudicate.py`) — whether a prompt change made `rr` sharper or just noisier, and
+  whether it may ship.
 
 Both spend real tokens. A third script, `verify_cases.py`, spends none but runs the
 project's test suite once per case; it is what proves the defect corpus is made of real
@@ -656,29 +657,38 @@ as the results it would reinterpret.
 
 ### What this release can and cannot decide
 
-> **This corpus is measurement-only. It cannot certify a prompt change.**
+> **The gate is live for `dropped-guard` only. Every other class is reported, never
+> decided.**
 >
-> One prerequisite of the success criterion is now met and the other is not, so the gate
-> stays off:
+> Both prerequisites of the success criterion are now met:
 >
-> - **Met — corpus depth.** The criterion needs a defect class with **≥5 independent cases**.
+> - **Corpus depth.** The criterion needs a defect class with **≥5 independent cases**.
 >   `dropped-guard` has five (listed case by case under *Corpus B*). It is the only class
 >   that does: `swallowed-error` (4), `flipped-comparison` (2), `off-by-one-bound` (2),
 >   `plan-flaw` (2), `lost-diagnostic` (1), `wrong-set-members` (1), `wrong-reducer` (1),
 >   `inverted-fallback-rank` (1) are all below the bar and are **reported but cannot
 >   certify**, whatever their numbers look like.
-> - **Not met — a scorer.** Recall per class is not yet something this harness computes.
->   Turning findings into class recall needs decisions that are themselves gameable if made
->   after seeing results: the adjudication artifact's schema, how repetitions of one case
->   aggregate, how a `diff`/`code` twin pair is deduplicated, and how per-case calls roll up
->   into a class number. Until that scorer is **committed and pre-registered — before the
->   decision sweep runs** — a "certified" change would mean a threshold applied to a number
->   whose definition was chosen alongside it.
+> - **A scorer.** `adjudicate.py` turns a committed artifact of human finding-decisions
+>   into class recall, the veto and the success criterion, under the aggregation rules
+>   written out below — repetition aggregation, twin dedup, veto arithmetic, case
+>   invalidation. It is committed **before any decision sweep has run against it**, which
+>   is the whole of what makes those rules pre-registered rather than chosen alongside the
+>   numbers they produce.
 >
-> So the gate does not activate with this release. What the harness can do now is unchanged:
-> establish the run-to-run noise floor (A/A), and apply the veto, which is computed on clean
-> controls alone and is indifferent to how large any defect class is. A prompt change can be
-> **blocked** by these results; it cannot be **certified** by them.
+> Two conditions on using it, both part of the pre-registration:
+>
+> - **The decision sweep runs at `--runs 5` or more.** The majority rule needs depth to mean
+>   what it says, and five is the depth every threshold below was argued at. A sweep run
+>   shallower may be read, but it does not certify anything — `adjudicate.py` enforces that
+>   rather than trusting it (*Protocol depth*). It can still be **vetoed** at any depth.
+> - **`adjudicate.py`'s verdict is binding.** CERTIFIED, NOT CERTIFIED or VETOED is the
+>   answer, not an input to a judgement made afterwards. A rule that turns out to be wrong
+>   is changed in a commit of its own, argued on its own merits, before the next sweep —
+>   never in the same change as the results it would reinterpret.
+>
+> What the harness could already do is unchanged: establish the run-to-run noise floor
+> (A/A), and apply the veto, which is computed on clean controls alone and is indifferent
+> to how large any defect class is.
 >
 > **Two cases of the same mutant in different modes are not independent.** A `diff`-mode and
 > a `code`-mode re-expression of one seeded defect is one case counted twice: the same bug,
@@ -706,7 +716,9 @@ only if:
 `tier1.py` prints the pre-adjudication form of both numbers directly: `critical+high/run`
 restricted to clean controls (the aggregate condition), and again per case with each case
 labelled control or defect (the per-case condition). Neither has to be recombined by hand —
-the only step left at decision time is the human adjudication itself.
+the only step left at decision time is the human adjudication itself. `adjudicate.py` then
+computes the same two numbers over *adjudicated* false positives, which is the form the
+rule is written in; see *Veto arithmetic* below.
 
 A prompt change that finds more real defects while also inventing more high-severity noise
 on clean code has not improved `rr`; it has moved the cost from missed bugs to wasted review
@@ -719,8 +731,8 @@ Defect recall improves on at least one defect class that has **≥5 independent 
 
 - Classes with fewer than 5 cases are reported but **cannot certify** a change. They are too
   small to distinguish a real improvement from a run of luck. **`dropped-guard` is the only
-  class at the bar today**, and the criterion still cannot be applied to it until the
-  adjudication scorer is pre-registered — see *What this release can and cannot decide* above.
+  class at the bar today**, so it is the only class `adjudicate.py` gives verdict-grade
+  treatment — see *What this release can and cannot decide* above.
 - **Independent** means a separate defect, not a separate encoding of one. The same seeded
   mutant reviewed in `diff` mode and again in `code` mode counts once.
 - A class whose control recall is zero uses the absolute condition alone (≥2 additional
@@ -751,7 +763,330 @@ confirmation**. If adjudication finds it is a genuinely real problem, the case i
 control and is **removed from the corpus** — retroactively, for both arms, in every metric.
 Leaving it in would punish whichever arm was better at finding real bugs.
 
-### Caveats
+There is no third answer here, and `adjudicate.py` enforces that: on a clean control a
+CRITICAL or HIGH finding is recorded as `false-positive` or as `case-invalidated`, and
+nothing else. A "real but unrelated" call there would park a confirmed bug in the corpus as
+neither noise nor a removal, which is exactly the gap a number could later be argued into.
+
+## The adjudication artifact
+
+One YAML file per sweep, holding the human calls the decision rules are made of. It is the
+audit trail: every number `adjudicate.py` prints is a function of this file, the results
+JSONL and the case manifests, so a verdict can be recomputed and disputed line by line.
+
+```yaml
+sweep_id: 9f3c1a2b4d5e6f708192a3b4c5d6e7f8   # must match the results file's sweep
+results_file: paired-20260802T162519.864653Z-312692e3.jsonl   # provenance only
+# Written by --pending, checked before anything scores. Do not edit. Placeholders here:
+# a real one is 64 hex characters of sha256, and no hand-written value will ever match.
+corpus_digest: "0000000000000000000000000000000000000000000000000000000000000000"
+results_digest: "0000000000000000000000000000000000000000000000000000000000000000"
+adjudicator: your-name
+decisions:
+  - case_id: b-002
+    backend: codex
+    arm: pre-prompt-rewrite
+    arm_role: control
+    rep: 1
+    finding_index: 0            # position in the parsed findings array of that run
+    decision: matches-defect
+    rationale: names read_doc_with_links and says the prefix test lets ../ through
+  - case_id: c-004
+    backend: codex
+    arm: current
+    arm_role: treatment
+    rep: 3
+    finding_index: 1
+    decision: false-positive
+    rationale: claims a race the GIL makes impossible; the dict write is atomic
+```
+
+`corpus_digest` and `results_digest` are written by `--pending` and checked before anything
+scores. They are not decoration: a decision is keyed by a finding's *position* in a run's
+findings array, so a results file that was edited or re-ordered rebinds every call in the
+file to a different finding, and a manifest edited afterwards re-decides which class a case
+counts toward, which lines rule 2 accepts, which encoding of a mutation represents it and
+what `defect.expected` the human read the finding against. Both are the same post-hoc move
+as any other, made with an editor instead of a decision. The results digest covers the JSONL
+byte for byte. The corpus digest covers every scoring-relevant manifest field plus the patch
+bytes of **every manifest the scorer loaded** — not only the cases the results reference,
+because a manifest no result row mentions still takes part in electing its mutation's
+representative, and one added under a lower id sharing a scored case's patch would demote
+that case to a twin and drop it out of its class.
+
+**What the digests do and do not protect against.** They catch *drift* between the artifact
+and its inputs — a stale file, a corpus edited mid-adjudication, the wrong results file, a
+rebase that moved a manifest — and they turn a deliberate rebinding into an explicit edit of
+a line the file itself marks `Do not edit`. They do **not** stop someone who edits the corpus
+and then re-drafts against it: that produces a consistent artifact with new digests, and no
+hash can tell an honest re-draft from a motivated one. What answers that is the corpus being
+committed: `cases/` is in git, so a manifest edited around a sweep is a diff someone can be
+asked about, and *Decision rules* already requires a rule change to be its own commit, argued
+before the sweep it governs. The digests make drift loud; the git history is the tamper trail.
+
+A mismatch is a refusal naming which input moved. It is not recoverable in place — `--pending`
+verifies the same digests against the same artifact and refuses identically — so the way out
+is to put the input back, or to move the stale artifact aside and re-draft from scratch.
+Re-drafting does not carry recorded calls forward, which is one more reason an adjudication
+session should not overlap corpus work.
+
+The key is `tier1.py`'s `unit_key` minus the sweep id (which the file carries once) plus the
+finding's index, so a decision joins to exactly one finding of exactly one run. `arm_role` is
+part of it for the same reason it is part of `unit_key`: an A/A run puts the same arm *name*
+on both runs of a repetition, and keying on the name alone would silently merge them.
+
+Four decisions, no more:
+
+- **`matches-defect`** — rule 3 of the scoring rule: the finding's `why` describes the
+  injected defect. Only valid on a defect case, and only on a finding that already satisfies
+  rules 1 and 2; recording it on a finding that cites another file, or a line outside
+  `defect.span`, is refused rather than counted. Rule 3 is a human call *within* the
+  mechanical ones, never a way around them.
+- **`real-unrelated`** — a genuine finding that is not the injected defect. Ignored, per the
+  scoring rule: no recall credit and no false-positive debit.
+- **`false-positive`** — a confirmed clean-control false positive. The veto's numerator, and
+  refused on a defect case, where the rule ignores unrelated findings rather than debiting
+  them.
+- **`case-invalidated`** — the case does not measure what it claims to. Removes it from
+  every certification number, both arms. It is recorded against the finding that revealed
+  the problem, which is where the evidence is; a case no finding ever raised a question
+  about is a corpus-construction matter for `verify_cases.py`, not an adjudication.
+
+`rationale` is required and one line. Without it the artifact records that a call was made
+but not what it was made on — which is the state this whole scorer exists to make
+impossible, since rule 3 cannot be recomputed from anything else.
+
+Artifacts live under `evals/adjudications/` and are **gitignored by default**: they quote
+review text for real commits, exactly like `results/`. The path is always passed explicitly
+with `--adjudications`, so nothing is picked up implicitly.
+
+`adjudicate.py --pending` writes the skeleton — every finding the rules read, with `decision:
+TODO`. The list is derived mechanically from the results, so emitting it decides nothing, and
+`TODO` fails the enum check, so the skeleton can never become a default.
+
+## Pre-registered aggregation rules
+
+Committed before any decision sweep ran against them, for the reason at the top of *Decision
+rules*: a denominator chosen after seeing results is not evidence.
+
+### Repetition aggregation — majority, not any-run
+
+A defect counts as **FOUND** by an arm on a case iff it was adjudicated `matches-defect` in
+**more than half** of that arm's scored repetitions for that case — ≥3 of 5 at the protocol
+depth.
+
+Any-run would inflate recall with stochastic hits: at five repetitions a reviewer that
+stumbles onto a defect one time in five scores identically to one that finds it every time,
+and the difference between those two is the entire thing a prompt change is trying to move.
+Majority measures what the reviewer reliably finds.
+
+**Strictly more than half**, which decides the even-*n* case a lost repetition produces: 2 of
+4 is **not** found. A tie is not reliable detection, and the burden of proof sits on the
+claim that the reviewer finds the defect, not on the claim that it does not.
+
+The denominator is the case's **complete repetitions** — the ones tier 1 scores. A repetition
+that lost either arm leaves both, so the two arms are always majority-tested against the same
+depth, and a sweep that lost repetitions shrinks its own denominators rather than comparing
+four runs against five.
+
+### Twin dedup — code-mode twins never certify
+
+Two cases sharing a patch are one seeded mutation expressed twice. The **`diff`-mode**
+expression is the one certification arithmetic counts; the other is excluded from class
+recall entirely and reported in a separate *mode sensitivity* section, which is what it
+actually is — evidence about whether a defect survives losing its diff framing, not a second
+defect.
+
+This is the same rule as the ≥5-independence count under *Corpus B*, applied to the
+arithmetic rather than only to the corpus description. Counting a twin would let the gate be
+cleared by re-encoding one mutant instead of by evidence.
+
+Which case represents a mutation is decided from the **manifests** — `diff` mode wins, lowest
+case id breaks a tie — and never from the results, so it cannot become a choice made after
+seeing which expression scored better. Nor can an adjudication call move it: see *Case
+invalidation*, which removes whole mutations for exactly that reason.
+
+### Class eligibility
+
+A class is verdict-grade only when it has **≥5 independent cases actually scored in the
+sweep**, after twin dedup and after case invalidation, **and** every one of them was scored
+at protocol depth (below). Every other class is computed and printed with its numbers, and
+cannot produce a CERTIFIED verdict however good they look.
+
+### Protocol depth
+
+Certification requires **≥5 complete repetitions on every case it reads** — each case of the
+certifying class, and each clean-control case the veto is computed over.
+
+The majority rule is only the majority rule at depth. At n=1 a strict majority is one run,
+so "found in a majority of repetitions" collapses into exactly the any-run rule that
+*Repetition aggregation* rejects; at n=2 it takes both. The thresholds above were argued at
+five, and a scorer that would apply them to a two-run sweep is a scorer whose depth is
+chosen after the fact. So it is checked rather than assumed, and a shallow sweep is reported
+with its numbers and refused a certification.
+
+The check is deliberately **one-sided**: depth gates certifying, never blocking. A sweep
+that trips the veto over two repetitions has still shown harm, and refusing to act on it
+because the sample is thin would be failing in the wrong direction — the whole asymmetry of
+*What this release can and cannot decide* is that this harness may block on less evidence
+than it may certify on.
+
+**At `--runs 5` there is no slack at all.** Five is a *floor on complete repetitions*, not a
+target: a repetition that loses either arm leaves both (see *Complete repetitions*), so one
+failed run on any scored case — a defect case of the certifying class or a clean control —
+drops that case to four and voids the certification outright. It does not weaken the result;
+it removes it. The long, noisy cases are exactly the ones that time out, so this is not a
+remote possibility.
+
+**Run decision sweeps at `--runs 7`.** Seven absorbs two lost repetitions and still clears
+the floor, and of the depths worth considering it also has the most lenient majority bar: a
+case scored at seven needs 4 of 7, where six needs 4 of 6 and five needs 3 of 5. Six buys one
+repetition of slack and tightens the bar to do it. The floor stays at five because five is
+the depth the thresholds above were argued at — going deeper costs tokens and buys
+robustness, which is a budget decision rather than a rule, and each case is majority-tested
+at the depth it actually reached rather than the depth that was requested.
+
+### Veto arithmetic
+
+Per clean-control case, the mean count of **adjudicated-false-positive** CRITICAL+HIGH
+findings per run, per arm, over complete repetitions only — the same runs tier 1 scores, so
+the two reports cannot disagree about which work happened. The change ships only if the
+treatment mean exceeds the control mean by no more than **0.5** on **every** case, **and**
+does not exceed it **at all** in aggregate (pooled findings over pooled runs across clean
+controls).
+
+Means are compared as exact rationals, not floats: a bound of exactly +0.5 is on the passing
+side of "by no more than 0.5", and it should not depend on binary rounding whether it lands
+there.
+
+A run whose review did not strictly validate contributes a **zero** to its arm's mean rather
+than dropping out of the denominator. This is enforced rather than inherited: the runtime
+parser is lenient by design — an invented severity, a missing `why`, a `why` that is not even
+a string all survive it — so the scorer exposes findings only from runs the Part 1 validator
+scored `valid`, and everything else has no findings to adjudicate at all. Otherwise a
+malformed review could earn recall, or a confirmed false positive, off a finding the schema
+rejects, which a compliant review would have had to argue for.
+That dilutes the false-positive mean downward for whichever arm produced the unparsable
+output. It is deliberate — tier 1's raw `critical+high/run` treats those runs identically,
+and the two reports must not disagree about which runs happened — but it means an arm that
+degrades into unparsable output looks quieter here, not noisier. `tier1.py`'s strict-valid
+rate is where that shows up, and it is the number to read alongside a veto that passed
+narrowly.
+
+**An unmeasured veto is a failed veto.** A sweep with no clean-control repetition left is
+VETOED, not certified — treating silence as a pass would let a change be certified by running
+a sweep with the controls filtered out.
+
+### Case invalidation
+
+One `case-invalidated` decision removes the case from every number in both arms: out of the
+veto if it is a control, out of its class's recall *denominator* if it is a defect case. The
+class shrinks with it, and a class that drops below five independent cases stops being
+verdict-grade — which is the honest consequence, not an edge case to smooth over.
+
+**Invalidation lands on the mutation, not on one encoding of it.** A `diff`-mode case and its
+`code`-mode twin are one seeded defect, so invalidating either removes both. That is the
+honest reading of the rule — if the mutant's validity is disputed, every expression of it
+falls — and it is also the only safe one. Removing just the named case would usually remove
+the `diff`-mode representative, leaving the twin alone in its mutation group where the
+representative rule elects it: the class would keep its case count and silently substitute
+the numbers of the very encoding *Twin dedup* exists to hold out. One adjudication call
+could then turn a NOT CERTIFIED sweep into a CERTIFIED one without a single finding
+changing.
+
+Because the removal is that consequential, an invalidation on a defect case has to be
+recorded against a finding that satisfies scoring rules 1 and 2 — a finding about the seeded
+defect. The claim is that the defect is not a defect, so it is made where the evidence for
+it is.
+
+Worth naming rather than trusting nobody notices: **invalidation is a general lever on the
+arithmetic**, not only the twin hole above. Dropping a case the control found and the
+treatment missed raises the treatment's gain; dropping one both arms found shrinks the
+baseline the ≥20% is measured against. Two things bound it, and neither is a matter of
+taste — the class still needs ≥5 independent cases afterwards, so invalidations run out of
+room quickly, and every one on a defect case must be recorded against a rule-1-and-2 finding
+with a written rationale in a committed artifact. The incentive exists; the audit trail is
+the answer to it.
+
+### Zero baselines and the criterion itself
+
+`≥20%` relative **and** `≥2` absolute, both, exactly as the success criterion is written
+above. A class whose control recall is zero is judged on the absolute condition alone, since
+a relative improvement on zero is undefined rather than infinite.
+
+### More than one backend
+
+Each backend in the sweep is scored on its own. A veto anywhere vetoes the sweep, and
+certification needs **every** backend to certify: a prompt ships to all of them at once, so
+one backend getting sharper while another gets noisier is not an improvement to `rr`.
+
+A backend that produced **no complete repetition at all** is refused, not omitted. The
+conjunction is over the backends the sweep *ran*, which is read from the results header's
+`backend_specs` as well as from the rows — a backend whose every run failed still has rows,
+one that never started has only the header entry. Letting either drop out would quietly
+weaken "every backend must certify" into "every backend that finished must", and the
+backends that fail are not a random sample of them.
+
+### The completeness gate
+
+Nothing is scored until every finding a rule reads has a recorded call — every CRITICAL/HIGH
+finding on a surviving clean control, and every finding on a surviving defect case that
+already satisfies rules 1 and 2. The scorer refuses and lists them.
+
+Partial adjudication is the softest version of the failure this whole design is about: the
+findings a human has not looked at yet are exactly the ones whose treatment could be settled
+by what the totals need. Findings outside those two sets — a MEDIUM on a control, a finding
+citing an unrelated file on a defect case — need no call, because no rule reads them.
+
+## Running the scorer
+
+```
+mkdir -p evals/adjudications
+python evals/adjudicate.py evals/results/paired-<...>.jsonl --pending \
+    > evals/adjudications/<sweep>.yaml         # draft, then fill every TODO in
+python evals/adjudicate.py evals/results/paired-<...>.jsonl \
+    --adjudications evals/adjudications/<sweep>.yaml
+```
+
+It reads stored output only, calls no backend and opens no git object; the verdict is a pure
+function of the three input files. The report prints the veto with its per-case detail, class
+recall per arm with each case's hit count, the mode-sensitivity twins, the success criterion,
+and one final line: **CERTIFIED**, **NOT CERTIFIED** or **VETOED**, with the reasons.
+
+Exit status carries the outcome, and **nothing that is not a computed verdict is allowed to
+land on a verdict code**:
+
+- `0` CERTIFIED, `1` NOT CERTIFIED, `2` VETOED — the three verdicts, and only those;
+- `3` no verdict could be computed: unreadable input, an incomplete adjudication, a sweep
+  where no repetition survived;
+- `4` `--pending` drafted a work list. Drafting decides nothing, so it must not exit 0;
+- `64` a usage error, and `--help`. Both of argparse's own exits are verdicts here — 2 on a
+  bad argument is VETOED, 0 after printing help is CERTIFIED — so the parser is overridden
+  and neither can reach one. A caller gating a prompt change on exit status must not read a
+  mistyped flag as a blocked change or a help screen as a certified one.
+
+A sweep that could not be scored, a sweep that was refused, and a command that was never
+run are three different outcomes, and a caller that could not tell them apart would read one
+as another.
+
+The report also prints a non-blocking **warning** when identical finding text — same title,
+same `why` — was adjudicated differently depending on which arm produced it. That is not
+necessarily wrong: the same sentence can be right about one diff and wrong about another.
+But the arm role is on screen while the call is made, and an adjudicator reading the
+control's finding as noise and the treatment's word-for-word identical finding as real is
+the shape a thumb on the scale makes. Printed, so it is at least seen.
+
+`--pending` holds any artifact it is given to the same bar as scoring does: same sweep,
+matching digests, and every recorded decision valid against the results. Re-drafting
+subtracts what is already recorded, so an artifact that is quietly wrong there would hide
+outstanding calls — and a call nobody is shown is a call nobody makes.
+
+A file holding more than one `sweep_id` is refused outright, with no override. `tier1.py` has
+one because it only *describes* sweeps and can print two side by side; a certification is one
+decision about one paired session, and there is no honest way to make it out of measurements
+taken against different conditions.
+
+## Caveats
 
 At the corpus sizes this harness is designed for (~15–20 cases), it detects **large effects
 only**. It is a regression guard on DO-NOT-FLAG discipline and false-positive rate, not a
@@ -789,3 +1124,12 @@ launches a real backend.
   refusal, and worktree teardown.
 - `test_tier1.py` — every tier-1 metric on fixed rows, plus the hand-labelled DO-NOT-FLAG
   fixture.
+- `test_adjudicate.py` — the certification arithmetic on synthetic sweeps: input binding
+  (an edited manifest, patch or results file is refused), strict-validity gating, the
+  refusal of a backend that scored nothing, the majority rule
+  including the even-*n* split a lost repetition produces, twin exclusion, mutation-level
+  invalidation (including that invalidating a representative cannot promote its twin into
+  the class), the protocol-depth gate in both directions, per-backend combination, every
+  artifact validation and rule refusal, the completeness gate, the exit-status separation,
+  and two full end-to-end sweeps through the CLI — one that certifies and one whose
+  identical recall is vetoed by the noise it was bought with.
