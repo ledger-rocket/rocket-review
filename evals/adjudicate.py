@@ -747,13 +747,15 @@ def compute(
         )
 
     by_type = {d: sum(1 for a in adjudications.decisions if a.decision == d) for d in DECISIONS}
-    return _sweep_verdict(Certification(
+    verdict, reasons = _sweep_verdict(backends)
+    return Certification(
         sweep_id=adjudications.sweep_id,
         results_path=str(results_path), adjudications_path=str(adjudications.path),
         decisions_total=len(adjudications.decisions), decisions_by_type=by_type,
         decisions_unused=unused, invalidated_cases=sorted(invalidated),
-        incomplete_pairs=incomplete, backends=backends, verdict=NOT_CERTIFIED,
-    ))
+        incomplete_pairs=incomplete, backends=backends,
+        verdict=verdict, reasons=reasons,
+    )
 
 
 def _backend_verdict(
@@ -791,27 +793,21 @@ def _backend_verdict(
     )
 
 
-def _sweep_verdict(cert: Certification) -> Certification:
+def _sweep_verdict(backends: list[BackendCertification]) -> tuple[str, list[str]]:
     """One verdict over every backend the sweep ran.
 
     A veto anywhere vetoes the sweep, and certification needs every backend to certify: a
     prompt change ships to all of them at once, so one backend improving while another
     gets noisier is not an improvement to `rr`.
     """
-    vetoed = [b for b in cert.backends if b.verdict == VETOED]
+    vetoed = [b for b in backends if b.verdict == VETOED]
     if vetoed:
-        cert.verdict = VETOED
-        cert.reasons = [f"{b.backend}: {r}" for b in vetoed for r in b.reasons]
-    elif all(b.verdict == CERTIFIED for b in cert.backends):
-        cert.verdict = CERTIFIED
-        cert.reasons = [f"{b.backend}: {r}" for b in cert.backends for r in b.reasons]
-    else:
-        cert.verdict = NOT_CERTIFIED
-        cert.reasons = [
-            f"{b.backend}: {r}"
-            for b in cert.backends if b.verdict != CERTIFIED for r in b.reasons
-        ]
-    return cert
+        return VETOED, [f"{b.backend}: {r}" for b in vetoed for r in b.reasons]
+    if all(b.verdict == CERTIFIED for b in backends):
+        return CERTIFIED, [f"{b.backend}: {r}" for b in backends for r in b.reasons]
+    return NOT_CERTIFIED, [
+        f"{b.backend}: {r}" for b in backends if b.verdict != CERTIFIED for r in b.reasons
+    ]
 
 
 # --- reporting -----------------------------------------------------------------------------
