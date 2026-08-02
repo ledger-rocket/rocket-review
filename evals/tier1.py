@@ -172,9 +172,15 @@ class CaseMetrics:
 @dataclass
 class GroupMetrics:
     backend: str
-    arm: str
+    #: Role first: it, not the arm name, is what identifies a group. An A/A run has two
+    #: groups with the same arm name, and that is the point of an A/A run.
     arm_role: str
+    arm: str
     scores: Scores
+    #: The same scores over clean-control cases only. `scores.critical_high_per_run` pools
+    #: defect cases too, where a CRITICAL finding is the correct answer rather than noise,
+    #: so it is not the number the veto rule asks about — this is.
+    control_scores: Scores | None = None
     #: Per case, ordered by case id. The veto rule is written per clean-control case, so
     #: the breakdown ships with the metrics rather than being re-derived by hand at the
     #: moment someone is deciding whether to ship a prompt.
@@ -254,11 +260,23 @@ def load_jsonl(path: Path) -> tuple[dict, list[dict]]:
     return header, rows
 
 
+def unit_key(row: dict) -> tuple:
+    """What makes a run unique. `arm_role` is part of it, not decoration.
+
+    An A/A run — the same arm as both control and treatment, which is how the noise floor
+    gets measured — puts the same arm *name* on two different runs of the same case and
+    repetition. Keying on the name alone would collapse them into one unit and silently
+    discard half the sweep. Two different arm directories that happen to share a basename
+    would collapse the same way.
+    """
+    return (row["case_id"], row["backend"], row["arm"], row["arm_role"], row["rep"])
+
+
 def final_attempts(rows: list[dict]) -> list[dict]:
     """Keep the last attempt of each unit; the earlier ones record what was retried."""
     best: dict[tuple, dict] = {}
     for row in rows:
-        key = (row["case_id"], row["backend"], row["arm"], row["rep"])
+        key = unit_key(row)
         if key not in best or row["attempt"] > best[key]["attempt"]:
             best[key] = row
     return list(best.values())
@@ -280,6 +298,12 @@ def score(rows: list[dict], line_counter: LineCounter, repo: Path) -> Scores:
         counts_critical_high.append(sum(1 for b in buckets if b in ("critical", "high")))
         for bucket in SEVERITY_BUCKETS:
             counts_by_severity[bucket].append(sum(1 for b in buckets if b == bucket))
+        # A plan is a standalone artifact, not a repository snapshot: its `repo_commit` is
+        # provenance, and the plan file itself exists at no commit at all. Resolving its
+        # citations against the object database would score every one of them as a
+        # hallucination forever, and drag the pooled rate down with them. Exempt, on the
+        # same principle as a finding that cites nothing.
+        resolvable = row.get("source") != "seeded-plan"
         for finding in parsed.findings:
             findings_total += 1
             category = classify_do_not_flag(finding.title or "")
@@ -291,6 +315,8 @@ def score(rows: list[dict], line_counter: LineCounter, repo: Path) -> Scores:
             # uncoerced, so a schema-violating review — exactly what this harness is built
             # to catch — can put an object there, and scoring a whole sweep must not die on
             # one bad field.
+            if not resolvable:
+                continue
             if not isinstance(finding.file, str) or not finding.file or finding.line is None:
                 continue
             line_bearing += 1
@@ -323,19 +349,24 @@ def score(rows: list[dict], line_counter: LineCounter, repo: Path) -> Scores:
 def compute(
     rows: list[dict], line_counter: LineCounter, repo: Path,
 ) -> list[GroupMetrics]:
-    """Score the final attempt of every unit, per backend and arm and per case within it."""
-    groups: dict[tuple[str, str], list[dict]] = {}
+    """Score the final attempt of every unit, per backend and arm role and per case."""
+    # Keyed on role as well as name, and sorted with role first so control precedes
+    # treatment: an A/A run has two groups whose arm name is identical, and merging them
+    # would report the noise-floor measurement as a single arm.
+    groups: dict[tuple[str, str, str], list[dict]] = {}
     for row in final_attempts(rows):
-        groups.setdefault((row["backend"], row["arm"]), []).append(row)
+        groups.setdefault((row["backend"], row["arm_role"], row["arm"]), []).append(row)
 
     metrics: list[GroupMetrics] = []
-    for (backend, arm), group in sorted(groups.items()):
+    for (backend, arm_role, arm), group in sorted(groups.items()):
         by_case: dict[str, list[dict]] = {}
         for row in group:
             by_case.setdefault(row["case_id"], []).append(row)
+        controls = [r for r in group if r.get("case_is_control") is True]
         metrics.append(GroupMetrics(
-            backend=backend, arm=arm, arm_role=group[0]["arm_role"],
+            backend=backend, arm_role=arm_role, arm=arm,
             scores=score(group, line_counter, repo),
+            control_scores=score(controls, line_counter, repo) if controls else None,
             per_case=[
                 CaseMetrics(
                     case_id=case_id,
@@ -372,7 +403,9 @@ def _case_label(case: CaseMetrics) -> str:
 def print_report(metrics: list[GroupMetrics]) -> None:
     for m in metrics:
         s = m.scores
-        print(f"\n{m.backend} / {m.arm} ({m.arm_role})")
+        # Role first, name in parentheses: in an A/A run the name is the same on both
+        # lines, and the role is the only thing telling them apart.
+        print(f"\n{m.backend} / {m.arm_role} ({m.arm})")
         print(f"  runs scored           {s.runs_scored} (failed: {s.runs_failed})")
         print(f"  strict-valid          {_pct(s.strict_valid_rate)} "
               f"({s.strict_valid}/{s.runs_scored})")
@@ -386,6 +419,13 @@ def print_report(metrics: list[GroupMetrics]) -> None:
         for bucket in SEVERITY_BUCKETS:
             print(f"    {bucket:<9}         {_spread(s.findings_per_run_by_severity[bucket])}")
         print(f"  critical+high/run     {_spread(s.critical_high_per_run)}")
+        # The line above pools defect cases, where a CRITICAL finding is the right answer.
+        # The veto rule asks only about clean controls, so that number is printed rather
+        # than left to be recombined by hand from the per-case rows below.
+        controls = m.control_scores
+        print("    clean controls only "
+              + (_spread(controls.critical_high_per_run) if controls else "no control cases")
+              + (f" over {controls.critical_high_per_run.n} run(s)" if controls else ""))
         # The veto rule is written per clean-control case, so the numbers it reads are
         # printed per case rather than left to be re-derived at decision time.
         print("  per case:")

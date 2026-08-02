@@ -26,6 +26,7 @@ from paired_runner import (
 )
 from rr_arm_launcher import ARM_ENV
 from strict_validator import BACKEND_ERROR, VALID
+from tier1 import compute
 
 MARKER = "MARKER-0d5f-{name}-ARM-{arm}"
 
@@ -349,6 +350,49 @@ def test_it_reports_an_a_a_run_rather_than_pretending_it_is_a_comparison(
         "--repo", str(git_repo), "--out", str(tmp_path / "results"),
     ]) == 0
     assert "A/A run" in capsys.readouterr().err
+
+
+def test_an_a_a_run_records_and_summarises_both_roles_separately(
+    tmp_path, git_repo, corpus, arms, monkeypatch, stub_backend, capsys,
+):
+    # 2 cases x 2 roles x 2 reps of one arm. Everything downstream keys on the arm's name
+    # as well as its role, so a run where the two names are identical is where a
+    # role-blind key silently halves the sweep.
+    monkeypatch.delenv("CI", raising=False)
+    control, _ = arms
+    for key, value in stub_backend.env().items():
+        monkeypatch.setenv(key, value)
+    out = tmp_path / "results"
+    assert main([
+        "--control", str(control), "--treatment", str(control),
+        "--backends", "codex:stub-model", "--cases", str(corpus),
+        "--runs", "2", "--concurrency", "1", "--timeout", "60",
+        "--repo", str(git_repo), "--out", str(out),
+    ]) == 0
+
+    results = sorted(out.glob("paired-*.jsonl"))
+    rows = [
+        json.loads(line)
+        for line in results[0].read_text(encoding="utf-8").splitlines()[1:]
+    ]
+    assert len(rows) == 8
+    assert {r["arm"] for r in rows} == {"alpha"}
+    assert sorted(r["arm_role"] for r in rows) == [CONTROL] * 4 + [TREATMENT] * 4
+
+    captured = capsys.readouterr()
+    # The progress counter counts units, not halves of them.
+    assert "[8/8]" in captured.err
+    # And the summary reports two rows of four, not one row counted twice.
+    summary = [line for line in captured.out.splitlines() if line.startswith("codex /")]
+    assert len(summary) == 2
+    assert f"codex / {CONTROL} (alpha)" in summary[0]
+    assert f"codex / {TREATMENT} (alpha)" in summary[1]
+    assert [line.split()[-1] for line in summary] == ["4", "4"]
+
+    metrics = compute(rows, lambda commit, path: 5, git_repo)
+    assert [(m.arm_role, m.scores.runs_scored) for m in metrics] == [
+        (CONTROL, 4), (TREATMENT, 4),
+    ]
 
 
 def test_an_unknown_arm_is_rejected(tmp_path, corpus, arms, monkeypatch, capsys):

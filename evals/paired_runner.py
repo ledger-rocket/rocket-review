@@ -256,8 +256,14 @@ CELL = 18
 
 
 def print_summary(records: list[PairedRecord], arms: list[Arm], backends: list[str]) -> None:
-    label_width = max(len(f"{b} / {a.name}") for b in backends for a in arms)
-    label_width = max(label_width, len("backend / arm"))
+    # Rows are selected by role, not by arm name: in an A/A run both roles carry the same
+    # name, and selecting on it would count every run twice and print the same line twice.
+    roles = [(CONTROL, arms[0]), (TREATMENT, arms[1])]
+    labels = {
+        (backend, role): f"{backend} / {role} ({arm.name})"
+        for backend in backends for role, arm in roles
+    }
+    label_width = max([len(v) for v in labels.values()] + [len("backend / arm")])
     header = (
         "backend / arm".ljust(label_width) + "  "
         + "  ".join(c.rjust(CELL) for c in OUTCOMES) + "  total"
@@ -265,21 +271,23 @@ def print_summary(records: list[PairedRecord], arms: list[Arm], backends: list[s
     print("\n" + header)
     print("-" * len(header))
     for backend in backends:
-        for arm in arms:
+        for role, _ in roles:
             rows = [
                 r for r in records
-                if r.backend == backend and r.arm == arm.name and _is_final(r, records)
+                if r.backend == backend and r.arm_role == role and _is_final(r, records)
             ]
             counts = [
                 str(sum(1 for r in rows if r.outcome == outcome)).rjust(CELL)
                 for outcome in OUTCOMES
             ]
-            label = f"{backend} / {arm.name}".ljust(label_width)
-            print(label + "  " + "  ".join(counts) + f"  {len(rows):>5}")
+            print(labels[(backend, role)].ljust(label_width) + "  "
+                  + "  ".join(counts) + f"  {len(rows):>5}")
 
 
 def _unit_key(record: PairedRecord) -> tuple:
-    return (record.case_id, record.backend, record.arm, record.rep)
+    # Role included: an A/A run puts the same arm name on both roles, so keying without it
+    # would merge each pair of runs into one unit and under-count the sweep's progress.
+    return (record.case_id, record.backend, record.arm, record.arm_role, record.rep)
 
 
 def _is_final(record: PairedRecord, records: list[PairedRecord]) -> bool:

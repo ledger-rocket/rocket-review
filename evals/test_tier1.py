@@ -215,6 +215,34 @@ def test_a_non_string_file_is_exempt_rather_than_a_crash():
     assert (metrics.line_bearing, metrics.line_resolved) == (1, 1)
 
 
+def test_a_seeded_plan_citation_is_exempt_rather_than_unresolved():
+    # A plan file exists at no commit, so resolving its citations against the object
+    # database would mark every one a hallucination and drag the pooled rate down forever.
+    rows = [row(
+        case_id="p-001", mode="plan", source="seeded-plan",
+        raw=review([
+            finding(file="cases/p-001-plan.md", line=12),
+            finding(file="cases/p-001-plan.md", line=9999),
+        ]),
+    )]
+    metrics = only(rows, lines={"sample.py": 5})
+    assert metrics.findings_total == 2
+    assert (metrics.line_bearing, metrics.line_resolved) == (0, 0)
+    assert metrics.line_resolved_rate is None
+
+
+def test_a_diff_case_in_the_same_sweep_is_still_resolved():
+    # The exemption is scoped to the plan rows, not to the whole file.
+    rows = [
+        row(case_id="p-001", mode="plan", source="seeded-plan", rep=1,
+            raw=review([finding(file="cases/p-001-plan.md", line=12)])),
+        row(case_id="b-001", source="mutant", rep=1,
+            raw=review([finding(file="sample.py", line=3)])),
+    ]
+    metrics = only(rows, lines={"sample.py": 5})
+    assert (metrics.line_bearing, metrics.line_resolved) == (1, 1)
+
+
 def test_line_zero_does_not_resolve():
     metrics = only(
         [row(raw=review([finding(file="sample.py", line=0)]))],
@@ -288,6 +316,27 @@ def test_the_severity_buckets_sum_to_the_overall_findings_per_run():
     assert sum(buckets[b].mean for b in SEVERITY_BUCKETS) == metrics.findings_per_run.mean
 
 
+def test_the_veto_number_is_reported_over_clean_controls_separately():
+    # Pooling defect cases into critical+high/run answers a different question: a CRITICAL
+    # finding on a defect case is the correct answer, not the noise the veto rule bounds.
+    rows = [
+        row(case_id="b-001", case_is_control=False, rep=1,
+            raw=review([finding(severity="critical"), finding(severity="critical")])),
+        row(case_id="c-001", case_is_control=True, rep=1,
+            raw=review([finding(severity="high")])),
+    ]
+    metrics = group(rows, lines={"sample.py": 5})
+    assert metrics.scores.critical_high_per_run.mean == 1.5
+    assert metrics.control_scores is not None
+    assert metrics.control_scores.critical_high_per_run.mean == 1.0
+    assert metrics.control_scores.runs_scored == 1
+
+
+def test_a_sweep_with_no_clean_controls_reports_no_control_scores():
+    rows = [row(case_id="b-001", case_is_control=False, raw=review([finding()]))]
+    assert group(rows, lines={"sample.py": 5}).control_scores is None
+
+
 def test_critical_and_high_are_reported_together_for_the_veto_rule():
     rows = [
         row(rep=1, raw=review([
@@ -349,6 +398,38 @@ def test_the_per_case_breakdown_carries_the_control_flag():
     per_case = group(rows, lines={"sample.py": 5}).per_case
     assert [(c.case_id, c.is_control) for c in per_case] == [
         ("b-001", False), ("c-001", True),
+    ]
+
+
+def test_an_a_a_run_scores_every_row_and_reports_two_groups():
+    # The same arm in both roles is how the noise floor gets measured. Keying units or
+    # groups on the arm name alone collapsed each pair into one, silently discarding half
+    # the sweep and labelling the survivor "control".
+    rows = [
+        row(case_id=case_id, arm="current", arm_role=role, rep=rep,
+            raw=review([finding()]))
+        for case_id in ("c-001", "c-002")
+        for rep in (1, 2)
+        for role in ("control", "treatment")
+    ]
+    assert len(final_attempts(rows)) == len(rows) == 8
+
+    metrics = compute(rows, counting({"sample.py": 5}), Path("/repo"))
+    assert [(m.arm_role, m.arm, m.scores.runs_scored) for m in metrics] == [
+        ("control", "current", 4), ("treatment", "current", 4),
+    ]
+
+
+def test_two_arms_sharing_a_directory_name_stay_separate():
+    # --control current --treatment /tmp/experiment/current: same basename, different text.
+    rows = [
+        row(arm="current", arm_role="control", arm_hash="aaa", raw=review([finding()])),
+        row(arm="current", arm_role="treatment", arm_hash="bbb",
+            raw=review([finding(), finding()])),
+    ]
+    metrics = compute(rows, counting({"sample.py": 5}), Path("/repo"))
+    assert [(m.arm_role, m.scores.findings_total) for m in metrics] == [
+        ("control", 1), ("treatment", 2),
     ]
 
 
@@ -423,10 +504,11 @@ def test_the_text_report_names_every_group(tmp_path, capsys):
     )
     assert main([str(path), "--repo", str(tmp_path)]) == 0
     out = capsys.readouterr().out
-    assert "codex / alpha (control)" in out
-    assert "codex / beta (treatment)" in out
+    assert "codex / control (alpha)" in out
+    assert "codex / treatment (beta)" in out
     assert "DO-NOT-FLAG tripwire" in out
     assert "critical+high/run" in out
+    assert "clean controls only" in out
     assert "per case:" in out
     assert "c-001 (control)" in out
 
