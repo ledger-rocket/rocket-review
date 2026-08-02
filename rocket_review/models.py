@@ -153,10 +153,12 @@ def to_envelope(results: list[BackendResult], fail_on: str | None = None) -> dic
         # summary must stay first — consumers read the counts and gate state off the head
         # of the payload without parsing the findings array.
         "summary": summary,
-        # Envelope contract: 1 is the first version; it is bumped only on a breaking change
-        # (a field removed, a type changed, semantics changed). Additive optional fields do
-        # not bump it, so consumers must tolerate unknown keys.
-        "schema_version": 1,
+        # Envelope contract: schema_version is a string, "1" is the first version; it is
+        # bumped only on a breaking change (a field removed, a type changed, semantics
+        # changed). Additive optional fields do not bump it, so consumers must tolerate
+        # unknown keys. Consumers should match the value exactly against known versions —
+        # no numeric ordering is implied — and treat any unrecognized value as unsupported.
+        "schema_version": "1",
         "results": [asdict(r) for r in results],
         "findings": [asdict(f) for f in findings],
     }

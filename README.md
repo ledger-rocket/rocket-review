@@ -148,9 +148,11 @@ The envelope leads with a `summary` block — `findings_total`, per-severity cou
 (explicit zeros for absent severities), `worst_severity`, per-backend verdicts, and
 the `gate` result when `--fail-on` is set — so an agent gets the counts and the
 gate answer without parsing the findings array. A top-level `schema_version`
-(currently `1`) tags the envelope shape: it bumps only on a breaking change — a
-field removed, a type or meaning changed — so new fields can appear without a bump
-and consumers should ignore keys they don't know. Backend output over 4000 chars is
+(currently the string `"1"`) tags the envelope shape: it bumps only on a breaking
+change — a field removed, a type or meaning changed — so new fields can appear
+without a bump and consumers should ignore keys they don't know. Consumers should
+match the value exactly against known versions (no numeric ordering is implied)
+and treat anything else as unsupported. Backend output over 4000 chars is
 truncated inline — `raw` keeps the head plus a marker naming the full length — so the
 envelope stays bounded and no review text (which may quote proprietary code) is written
 to disk; pass `--full` to inline the untruncated output instead. Parse failures and
