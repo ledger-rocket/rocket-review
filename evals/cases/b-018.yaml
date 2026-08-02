@@ -1,0 +1,21 @@
+---
+# run_command's exit-status arm, where b-008 mutates its timeout arm: a backend that ran
+# to completion and failed is now indistinguishable from one that succeeded. stderr — the
+# only place the child said what went wrong — is dropped on the floor with it.
+id: b-018
+mode: diff
+source: mutant
+diff: cases/b-018.patch
+repo_commit: c4fd306b4312f3c915766709a3468fbd13f0fc40
+defect:
+  class: swallowed-error
+  file: rocket_review/backends/base.py
+  span: [138, 138]
+  expected: >-
+    run_command returns the child's stdout whatever it exited with, so a backend that
+    failed (non-zero exit, diagnostics on stderr) is reported as a completed review made
+    of whatever it managed to print before dying.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_backends.py::test_run_command_nonzero_exit_raises_at_the_base_layer

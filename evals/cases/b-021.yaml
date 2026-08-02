@@ -1,0 +1,23 @@
+---
+# The fail-closed check keeps its parse_error arm and loses only its error arm, so the line
+# still reads as a fail-closed check and the comment above it still describes both. Where
+# b-009 loses the error before it is ever recorded, this one records it correctly and then
+# declines to act on it: everything downstream still reports the failure, and only the gate
+# stops treating it as one.
+id: b-021
+mode: diff
+source: mutant
+diff: cases/b-021.patch
+repo_commit: c4fd306b4312f3c915766709a3468fbd13f0fc40
+defect:
+  class: swallowed-error
+  file: rocket_review/models.py
+  span: [122, 122]
+  expected: >-
+    should_fail no longer trips on a backend that errored, so a fan-out in which one
+    backend died and the rest came back clean exits 0 under --fail-on instead of 2, and
+    summary.gate.tripped reports False — a CI gate passing a review that never completed.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_models.py::test_should_fail_closed_on_errors

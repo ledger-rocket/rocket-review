@@ -1,0 +1,18 @@
+diff --git a/rocket_review/cli.py b/rocket_review/cli.py
+index 868e03c..72bacb4 100644
+--- a/rocket_review/cli.py
++++ b/rocket_review/cli.py
+@@ -435,13 +435,6 @@ def _run():
+ 
+     args = parser.parse_args()
+ 
+-    if args.fail_on and not args.json:
+-        print(
+-            "Error: --fail-on requires --json (findings must be parsed to be gated).",
+-            file=sys.stderr,
+-        )
+-        sys.exit(1)
+-
+     if args.full and not args.json:
+         print("Error: --full requires --json (text mode never truncates).", file=sys.stderr)
+         sys.exit(1)

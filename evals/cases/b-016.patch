@@ -1,0 +1,15 @@
+diff --git a/rocket_review/models.py b/rocket_review/models.py
+index 99e811b..b433397 100644
+--- a/rocket_review/models.py
++++ b/rocket_review/models.py
+@@ -80,10 +80,6 @@ def parse_backend_output(text: str, backend: str, model: str | None) -> BackendR
+     if obj is None or not isinstance(obj.get("findings"), list):
+         return BackendResult(backend=backend, model=model, raw=text, parse_error=True)
+     verdict = str(obj.get("verdict", "")).lower()
+-    if verdict not in VERDICTS:
+-        # A review that never reached a verdict didn't actually conclude anything;
+-        # treat it the same as unparsable output so the gate fails closed.
+-        return BackendResult(backend=backend, model=model, raw=text, parse_error=True)
+     findings = []
+     for f in obj["findings"]:
+         if not isinstance(f, dict) or "severity" not in f or "title" not in f:

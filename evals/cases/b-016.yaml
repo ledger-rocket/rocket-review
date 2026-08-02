@@ -1,0 +1,23 @@
+---
+# The verdict is normalised and then used without ever being checked against VERDICTS.
+# The guard went out with the comment that explained it, so nothing left in the function
+# hints that a verdict is validated at all — the sibling shape checks above and below it
+# make the remaining code look complete.
+id: b-016
+mode: diff
+source: mutant
+diff: cases/b-016.patch
+repo_commit: c4fd306b4312f3c915766709a3468fbd13f0fc40
+defect:
+  class: dropped-guard
+  file: rocket_review/models.py
+  span: [82, 83]
+  expected: >-
+    parse_backend_output accepts output whose verdict is missing or is not one of
+    VERDICTS, so a review that never reached a conclusion is reported as a parsed result
+    with an invented verdict instead of failing the --fail-on gate closed.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_models.py::test_parse_missing_verdict_is_parse_error
+  - tests/test_models.py::test_parse_invalid_verdict_is_parse_error

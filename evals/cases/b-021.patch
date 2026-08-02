@@ -1,0 +1,13 @@
+diff --git a/rocket_review/models.py b/rocket_review/models.py
+index 99e811b..c7fc86a 100644
+--- a/rocket_review/models.py
++++ b/rocket_review/models.py
+@@ -119,7 +119,7 @@ def _severity_rank(severity: str) -> int:
+ 
+ def should_fail(results: list[BackendResult], threshold: str) -> bool:
+     # Fail closed: a backend that errored or produced unparsable output blocks the gate.
+-    if any(r.error is not None or r.parse_error for r in results):
++    if any(r.parse_error for r in results):
+         return True
+     # A `blocker` verdict is the model's top-level "do not merge"; honor it even when
+     # no individual finding reaches the threshold, or the gate could pass a review that

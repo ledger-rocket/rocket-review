@@ -1,0 +1,15 @@
+diff --git a/rocket_review/backends/base.py b/rocket_review/backends/base.py
+index e2c99f7..18d5a3c 100644
+--- a/rocket_review/backends/base.py
++++ b/rocket_review/backends/base.py
+@@ -135,10 +135,6 @@ def run_command(cmd: list[str], *, stdin: str | None = None, timeout: int = TIME
+     finally:
+         with _active_lock:
+             _active_procs.discard(proc)
+-    if proc.returncode != 0:
+-        raise BackendError(
+-            f"{cmd[0]} failed (exit {proc.returncode}): {err.strip()}"
+-        )
+     return out
+ 
+ 

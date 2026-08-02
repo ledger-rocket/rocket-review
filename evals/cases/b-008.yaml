@@ -1,18 +1,28 @@
 ---
 # The timeout path tears the process group down but returns an empty string instead of
-# raising, so a run that produced nothing reads as a run that produced nothing wrong.
+# raising. "" is a value the callers already reject, so on every path they take the run still
+# fails and only the cause is lost — which is what makes this `lost-diagnostic` rather than
+# `swallowed-error`. The one exception is codex's output file below: a partially written file
+# does surface as a complete review. The label is the conservative reading of a mutant that is
+# mostly diagnostic loss, not a claim that nothing can survive. Its sibling b-018 returns the
+# child's real stdout on the exit-status path, which no caller rejects, and that one turns a
+# failure into a review by the ordinary route.
 id: b-008
 mode: diff
 source: mutant
 diff: cases/b-008.patch
 repo_commit: 88e691a8ef687535c14c374ec3f353c08ed01b7b
 defect:
-  class: swallowed-error
+  class: lost-diagnostic
   file: rocket_review/backends/base.py
   span: [129, 129]
   expected: >-
-    A backend that outlives its timeout returns "" rather than raising BackendError, so
-    the timeout is reported as a review instead of an error and never reaches the gate.
+    A backend that outlives its timeout gets "" back instead of a BackendError, so the
+    timeout is never named: claude and opencode re-detect the empty string and fail with
+    "produced no output", losing the cause and the elapsed budget. codex discards the
+    return value and reads its output file instead, so it reports the same — unless the
+    killed process had already written part of that file, in which case the fragment is
+    returned as a complete review.
 # Admission proof: these tests pass at repo_commit and fail with `diff` applied.
 # Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
 killed_by:
