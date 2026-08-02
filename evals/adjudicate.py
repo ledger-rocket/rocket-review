@@ -21,6 +21,7 @@ three input files.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from dataclasses import asdict, dataclass, field
@@ -35,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cases import CASES_DIR, Case, CaseError, load_cases  # noqa: E402
 from eval_common import REPO_ROOT  # noqa: E402
 from paired_runner import CONTROL, TREATMENT  # noqa: E402
+from strict_validator import VALID  # noqa: E402
 from tier1 import (  # noqa: E402
     IncompletePair,
     final_attempts,
@@ -96,7 +98,9 @@ EXIT_DRAFTED = 4
 #: VETOED here: a caller gating on status would read a mistyped flag as a blocked change.
 EXIT_USAGE = 64
 
-TOP_LEVEL_KEYS = {"sweep_id", "results_file", "adjudicator", "decisions"}
+TOP_LEVEL_KEYS = {
+    "sweep_id", "results_file", "adjudicator", "corpus_digest", "results_digest", "decisions",
+}
 DECISION_KEYS = {
     "case_id", "backend", "arm", "arm_role", "rep", "finding_index", "decision", "rationale",
 }
@@ -152,6 +156,11 @@ class AdjudicationFile:
     #: Provenance only; the join is on sweep_id, which is checked against the results.
     results_file: str | None
     adjudicator: str | None
+    #: What these calls were made against. Verified before anything is scored: a manifest
+    #: or a results file edited afterwards re-decides things the calls cannot be re-made
+    #: for. See `corpus_digest` and `results_digest`.
+    corpus_digest: str
+    results_digest: str
     decisions: tuple[Adjudication, ...]
     path: Path
 
@@ -186,14 +195,56 @@ def _require(condition: bool, message: str) -> None:
         raise AdjudicationError(message)
 
 
+class _StrictLoader(yaml.SafeLoader):
+    """SafeLoader that refuses a duplicate mapping key instead of silently keeping the last.
+
+    PyYAML's default is to keep the last, so an entry carrying two `decision:` lines parses
+    as whichever came second. In an artifact whose entire job is to be the audit trail, a
+    key that is quietly dropped is the one place a recorded call could differ from the call
+    that was actually made.
+    """
+
+
+def _no_duplicate_keys(loader: yaml.SafeLoader, node: yaml.MappingNode) -> dict:
+    seen: list = []
+    duplicates: list = []
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        # Membership on a list compares with __eq__ and never hashes, so an unhashable key
+        # reaches PyYAML's own error rather than blowing up here.
+        (duplicates if key in seen else seen).append(key)
+    if duplicates:
+        raise yaml.constructor.ConstructorError(
+            None, None,
+            f"duplicate key(s): {', '.join(sorted(repr(k) for k in duplicates))}",
+            node.start_mark,
+        )
+    return loader.construct_mapping(node, deep=True)
+
+
+_StrictLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicate_keys,
+)
+
+
+def _string_keys(raw: dict, where: str) -> None:
+    """Refuse a mapping with non-string keys before anything tries to sort or join them."""
+    offenders = [k for k in raw if not isinstance(k, str)]
+    _require(
+        not offenders,
+        f"{where}: keys must be strings, got {', '.join(sorted(repr(k) for k in offenders))}",
+    )
+
+
 def load_adjudications(path: Path) -> AdjudicationFile:
     """Parse and structurally validate one adjudication file. Every rejection names why."""
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as e:
+        raw = yaml.load(path.read_text(encoding="utf-8"), Loader=_StrictLoader)
+    except (OSError, yaml.YAMLError, ValueError) as e:
         raise AdjudicationError(f"{path}: could not read adjudications: {e}") from e
     _require(isinstance(raw, dict), f"{path}: adjudications must be a YAML mapping")
     assert isinstance(raw, dict)
+    _string_keys(raw, str(path))
     unknown = set(raw) - TOP_LEVEL_KEYS
     _require(not unknown, f"{path}: unknown keys: {', '.join(sorted(unknown))}")
     _require(
@@ -201,6 +252,13 @@ def load_adjudications(path: Path) -> AdjudicationFile:
         f"{path}: sweep_id is required — a decision only means anything about the sweep "
         "whose rows it was read from",
     )
+    for key in ("corpus_digest", "results_digest"):
+        _require(
+            isinstance(raw.get(key), str) and raw[key].strip() != "",
+            f"{path}: {key} is required — it is what binds these calls to the inputs they "
+            "were made against. `--pending` writes it; an artifact without one cannot be "
+            "shown to describe this sweep's findings at all.",
+        )
     entries = raw.get("decisions")
     _require(isinstance(entries, list), f"{path}: decisions must be a list")
     assert isinstance(entries, list)
@@ -220,6 +278,8 @@ def load_adjudications(path: Path) -> AdjudicationFile:
         sweep_id=raw["sweep_id"],
         results_file=raw.get("results_file"),
         adjudicator=raw.get("adjudicator"),
+        corpus_digest=raw["corpus_digest"],
+        results_digest=raw["results_digest"],
         decisions=tuple(decisions),
         path=path,
     )
@@ -228,6 +288,7 @@ def load_adjudications(path: Path) -> AdjudicationFile:
 def _parse_decision(raw: object, where: str) -> Adjudication:
     _require(isinstance(raw, dict), f"{where}: must be a mapping")
     assert isinstance(raw, dict)
+    _string_keys(raw, where)
     unknown = set(raw) - DECISION_KEYS
     _require(not unknown, f"{where}: unknown keys: {', '.join(sorted(unknown))}")
     missing = DECISION_KEYS - set(raw)
@@ -271,13 +332,100 @@ def _parse_decision(raw: object, where: str) -> Adjudication:
 
 
 def findings_by_unit(rows: list[dict]) -> dict[tuple, list[Finding]]:
-    """Parse each unit's review once. Adjudications index into these arrays."""
+    """Parse each unit's review once — and only when it strictly validated.
+
+    A run whose output was not `REVIEW_SCHEMA`-compliant contributes **no findings**, which
+    is the rule already registered under *Veto arithmetic*: it lands a zero in its arm's
+    denominator rather than dropping out of it. The runtime parser is deliberately lenient
+    — an invented severity, a missing `why`, a `why` that is not even a string all survive
+    it — because a usable review should not be thrown away over a stray key. Scoring recall
+    or a false positive off a finding the schema rejects would let a malformed review earn
+    credit a compliant one had to argue for, and it would make the reported numbers
+    disagree with the rule the README committed to.
+    """
     return {
-        unit_key(row): parse_backend_output(
-            row["raw"], row["backend"], row["requested_model"]
-        ).findings
+        unit_key(row): (
+            parse_backend_output(
+                row["raw"], row["backend"], row["requested_model"]
+            ).findings
+            if row["outcome"] == VALID else []
+        )
         for row in rows
     }
+
+
+def results_digest(path: Path) -> str:
+    """Fingerprint of the exact bytes the calls were read from."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as e:
+        raise AdjudicationError(f"{path}: could not read the results file: {e}") from e
+
+
+def corpus_digest(cases: dict[str, Case], case_ids: set[str]) -> str:
+    """Fingerprint of everything about the corpus a verdict reads.
+
+    A manifest edited between drafting the calls and scoring them re-decides things the
+    calls were made under and cannot be re-made for: which class a case counts toward,
+    which lines rule 2 accepts, which encoding of a mutation represents it, what
+    `defect.expected` a human read the finding against. That is the same post-hoc move as
+    the twin exploit — made with an editor rather than a decision — so the inputs are
+    pinned rather than trusted.
+
+    Length-prefixed so no concatenation of two fields can collide with another.
+    """
+    digest = hashlib.sha256()
+    for case_id in sorted(case_ids):
+        case = cases[case_id]
+        defect = case.defect
+        fields = [
+            case.id, case.mode, case.source, case.repo_commit,
+            case.diff or "", case.path or "",
+            "" if defect is None else defect.defect_class,
+            "" if defect is None else defect.file,
+            "" if defect is None else f"{defect.span[0]}-{defect.span[1]}",
+            "" if defect is None else defect.expected,
+        ]
+        for value in fields:
+            digest.update(f"{len(value)}:{value}\n".encode())
+        if case.source == "mutant" and case.diff:
+            patch = case.root / case.diff
+            try:
+                data = patch.read_bytes()
+            except OSError:
+                # Distinguishable from an empty patch: a corpus missing its patches is a
+                # different corpus, not one whose mutations happen to be no-ops.
+                digest.update(b"patch:absent\n")
+            else:
+                digest.update(f"patch:{len(data)}:".encode())
+                digest.update(data)
+    return digest.hexdigest()
+
+
+def verify_digests(
+    adjudications: AdjudicationFile, cases: dict[str, Case], case_ids: set[str],
+    results_path: Path,
+) -> None:
+    """Refuse calls that were made against different inputs than the ones in hand."""
+    actual = results_digest(results_path)
+    _require(
+        adjudications.results_digest == actual,
+        f"{adjudications.path} was drafted against a different results file: it records "
+        f"{adjudications.results_digest[:12]}, {results_path} hashes to {actual[:12]}. "
+        "Every decision is keyed by a finding's position in a run's findings array, so a "
+        "results file that was edited or re-ordered rebinds all of them to different "
+        "findings. Re-draft with --pending.",
+    )
+    actual = corpus_digest(cases, case_ids)
+    _require(
+        adjudications.corpus_digest == actual,
+        f"{adjudications.path} was drafted against a different corpus: it records "
+        f"{adjudications.corpus_digest[:12]}, the manifests in {CASES_DIR.name}/ hash to "
+        f"{actual[:12]}. A manifest edited after the calls were made re-decides which class "
+        "a case counts toward, which lines rule 2 accepts and which encoding of a mutation "
+        "represents it — the same post-hoc move as any other, made with an editor. Score "
+        "against the corpus the sweep ran, or re-draft with --pending.",
+    )
 
 
 def matches_location(finding: Finding, case: Case, repo: Path) -> bool:
@@ -353,6 +501,12 @@ def validate_against_results(
         row = by_unit.get(key)
         if row is None:
             problems.append(f"{where}: no such run in the results file")
+            continue
+        if row["outcome"] != VALID:
+            problems.append(
+                f"{where}: that run's output did not validate ({row['outcome']}), so it "
+                "contributes no findings and nothing on it can be adjudicated"
+            )
             continue
         findings = parsed[key]
         if adj.finding_index >= len(findings):
@@ -510,6 +664,16 @@ class CrossArmInconsistency:
     by_role: dict[str, list[str]]
 
 
+def _text(value: object) -> str:
+    """A finding's prose as a comparable string.
+
+    `why` reaches here uncoerced — the runtime parser passes it through whatever the model
+    put in it. Strict validation gates the findings this sees, so an object should never
+    arrive; comparing one must still not take the report down if it does.
+    """
+    return value.strip() if isinstance(value, str) else ""
+
+
 def cross_arm_inconsistencies(
     adjudications: tuple[Adjudication, ...], rows: list[dict],
     parsed: dict[tuple, list[Finding]], sweep_id: str,
@@ -529,7 +693,7 @@ def cross_arm_inconsistencies(
         if key not in by_unit:
             continue
         finding = parsed[key][adj.finding_index]
-        text = ((finding.title or "").strip(), (finding.why or "").strip())
+        text = (_text(finding.title), _text(finding.why))
         by_text.setdefault(text, {}).setdefault(adj.arm_role, set()).add(adj.decision)
     return [
         CrossArmInconsistency(
@@ -810,12 +974,54 @@ def _arm_of(rows: list[dict], role: str) -> str:
     return names[0]
 
 
+def expected_backends(header: dict, rows: list[dict]) -> set[str]:
+    """Every backend this sweep was supposed to produce a comparison for.
+
+    Taken from the header's declared specs as well as the rows, because a backend whose
+    every run failed still has rows, and a backend that never started has only the header.
+    Both have to be visible: certification is a conjunction over backends, and a backend
+    that silently drops out of the conjunction weakens it to whichever ones survived.
+    """
+    specs = header.get("backend_specs")
+    declared = set(specs) if isinstance(specs, dict) else set()
+    return declared | {row["backend"] for row in rows}
+
+
+def check_header(header: dict, rows: list[dict]) -> None:
+    """Refuse rows that disagree with the header that says what produced them.
+
+    The header names each role's arm and its content hash. A file whose rows carry a
+    different arm under a role is not the sweep the header describes, and the arm hash is
+    the only thing tying a row to the exact prompt bytes that produced it.
+    """
+    arms = header.get("arms")
+    if not isinstance(arms, dict):
+        return
+    for role, spec in sorted(arms.items()):
+        if not isinstance(spec, dict):
+            continue
+        observed = {(r["arm"], r.get("arm_hash")) for r in rows if r["arm_role"] == role}
+        declared = (spec.get("name"), spec.get("hash"))
+        _require(
+            not observed or observed == {declared},
+            f"the results header declares the {role} arm as {declared[0]}"
+            f"@{str(declared[1])[:12]}, but its rows carry "
+            f"{', '.join(sorted(f'{n}@{str(h)[:12]}' for n, h in observed))}. The rows and "
+            "the header describe different sweeps, so neither can be trusted about the "
+            "other.",
+        )
+
+
 def compute(
     rows: list[dict], cases: dict[str, Case], adjudications: AdjudicationFile, repo: Path,
-    results_path: Path,
+    results_path: Path, header: dict,
 ) -> Certification:
     """Score a sweep. Raises rather than reporting when the inputs cannot support a verdict."""
     finals = final_attempts(rows)
+    check_header(header, finals)
+    verify_digests(
+        adjudications, cases, {row["case_id"] for row in finals}, results_path,
+    )
     parsed = findings_by_unit(finals)
     validate_against_results(
         adjudications.decisions, finals, cases, parsed, adjudications.sweep_id, repo,
@@ -859,10 +1065,15 @@ def compute(
             treatment_arm=_arm_of(backend_rows, TREATMENT),
             veto=veto, classes=classes, twins=twins,
         ))
-    if not backends:
+    silent = sorted(expected_backends(header, finals) - set(by_backend))
+    if silent:
+        # Not a NOT CERTIFIED: a backend with nothing scored has not failed the criterion,
+        # it has failed to be measured. Letting it fall out of the report would quietly
+        # reduce "every backend must certify" to "every backend that finished must".
         raise AdjudicationError(
-            "no complete repetition survived: every repetition lost at least one arm, so "
-            "there is nothing to certify"
+            f"no complete repetition survived for {', '.join(silent)}. Certification is a "
+            "conjunction over the backends the sweep ran, so a backend that scored nothing "
+            "cannot be dropped from it — re-run the sweep for it."
         )
 
     by_type = {d: sum(1 for a in adjudications.decisions if a.decision == d) for d in DECISIONS}
@@ -924,11 +1135,26 @@ def _not_certified_reasons(
         if not classes:
             return ["no defect case scored, so no class can certify"]
         return [f"{c.defect_class}: {_grade_text(c)}" for c in classes]
-    return [
-        f"{c.defect_class}: +{c.absolute_gain} defect(s) ({_pct(c.relative_gain)}) misses "
-        f">={CRITERION_ABSOLUTE_GAIN} absolute and >={_pct(CRITERION_RELATIVE_GAIN)} relative"
-        for c in certifying
-    ]
+    return [f"{c.defect_class}: {_criterion_miss(c)}" for c in certifying]
+
+
+def _criterion_miss(entry: ClassRecall) -> str:
+    """Which half of the criterion this class actually missed, and only that half.
+
+    Citing the relative threshold on a zero-baseline class would report a bar that was
+    waived as one that was failed — the criterion says a relative improvement on zero is
+    undefined, not zero.
+    """
+    missed = []
+    if entry.absolute_gain < CRITERION_ABSOLUTE_GAIN:
+        missed.append(f">={CRITERION_ABSOLUTE_GAIN} absolute")
+    if entry.relative_gain is not None and entry.relative_gain < CRITERION_RELATIVE_GAIN:
+        missed.append(f">={_pct(CRITERION_RELATIVE_GAIN)} relative")
+    gain = f"+{entry.absolute_gain} defect(s)" + (
+        " on a zero baseline, where the relative threshold is waived"
+        if entry.relative_gain is None else f" ({_pct(entry.relative_gain)})"
+    )
+    return f"{gain} misses {' and '.join(missed)}"
 
 
 def _sweep_verdict(backends: list[BackendCertification]) -> tuple[str, list[str]]:
@@ -1132,7 +1358,10 @@ def report_json(cert: Certification) -> dict:
     }
 
 
-def render_pending(sweep_id: str, results: Path, pending: list[PendingFinding]) -> str:
+def render_pending(
+    sweep_id: str, results: Path, pending: list[PendingFinding],
+    corpus: str, results_hash: str,
+) -> str:
     """A YAML skeleton of every decision the rules need, ready to be filled in.
 
     Derived mechanically from the results, so emitting it decides nothing: `decision:
@@ -1143,6 +1372,10 @@ def render_pending(sweep_id: str, results: Path, pending: list[PendingFinding]) 
         "# Replace every TODO. A decision must be one of: " + ", ".join(DECISIONS) + ".",
         f"sweep_id: {json.dumps(sweep_id)}",
         f"results_file: {json.dumps(results.name)}",
+        "# Written here, checked at scoring time: calls made against one corpus and one",
+        "# results file cannot be re-made for another. Do not edit.",
+        f"corpus_digest: {json.dumps(corpus)}",
+        f"results_digest: {json.dumps(results_hash)}",
         "adjudicator: TODO",
         "decisions:",
     ]
@@ -1233,7 +1466,7 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return EXIT_NO_VERDICT
     try:
-        _, rows = load_jsonl(args.results)
+        header, rows = load_jsonl(args.results)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return EXIT_NO_VERDICT
@@ -1257,7 +1490,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cases = _load_corpus(args.cases, rows)
         if args.pending:
-            print(_pending_document(args, rows, cases), end="")
+            print(_pending_document(args, rows, cases, header), end="")
             return EXIT_DRAFTED
         adjudications = load_adjudications(args.adjudications)
         if adjudications.sweep_id != found[0]:
@@ -1265,7 +1498,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"{args.adjudications} is for sweep {adjudications.sweep_id[:8]}, but "
                 f"{args.results} holds sweep {found[0][:8]}"
             )
-        cert = compute(rows, cases, adjudications, args.repo, args.results)
+        cert = compute(rows, cases, adjudications, args.repo, args.results, header)
     except IncompleteAdjudication as e:
         print(f"Error: {e}. Nothing is scored until every one has a recorded call "
               "(`--pending` drafts them):", file=sys.stderr)
@@ -1308,25 +1541,60 @@ def _load_corpus(directory: Path, rows: list[dict]) -> dict[str, Case]:
     return cases
 
 
-def _pending_document(args: argparse.Namespace, rows: list[dict], cases: dict[str, Case]) -> str:
+def _pending_document(
+    args: argparse.Namespace, rows: list[dict], cases: dict[str, Case], header: dict,
+) -> str:
+    """Draft the calls still outstanding, holding any artifact given to the same bar.
+
+    Re-drafting reads an existing artifact to subtract what is already recorded, so that
+    artifact decides which findings a human is shown as still needing a call. An artifact
+    for another sweep, or one whose decisions do not survive validation, would silently
+    hide real work — so it is checked here exactly as it is at scoring time.
+    """
+    sweep_id = sweep_ids(rows)[0]
     finals = final_attempts(rows)
+    check_header(header, finals)
     parsed = findings_by_unit(finals)
     complete, _ = split_complete_pairs(finals)
     invalidated: frozenset[str] = frozenset()
     recorded: set[tuple] = set()
-    if args.adjudications is not None and args.adjudications.is_file():
+    if args.adjudications is not None:
+        _require(
+            args.adjudications.is_file(),
+            f"{args.adjudications} does not exist. Drop --adjudications to draft from "
+            "scratch; naming a file that is not there would silently draft every call "
+            "again as if none had been made.",
+        )
         existing = load_adjudications(args.adjudications)
+        _require(
+            existing.sweep_id == sweep_id,
+            f"{args.adjudications} is for sweep {existing.sweep_id[:8]}, but "
+            f"{args.results} holds sweep {sweep_id[:8]}",
+        )
+        verify_digests(
+            existing, cases, {row["case_id"] for row in finals}, args.results,
+        )
+        validate_against_results(
+            existing.decisions, finals, cases, parsed, sweep_id, args.repo,
+        )
         invalidated = frozenset(
             a.case_id for a in existing.decisions if a.decision == CASE_INVALIDATED
         )
         recorded = {a.key for a in existing.decisions}
+    # Closed over mutations, exactly as at scoring time: an invalidated representative
+    # takes its twin with it, so the twin's findings are not drafted as outstanding work.
+    removed = removed_cases(cases, invalidated)
     pending = [
         item for item in pending_findings(
-            complete, cases, parsed, args.repo, skip_cases=invalidated,
+            complete, cases, parsed, args.repo, skip_cases=removed,
         )
         if item.key not in recorded
     ]
-    return render_pending(sweep_ids(rows)[0], args.results, pending)
+    return render_pending(
+        sweep_id, args.results, pending,
+        corpus_digest(cases, {row["case_id"] for row in finals}),
+        results_digest(args.results),
+    )
 
 
 if __name__ == "__main__":

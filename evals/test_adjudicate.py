@@ -26,14 +26,16 @@ from adjudicate import (
     IncompleteAdjudication,
     certifying_representative,
     compute,
+    corpus_digest,
     load_adjudications,
     main,
     mutation_of,
     print_report,
     removed_cases,
+    results_digest,
 )
 from cases import CASES_DIR, load_cases
-from strict_validator import BACKEND_ERROR, VALID
+from strict_validator import BACKEND_ERROR, SCHEMA_VIOLATION, VALID
 
 SWEEP = "0123456789abcdef0123456789abcdef"
 COMMIT = "a" * 40
@@ -54,15 +56,20 @@ def write_case(directory: Path, case_id: str, **fields) -> None:
     )
 
 
-def defect_case(directory: Path, case_id: str, defect_class="dropped-guard", **fields) -> None:
+def defect_case(directory: Path, case_id: str, defect_class="dropped-guard",
+                span_override=None, **fields) -> None:
     write_case(
         directory, case_id, source="mutant", diff=f"cases/{case_id}.patch",
         defect={
-            "class": defect_class, "file": DEFECT_FILE, "span": list(SPAN),
-            "expected": "the guard is gone",
+            "class": defect_class, "file": DEFECT_FILE,
+            "span": span_override or list(SPAN), "expected": "the guard is gone",
         },
         **fields,
     )
+    # The digest covers patch bytes, so a corpus a test will re-hash needs them on disk.
+    patch = directory / f"{case_id}.patch"
+    if not patch.exists():
+        patch.write_text(f"--- a/{DEFECT_FILE}\n+++ b/{DEFECT_FILE}\n", encoding="utf-8")
 
 
 def corpus(tmp_path: Path, build) -> Path:
@@ -177,20 +184,38 @@ def write_results(tmp_path: Path, rows: list[dict], sweep_id: str = SWEEP) -> Pa
     return path
 
 
+#: A digest no real corpus or results file will produce. Tests that expect a refusal
+#: *before* the digest check use it; anything that scores supplies the real ones.
+UNBOUND = "0" * 64
+
+
+def digests(cases: dict, rows: list[dict], results: Path) -> dict:
+    return {
+        "corpus_digest": corpus_digest(cases, {r["case_id"] for r in rows}),
+        "results_digest": results_digest(results),
+    }
+
+
 def write_adjudications(tmp_path: Path, decisions: list[dict], sweep_id: str = SWEEP,
                         name: str = "adjudications.yaml", **extra) -> Path:
     path = tmp_path / name
-    document = {"sweep_id": sweep_id, "decisions": decisions}
+    document = {
+        "sweep_id": sweep_id, "corpus_digest": UNBOUND, "results_digest": UNBOUND,
+        "decisions": decisions,
+    }
     document.update(extra)
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     return path
 
 
-def score(tmp_path: Path, build, rows: list[dict], decisions: list[dict]):
+def score(tmp_path: Path, build, rows: list[dict], decisions: list[dict], header=None):
     cases_dir = corpus(tmp_path, build)
     cases = {c.id: c for c in load_cases(cases_dir)}
-    adjudications = load_adjudications(write_adjudications(tmp_path, decisions))
-    return compute(rows, cases, adjudications, tmp_path, tmp_path / "paired.jsonl")
+    results = write_results(tmp_path, rows)
+    adjudications = load_adjudications(write_adjudications(
+        tmp_path, decisions, **digests(cases, rows, results),
+    ))
+    return compute(rows, cases, adjudications, tmp_path, results, header or {})
 
 
 def one_defect_class(directory: Path, count: int = 5, defect_class="dropped-guard") -> None:
@@ -548,6 +573,10 @@ def test_a_two_defect_gain_on_a_wide_class_still_needs_twenty_percent(tmp_path):
     assert entry.absolute_gain == 2
     assert round(float(entry.relative_gain), 4) == 0.1818
     assert (entry.criterion_met, cert.verdict) == (False, NOT_CERTIFIED)
+    # The absolute half passed, so the reason must not read as though it had not.
+    reason = " ".join(cert.reasons)
+    assert "misses >=+20.0% relative" in reason
+    assert "absolute" not in reason
 
 
 def test_exactly_twenty_percent_with_two_defects_clears_the_bar(tmp_path):
@@ -566,6 +595,19 @@ def test_a_zero_baseline_still_needs_two_defects(tmp_path):
     cert, entry = criterion(tmp_path, cases=5, control_found=0, treatment_found=1)
     assert (entry.absolute_gain, entry.relative_gain) == (1, None)
     assert (entry.criterion_met, cert.verdict) == (False, NOT_CERTIFIED)
+    # A waived threshold is not a failed one: the relative bar must not appear here.
+    reason = " ".join(cert.reasons)
+    assert "zero baseline, where the relative threshold is waived" in reason
+    assert "relative" not in reason.replace("relative threshold is waived", "")
+
+
+def test_a_failure_reason_names_only_the_threshold_that_failed(tmp_path):
+    # +1 of 5 off a baseline of 4 is +25% — the ratio passes, the absolute does not.
+    cert, entry = criterion(tmp_path, cases=5, control_found=4, treatment_found=5)
+    assert (entry.absolute_gain, float(entry.relative_gain)) == (1, 0.25)
+    reason = " ".join(cert.reasons)
+    assert "misses >=2 absolute" in reason
+    assert "relative" not in reason
 
 
 def test_a_sweep_below_protocol_depth_cannot_certify_however_good_the_ratio(tmp_path):
@@ -679,10 +721,122 @@ def test_an_invalidated_case_needs_no_further_calls(tmp_path):
     assert cert.invalidated_cases == ["c-101"]
 
 
+# --- only a strictly valid review has findings ---------------------------------------------
+
+
+def defect_and_control(directory: Path) -> None:
+    defect_case(directory, "b-101")
+    write_case(directory, "c-101")
+
+
+def test_a_schema_violating_review_contributes_no_findings(tmp_path):
+    # The registered rule under *Veto arithmetic*: a run that did not validate lands a zero
+    # in its arm's denominator rather than dropping out of it. The runtime parser would
+    # happily hand back the findings — it is lenient on purpose — so recall could otherwise
+    # be earned by output the schema rejects.
+    rows = pair("b-101", 1, [], [on_defect()])
+    rows[1].update(outcome=SCHEMA_VIOLATION, errors=["findings.0.severity: not one of ..."])
+    rows += control_rows("c-101", 1, control_noise=0, treatment_noise=0)
+    cert = score(tmp_path, defect_and_control, rows, [])
+    entry = class_of(cert, "dropped-guard").per_case[0]
+    assert (entry.treatment_hits, entry.treatment_reps) == (0, 1)
+    assert entry.treatment_found is False
+
+
+def test_nothing_on_an_invalid_run_can_be_adjudicated(tmp_path):
+    rows = pair("b-101", 1, [], [on_defect()])
+    rows[1].update(outcome=SCHEMA_VIOLATION, errors=["boom"])
+    with pytest.raises(AdjudicationError, match="did not validate"):
+        score(
+            tmp_path, lambda d: defect_case(d, "b-101"), rows,
+            [call("b-101", "treatment", 1, MATCHES_DEFECT)],
+        )
+
+
+def test_a_finding_whose_why_is_not_a_string_neither_crashes_nor_scores(tmp_path):
+    # The lenient parser passes `why` through uncoerced, so a schema-violating review can
+    # put an object there — and the cross-arm comparison reads that field.
+    rows = pair("b-101", 1, [on_defect()], [on_defect(why={"nested": "object"})])
+    rows[1].update(outcome=SCHEMA_VIOLATION, errors=["findings.0.why: not a string"])
+    rows += control_rows("c-101", 1, control_noise=0, treatment_noise=0)
+    cert = score(
+        tmp_path, defect_and_control, rows, [call("b-101", "control", 1, MATCHES_DEFECT)],
+    )
+    entry = class_of(cert, "dropped-guard").per_case[0]
+    assert (entry.control_hits, entry.treatment_hits) == (1, 0)
+    assert cert.cross_arm == []
+
+
+# --- binding the verdict to its inputs -------------------------------------------------------
+
+
+def bound_sweep(tmp_path: Path, build):
+    """A results file, a corpus and an artifact whose digests match both."""
+    rows = pair("b-101", 1, [], [on_defect()])
+    rows += control_rows("c-101", 1, control_noise=0, treatment_noise=0)
+    cases_dir = corpus(tmp_path, build)
+    cases = {c.id: c for c in load_cases(cases_dir)}
+    results = write_results(tmp_path, rows)
+    adjudications = write_adjudications(
+        tmp_path, [call("b-101", "treatment", 1, MATCHES_DEFECT)],
+        **digests(cases, rows, results),
+    )
+    return rows, cases_dir, results, adjudications
+
+
+def cli(results, adjudications, cases_dir, tmp_path, *extra):
+    return main([str(results), "--adjudications", str(adjudications),
+                 "--cases", str(cases_dir), "--repo", str(tmp_path), *extra])
+
+
+def test_a_sweep_bound_to_its_inputs_scores(tmp_path):
+    _, cases_dir, results, adjudications = bound_sweep(tmp_path, defect_and_control)
+    assert cli(results, adjudications, cases_dir, tmp_path) == 1
+
+
+def test_a_manifest_edited_after_the_calls_were_made_is_refused(tmp_path, capsys):
+    _, cases_dir, results, adjudications = bound_sweep(tmp_path, defect_and_control)
+    # The span rule 2 accepts is widened after the fact, which re-decides which findings
+    # were adjudicable at all.
+    defect_case(cases_dir, "b-101", span_override=[1, 400])
+    assert cli(results, adjudications, cases_dir, tmp_path) == 3
+    assert "drafted against a different corpus" in capsys.readouterr().err
+
+
+def test_a_patch_edited_after_the_calls_were_made_is_refused(tmp_path, capsys):
+    _, cases_dir, results, adjudications = bound_sweep(tmp_path, defect_and_control)
+    (cases_dir / "b-101.patch").write_text("a different mutation\n", encoding="utf-8")
+    assert cli(results, adjudications, cases_dir, tmp_path) == 3
+    assert "drafted against a different corpus" in capsys.readouterr().err
+
+
+def test_a_results_file_edited_after_the_calls_were_made_is_refused(tmp_path, capsys):
+    rows, cases_dir, results, adjudications = bound_sweep(tmp_path, defect_and_control)
+    # Re-ordering alone rebinds every index-keyed decision to a different finding.
+    write_results(tmp_path, list(reversed(rows)))
+    assert cli(results, adjudications, cases_dir, tmp_path) == 3
+    assert "drafted against a different results file" in capsys.readouterr().err
+
+
+def test_an_artifact_with_no_digests_cannot_be_scored(tmp_path, capsys):
+    _, cases_dir, results, _ = bound_sweep(tmp_path, defect_and_control)
+    path = tmp_path / "loose.yaml"
+    path.write_text(yaml.safe_dump({"sweep_id": SWEEP, "decisions": []}), encoding="utf-8")
+    assert cli(results, path, cases_dir, tmp_path) == 3
+    assert "corpus_digest is required" in capsys.readouterr().err
+
+
 # --- artifact validation ------------------------------------------------------------------
 
 
-def load_bad(tmp_path, document: str):
+def load_bad(tmp_path, document: str | dict):
+    """Load an artifact built to fail one structural check, with the rest well-formed."""
+    if isinstance(document, dict):
+        document = yaml.safe_dump(
+            {"sweep_id": SWEEP, "corpus_digest": UNBOUND, "results_digest": UNBOUND,
+             **document},
+            sort_keys=False,
+        )
     path = tmp_path / "bad.yaml"
     path.write_text(document, encoding="utf-8")
     return load_adjudications(path)
@@ -690,42 +844,82 @@ def load_bad(tmp_path, document: str):
 
 def test_a_decision_outside_the_enum_is_refused(tmp_path):
     with pytest.raises(AdjudicationError, match="decision must be one of"):
-        load_bad(tmp_path, yaml.safe_dump({
-            "sweep_id": SWEEP,
-            "decisions": [call("b-101", "control", 1, "looks-right")],
-        }))
+        load_bad(tmp_path, {"decisions": [call("b-101", "control", 1, "looks-right")]})
 
 
 def test_a_decision_without_a_rationale_is_refused(tmp_path):
     entry = call("b-101", "control", 1, MATCHES_DEFECT)
     entry["rationale"] = "   "
     with pytest.raises(AdjudicationError, match="rationale is required"):
-        load_bad(tmp_path, yaml.safe_dump({"sweep_id": SWEEP, "decisions": [entry]}))
+        load_bad(tmp_path, {"decisions": [entry]})
 
 
 def test_a_multi_line_rationale_is_refused(tmp_path):
     entry = call("b-101", "control", 1, MATCHES_DEFECT)
     entry["rationale"] = "line one\nline two"
     with pytest.raises(AdjudicationError, match="one line"):
-        load_bad(tmp_path, yaml.safe_dump({"sweep_id": SWEEP, "decisions": [entry]}))
+        load_bad(tmp_path, {"decisions": [entry]})
 
 
 def test_two_calls_on_one_finding_are_refused(tmp_path):
     entry = call("b-101", "control", 1, MATCHES_DEFECT)
     with pytest.raises(AdjudicationError, match="one finding, one call"):
-        load_bad(tmp_path, yaml.safe_dump({"sweep_id": SWEEP, "decisions": [entry, entry]}))
+        load_bad(tmp_path, {"decisions": [entry, entry]})
 
 
 def test_a_missing_key_names_itself(tmp_path):
     entry = call("b-101", "control", 1, MATCHES_DEFECT)
     del entry["rep"]
     with pytest.raises(AdjudicationError, match="missing keys: rep"):
-        load_bad(tmp_path, yaml.safe_dump({"sweep_id": SWEEP, "decisions": [entry]}))
+        load_bad(tmp_path, {"decisions": [entry]})
+
+
+def test_a_duplicate_yaml_key_is_refused_rather_than_silently_last_wins(tmp_path):
+    # PyYAML keeps the last by default, so an entry with two `decision:` lines would score
+    # as whichever came second — in the file that is supposed to be the audit trail.
+    with pytest.raises(AdjudicationError, match="duplicate key"):
+        load_bad(tmp_path, f"""
+sweep_id: {SWEEP}
+corpus_digest: "{UNBOUND}"
+results_digest: "{UNBOUND}"
+decisions:
+  - case_id: b-101
+    backend: codex
+    arm: before
+    arm_role: control
+    rep: 1
+    finding_index: 0
+    decision: real-unrelated
+    decision: matches-defect
+    rationale: which one counts?
+""")
+
+
+def test_a_non_string_key_is_refused_cleanly(tmp_path):
+    # Not a crash on `sorted()` of mixed types, which would exit 1 — NOT CERTIFIED.
+    with pytest.raises(AdjudicationError, match="keys must be strings"):
+        load_bad(tmp_path, f"""
+sweep_id: {SWEEP}
+corpus_digest: "{UNBOUND}"
+results_digest: "{UNBOUND}"
+decisions: []
+7: surprise
+""")
+
+
+def test_a_non_string_key_inside_a_decision_is_refused_cleanly(tmp_path):
+    entry = dict(call("b-101", "control", 1, MATCHES_DEFECT))
+    with pytest.raises(AdjudicationError, match="keys must be strings"):
+        load_bad(tmp_path, yaml.safe_dump({
+            "sweep_id": SWEEP, "corpus_digest": UNBOUND, "results_digest": UNBOUND,
+            "decisions": [{**entry, 7: "surprise"}],
+        }))
 
 
 def test_an_artifact_without_a_sweep_id_is_refused(tmp_path):
     with pytest.raises(AdjudicationError, match="sweep_id is required"):
-        load_bad(tmp_path, yaml.safe_dump({"decisions": []}))
+        load_bad(tmp_path, yaml.safe_dump(
+            {"corpus_digest": UNBOUND, "results_digest": UNBOUND, "decisions": []}))
 
 
 def test_a_decision_naming_no_run_is_refused(tmp_path):
@@ -875,8 +1069,11 @@ def test_the_same_call_in_both_arms_is_not_flagged(tmp_path):
 
 def run_cli(tmp_path, rows, decisions, build, *extra):
     results = write_results(tmp_path, rows)
-    adjudications = write_adjudications(tmp_path, decisions)
     cases_dir = corpus(tmp_path, build)
+    cases = {c.id: c for c in load_cases(cases_dir)}
+    adjudications = write_adjudications(
+        tmp_path, decisions, **digests(cases, rows, results),
+    )
     return main([str(results), "--adjudications", str(adjudications),
                  "--cases", str(cases_dir), "--repo", str(tmp_path), *extra])
 
@@ -964,6 +1161,35 @@ def test_certification_needs_every_backend_to_certify(tmp_path):
     assert all(r.startswith("claude: ") for r in cert.reasons)
 
 
+def test_a_backend_whose_every_pair_failed_cannot_be_dropped_from_the_conjunction(tmp_path):
+    # The hole this closes: complete pairs are what the report is grouped by, so a backend
+    # that finished nothing simply vanished — and `all(CERTIFIED)` over the survivors then
+    # certified a sweep in which a whole backend was never measured.
+    rows = certification_sweep(treatment_noise=1)
+    failed = control_rows("c-101", 1, control_noise=0, treatment_noise=0, backend="claude")
+    for r in failed:
+        r.update(outcome=BACKEND_ERROR, raw="", backend_error="claude timed out")
+    with pytest.raises(AdjudicationError, match="no complete repetition survived for claude"):
+        score(tmp_path, certification_corpus, rows + failed, adjudicate_split(rows))
+
+
+def test_a_backend_that_never_started_is_taken_from_the_header(tmp_path):
+    # It has no rows at all, so only the header can say it was supposed to be there.
+    rows = certification_sweep(treatment_noise=1)
+    header = {"type": "header", "sweep_id": SWEEP,
+              "backend_specs": {"codex": "m", "claude": "m"}}
+    with pytest.raises(AdjudicationError, match="no complete repetition survived for claude"):
+        score(tmp_path, certification_corpus, rows, adjudicate_split(rows), header=header)
+
+
+def test_rows_that_disagree_with_the_header_about_an_arm_are_refused(tmp_path):
+    rows = control_rows("c-101", 1, control_noise=0, treatment_noise=0)
+    header = {"type": "header", "sweep_id": SWEEP,
+              "arms": {"control": {"name": "something-else", "hash": "deadbeef"}}}
+    with pytest.raises(AdjudicationError, match="describe different sweeps"):
+        score(tmp_path, controls_only, rows, [], header=header)
+
+
 def test_two_arms_in_one_role_for_one_backend_are_refused(tmp_path):
     rows = control_rows("c-101", 1, control_noise=0, treatment_noise=0)
     rows += [row("c-101", "control", 2, is_control=True, arm="another-control"),
@@ -1004,7 +1230,10 @@ def test_pending_drafts_every_call_the_rules_need_and_nothing_else(tmp_path, cap
             MATCHES_DEFECT if entry["case_id"].startswith("b-") else FALSE_POSITIVE
         )
         entry["rationale"] = "read against defect.expected"
-    filled = write_adjudications(tmp_path, draft["decisions"], name="filled.yaml")
+    filled = write_adjudications(
+        tmp_path, draft["decisions"], name="filled.yaml",
+        corpus_digest=draft["corpus_digest"], results_digest=draft["results_digest"],
+    )
     assert main([str(results), "--adjudications", str(filled), "--cases", str(cases_dir),
                  "--repo", str(tmp_path)]) == 0
 
@@ -1013,16 +1242,65 @@ def test_pending_skips_what_is_already_recorded(tmp_path, capsys):
     rows = control_rows("c-101", 2, control_noise=1, treatment_noise=1)
     rows += control_rows("c-102", 2, control_noise=0, treatment_noise=0)
     results = write_results(tmp_path, rows)
+    cases_dir = corpus(tmp_path, controls_only)
     recorded = write_adjudications(
         tmp_path, [call("c-101", "control", 1, FALSE_POSITIVE)],
+        **digests({c.id: c for c in load_cases(cases_dir)}, rows, results),
     )
-    cases_dir = corpus(tmp_path, controls_only)
     assert main([str(results), "--pending", "--adjudications", str(recorded),
                  "--cases", str(cases_dir), "--repo", str(tmp_path)]) == EXIT_DRAFTED
     draft = yaml.safe_load(capsys.readouterr().out)
     assert [(d["case_id"], d["arm_role"], d["rep"]) for d in draft["decisions"]] == [
         ("c-101", "control", 2), ("c-101", "treatment", 1), ("c-101", "treatment", 2),
     ]
+
+
+def test_pending_refuses_an_artifact_for_another_sweep(tmp_path, capsys):
+    _, cases_dir, results, _ = bound_sweep(tmp_path, defect_and_control)
+    other = write_adjudications(tmp_path, [], sweep_id="b" * 32, name="other.yaml")
+    assert main([str(results), "--pending", "--adjudications", str(other),
+                 "--cases", str(cases_dir), "--repo", str(tmp_path)]) == 3
+    assert "is for sweep" in capsys.readouterr().err
+
+
+def test_pending_refuses_an_artifact_whose_decisions_do_not_validate(tmp_path, capsys):
+    rows, cases_dir, results, _ = bound_sweep(tmp_path, defect_and_control)
+    cases = {c.id: c for c in load_cases(cases_dir)}
+    broken = write_adjudications(
+        tmp_path, [call("b-101", "treatment", 9, MATCHES_DEFECT)], name="broken.yaml",
+        **digests(cases, rows, results),
+    )
+    # Otherwise a decision naming no run would subtract nothing and quietly leave the real
+    # call off the draft, which is the one place a missed call never gets noticed.
+    assert main([str(results), "--pending", "--adjudications", str(broken),
+                 "--cases", str(cases_dir), "--repo", str(tmp_path)]) == 3
+    assert "no such run in the results file" in capsys.readouterr().err
+
+
+def test_pending_refuses_an_adjudications_path_that_does_not_exist(tmp_path, capsys):
+    _, cases_dir, results, _ = bound_sweep(tmp_path, defect_and_control)
+    assert main([str(results), "--pending", "--adjudications", str(tmp_path / "nope.yaml"),
+                 "--cases", str(cases_dir), "--repo", str(tmp_path)]) == 3
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_pending_closes_invalidation_over_the_mutation_too(tmp_path, capsys):
+    rows = twin_promotion_sweep()
+    cases_dir = corpus(tmp_path, twin_promotion_corpus)
+    cases = {c.id: c for c in load_cases(cases_dir)}
+    results = write_results(tmp_path, rows)
+    recorded = write_adjudications(
+        tmp_path, [call("b-101", "treatment", 1, CASE_INVALIDATED)],
+        **digests(cases, rows, results),
+    )
+    assert main([str(results), "--pending", "--adjudications", str(recorded),
+                 "--cases", str(cases_dir), "--repo", str(tmp_path)]) == EXIT_DRAFTED
+    draft = yaml.safe_load(capsys.readouterr().out)
+    drafted = {d["case_id"] for d in draft["decisions"]}
+    # b-201 is the invalidated mutation's other encoding: its findings are not outstanding
+    # work, because nothing about that mutation is scored any more.
+    assert "b-201" not in drafted and "b-101" not in drafted
+    assert drafted == {"b-103", "b-104", "b-105"}
 
 
 def test_an_incomplete_adjudication_lists_what_is_missing_and_yields_no_verdict(
@@ -1040,7 +1318,7 @@ def test_a_sweep_that_lost_every_repetition_yields_no_verdict(tmp_path, capsys):
     rows = control_rows("c-101", 1, control_noise=0, treatment_noise=0)
     rows[1].update(outcome=BACKEND_ERROR, raw="", backend_error="codex timed out")
     assert run_cli(tmp_path, rows, [], controls_only) == 3
-    assert "nothing to certify" in capsys.readouterr().err
+    assert "no complete repetition survived for codex" in capsys.readouterr().err
 
 
 def test_adjudications_are_required_unless_drafting(tmp_path, capsys):

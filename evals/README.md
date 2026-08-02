@@ -797,6 +797,17 @@ decisions:
     rationale: claims a race the GIL makes impossible; the dict write is atomic
 ```
 
+`corpus_digest` and `results_digest` are written by `--pending` and checked before anything
+scores. They are not decoration: a decision is keyed by a finding's *position* in a run's
+findings array, so a results file that was edited or re-ordered rebinds every call in the
+file to a different finding, and a manifest edited afterwards re-decides which class a case
+counts toward, which lines rule 2 accepts, which encoding of a mutation represents it and
+what `defect.expected` the human read the finding against. Both are the same post-hoc move
+as any other, made with an editor instead of a decision, so the inputs are pinned rather
+than trusted. The corpus digest covers every scoring-relevant manifest field of every
+referenced case plus its patch bytes; the results digest covers the JSONL byte for byte. A
+mismatch is a refusal naming which input moved.
+
 The key is `tier1.py`'s `unit_key` minus the sweep id (which the file carries once) plus the
 finding's index, so a decision joins to exactly one finding of exactly one run. `arm_role` is
 part of it for the same reason it is part of `unit_key`: an A/A run puts the same arm *name*
@@ -926,9 +937,13 @@ Means are compared as exact rationals, not floats: a bound of exactly +0.5 is on
 side of "by no more than 0.5", and it should not depend on binary rounding whether it lands
 there.
 
-A run whose review did not parse contributes a **zero** to its arm's mean rather than
-dropping out of the denominator: the runtime parser returns no findings for a schema
-violation or a decode failure, so there are no findings to adjudicate and none are counted.
+A run whose review did not strictly validate contributes a **zero** to its arm's mean rather
+than dropping out of the denominator. This is enforced rather than inherited: the runtime
+parser is lenient by design — an invented severity, a missing `why`, a `why` that is not even
+a string all survive it — so the scorer exposes findings only from runs the Part 1 validator
+scored `valid`, and everything else has no findings to adjudicate at all. Otherwise a
+malformed review could earn recall, or a confirmed false positive, off a finding the schema
+rejects, which a compliant review would have had to argue for.
 That dilutes the false-positive mean downward for whichever arm produced the unparsable
 output. It is deliberate — tier 1's raw `critical+high/run` treats those runs identically,
 and the two reports must not disagree about which runs happened — but it means an arm that
@@ -983,6 +998,13 @@ Each backend in the sweep is scored on its own. A veto anywhere vetoes the sweep
 certification needs **every** backend to certify: a prompt ships to all of them at once, so
 one backend getting sharper while another gets noisier is not an improvement to `rr`.
 
+A backend that produced **no complete repetition at all** is refused, not omitted. The
+conjunction is over the backends the sweep *ran*, which is read from the results header's
+`backend_specs` as well as from the rows — a backend whose every run failed still has rows,
+one that never started has only the header entry. Letting either drop out would quietly
+weaken "every backend must certify" into "every backend that finished must", and the
+backends that fail are not a random sample of them.
+
 ### The completeness gate
 
 Nothing is scored until every finding a rule reads has a recorded call — every CRITICAL/HIGH
@@ -1032,6 +1054,11 @@ But the arm role is on screen while the call is made, and an adjudicator reading
 control's finding as noise and the treatment's word-for-word identical finding as real is
 the shape a thumb on the scale makes. Printed, so it is at least seen.
 
+`--pending` holds any artifact it is given to the same bar as scoring does: same sweep,
+matching digests, and every recorded decision valid against the results. Re-drafting
+subtracts what is already recorded, so an artifact that is quietly wrong there would hide
+outstanding calls — and a call nobody is shown is a call nobody makes.
+
 A file holding more than one `sweep_id` is refused outright, with no override. `tier1.py` has
 one because it only *describes* sweeps and can print two side by side; a certification is one
 decision about one paired session, and there is no honest way to make it out of measurements
@@ -1075,7 +1102,9 @@ launches a real backend.
   refusal, and worktree teardown.
 - `test_tier1.py` — every tier-1 metric on fixed rows, plus the hand-labelled DO-NOT-FLAG
   fixture.
-- `test_adjudicate.py` — the certification arithmetic on synthetic sweeps: the majority rule
+- `test_adjudicate.py` — the certification arithmetic on synthetic sweeps: input binding
+  (an edited manifest, patch or results file is refused), strict-validity gating, the
+  refusal of a backend that scored nothing, the majority rule
   including the even-*n* split a lost repetition produces, twin exclusion, mutation-level
   invalidation (including that invalidating a representative cannot promote its twin into
   the class), the protocol-depth gate in both directions, per-backend combination, every
