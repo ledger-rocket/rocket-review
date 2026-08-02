@@ -1,0 +1,13 @@
+diff --git a/rocket_review/cli.py b/rocket_review/cli.py
+index 868e03c..5173ea7 100644
+--- a/rocket_review/cli.py
++++ b/rocket_review/cli.py
+@@ -176,7 +176,7 @@ def ensure_diff_exists(staged: bool) -> None:
+     cmd = ["git", "diff", "--quiet"]
+     cmd.append("--staged" if staged else "HEAD")
+     result = run_capture(cmd)
+-    if result.returncode == 0:
++    if result.returncode != 0:
+         label = "staged changes" if staged else "uncommitted changes"
+         print(f"Error: no {label} found.", file=sys.stderr)
+         sys.exit(1)

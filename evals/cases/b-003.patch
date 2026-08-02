@@ -1,0 +1,13 @@
+diff --git a/rocket_review/backends/claude.py b/rocket_review/backends/claude.py
+index 6253418..9505e0c 100644
+--- a/rocket_review/backends/claude.py
++++ b/rocket_review/backends/claude.py
+@@ -34,7 +34,7 @@ def _git_view_rule(job: ReviewJob) -> str | None:
+     already inlined in the prompt (PR, files, stdin, plan), which need no git at all.
+     """
+     if job.git_cmd:
+-        return f"Bash({job.git_cmd})"
++        return f"Bash({job.git_cmd}:*)"
+     if job.commit:
+         return f"Bash(git show {job.commit})"
+     return None

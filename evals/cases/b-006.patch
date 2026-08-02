@@ -1,0 +1,13 @@
+diff --git a/rocket_review/models.py b/rocket_review/models.py
+index c0f8a06..a6733f5 100644
+--- a/rocket_review/models.py
++++ b/rocket_review/models.py
+@@ -64,7 +64,7 @@ def extract_json(text: str) -> dict | None:
+         candidates.append(fence.group(1))
+     start, end = text.find("{"), text.rfind("}")
+     if start != -1 and end > start:
+-        candidates.append(text[start:end + 1])
++        candidates.append(text[start:end])
+     for candidate in candidates:
+         try:
+             obj = json.loads(candidate)

@@ -1,0 +1,21 @@
+---
+# `git diff --quiet` exits 1 when there ARE changes, so reading its status the usual way
+# round inverts the preflight. Needs the reviewer to know that inverted convention.
+id: b-005
+mode: diff
+source: mutant
+diff: cases/b-005.patch
+repo_commit: 88e691a8ef687535c14c374ec3f353c08ed01b7b
+defect:
+  class: flipped-comparison
+  file: rocket_review/cli.py
+  span: [179, 179]
+  expected: >-
+    The empty-diff preflight reads `git diff --quiet`'s exit status backwards: a tree with
+    changes is rejected as having none, and a clean tree falls through to the second check
+    and reports a git failure.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_cli.py::test_ensure_diff_exists_clean_tree_errors
+  - tests/test_cli.py::test_ensure_diff_exists_dirty_tree_passes

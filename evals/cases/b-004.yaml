@@ -1,0 +1,22 @@
+---
+# The --fail-on comparison is inverted. Severity ranks ascend from 0 = critical, so the
+# flip is invisible unless the reviewer works out which direction the rank runs.
+id: b-004
+mode: diff
+source: mutant
+diff: cases/b-004.patch
+repo_commit: 88e691a8ef687535c14c374ec3f353c08ed01b7b
+defect:
+  class: flipped-comparison
+  file: rocket_review/models.py
+  span: [131, 131]
+  expected: >-
+    should_fail trips on findings at or BELOW the threshold and lets everything more
+    severe through, so `--fail-on high` passes a review containing critical findings.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_models.py::test_should_fail_threshold
+  - tests/test_models.py::test_summary_gate_tripped_true_and_false
+  - tests/test_models.py::test_needs_fixes_sub_threshold_finding_still_passes
+  - tests/test_models.py::test_approve_with_critical_finding_fails

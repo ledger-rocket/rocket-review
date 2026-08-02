@@ -1,0 +1,20 @@
+---
+# min becomes max over a rank where 0 is the most severe, so worst_severity reports the
+# least severe finding. One token, and the identifier still reads correctly.
+id: b-011
+mode: diff
+source: mutant
+diff: cases/b-011.patch
+repo_commit: 88e691a8ef687535c14c374ec3f353c08ed01b7b
+defect:
+  class: wrong-reducer
+  file: rocket_review/models.py
+  span: [141, 141]
+  expected: >-
+    The envelope's summary.worst_severity carries the LEAST severe finding, because
+    severity ranks ascend from 0 = critical and the reducer selects the highest rank.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_models.py::test_summary_worst_severity_and_none_when_empty
+  - tests/test_models.py::test_envelope_golden_shape

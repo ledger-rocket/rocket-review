@@ -1,0 +1,19 @@
+---
+# The commit-materialization branch names the wrong two backends. Both sets are plausible
+# on sight; only the comment above and the run_one docstring say which is right.
+id: b-010
+mode: diff
+source: mutant
+diff: cases/b-010.patch
+repo_commit: 88e691a8ef687535c14c374ec3f353c08ed01b7b
+defect:
+  class: wrong-set-members
+  file: rocket_review/cli.py
+  span: [322, 322]
+  expected: >-
+    codex/claude get the commit diff inlined and lose the OID they were going to `git
+    show`, while api/opencode — which cannot run git — are left with no content at all.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_cli.py::test_mixed_commit_fanout_specializes_per_backend

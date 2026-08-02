@@ -1,0 +1,21 @@
+---
+# b-002's mutant reviewed as a whole file instead of as a diff — the same patch, so the
+# two ids differ only in what rr is pointed at. The pair is what shows whether a prompt
+# finds a defect only when a diff puts it under the reviewer's nose.
+id: b-012
+mode: code
+source: mutant
+diff: cases/b-002.patch
+repo_commit: 88e691a8ef687535c14c374ec3f353c08ed01b7b
+defect:
+  class: dropped-guard
+  file: rocket_review/cli.py
+  span: [108, 108]
+  expected: >-
+    The link-containment check is a string-prefix test instead of is_relative_to, so a
+    sibling directory whose name extends the base (/project-other beside /project) passes
+    as inside it and its files are read into the prompt.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_docs.py::test_read_doc_blocks_sibling_prefix_escape

@@ -1,0 +1,9 @@
+---
+# Clean control, non-Python: a CI workflow rewrite (PR #18). YAML and shell rather than
+# application code, which exercises a different failure mode in a reviewer than the rest
+# of the corpus does.
+id: c-005
+mode: diff
+source: merged-pr
+# Two files, ~158 lines. PR #18, merged and never reverted.
+repo_commit: c518e67aba0d0e15e3845e4d31af304a4ed63b0b

@@ -1,0 +1,13 @@
+diff --git a/rocket_review/cli.py b/rocket_review/cli.py
+index 868e03c..4e0645a 100644
+--- a/rocket_review/cli.py
++++ b/rocket_review/cli.py
+@@ -319,7 +319,7 @@ def run_one(
+     # (no snapshot-drift risk, and they don't front-load a large diff into the prompt).
+     # api/opencode can't run git, so they get the commit materialized instead. A mutable
+     # working-tree diff is already captured once into job.content and shared by everyone.
+-    if commit_content is not None and name in {"api", "opencode"}:
++    if commit_content is not None and name in {"codex", "claude"}:
+         job = replace(job, content=commit_content, commit=None)
+     try:
+         raw = BACKENDS[name].review(job)

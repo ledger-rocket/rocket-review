@@ -14,24 +14,28 @@ import argparse
 import json
 import os
 import shlex
-import signal
-import subprocess
 import sys
-import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from threading import Lock
 
-from rocket_review.backends import BACKENDS
-
 # evals/ is a script directory, not an installed package, so put it on the path
-# explicitly: `python -m evals.m0_sweep` would otherwise not find its sibling.
+# explicitly: `python -m evals.m0_sweep` would otherwise not find its siblings.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from eval_common import (  # noqa: E402
+    REPO_ROOT,
+    RESULTS_DIR,
+    SUBPROCESS_GRACE,
+    backend_versions,
+    extract_backend_result,
+    harness_rr_version,
+    invoke_rr,
+    new_results_path,
+    parse_backend_specs,
+)
 from strict_validator import (  # noqa: E402
     BACKEND_ERROR,
     OUTCOMES,
@@ -39,9 +43,6 @@ from strict_validator import (  # noqa: E402
     VALID,
     classify_output,
 )
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 # Representative diffs from this repo's own history: a one-line pin bump, a docs-only
 # edit, a config/YAML rewrite, a small bugfix, and the large multi-backend feature.
@@ -52,14 +53,6 @@ DEFAULT_COMMITS = ["4923a44", "dd56c0d", "c518e67", "1208fd3", "a8ee29f"]
 DEFAULT_RUNS = 3
 DEFAULT_TIMEOUT = 900
 DEFAULT_CONCURRENCY = 3
-
-# rr already bounds the backend with --timeout; this only covers rr's own startup,
-# git preflight and teardown so a wedged process can't stall the whole sweep.
-SUBPROCESS_GRACE = 120
-
-# How long rr gets to run its own backend teardown after SIGINT before we give up
-# and kill it. See _terminate_rr.
-CLEANUP_GRACE = 10
 
 
 @dataclass
@@ -85,112 +78,6 @@ class RunRecord:
     started_at: str
 
 
-def _tool_version(command: list[str]) -> str | None:
-    try:
-        proc = subprocess.run(
-            command, capture_output=True, text=True, errors="replace", timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    lines = (proc.stdout or proc.stderr).strip().splitlines()
-    return lines[0] if lines else None
-
-
-def _harness_rr_version() -> str | None:
-    # The rocket-review importable *here*, which is also where REVIEW_SCHEMA comes from.
-    # rr has no --version flag, so an --rr pointing at another environment cannot be
-    # interrogated: for those runs this names the harness, not the thing under test.
-    try:
-        return version("rocket-review")
-    except PackageNotFoundError:
-        return None
-
-
-def _backend_versions(backends: list[str]) -> dict[str, str | None]:
-    versions: dict[str, str | None] = {}
-    for name in backends:
-        binary = getattr(BACKENDS[name], "BINARY", None)
-        versions[name] = _tool_version([binary, "--version"]) if binary else None
-    return versions
-
-
-def parse_backend_specs(value: str) -> tuple[list[tuple[str, str]], str | None]:
-    """Parse `name:model,name:model` into pairs. Returns (specs, error)."""
-    specs: list[tuple[str, str]] = []
-    for item in value.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        name, sep, model = item.partition(":")
-        name, model = name.strip(), model.strip()
-        if not sep or not model:
-            return [], (
-                f"backend spec {item!r} must be name:model. The model is required because "
-                "rr's envelope reports the model argument, and a default run reports null."
-            )
-        if name not in BACKENDS:
-            return [], f"unknown backend {name!r}. Available: {', '.join(BACKENDS)}."
-        if any(existing == name for existing, _ in specs):
-            # One model per backend per sweep: case ids and the summary both key on the
-            # backend name, so two models for one backend would silently merge.
-            return [], f"backend {name!r} listed twice; run a separate sweep per model."
-        specs.append((name, model))
-    if not specs:
-        return [], "no backend given."
-    return specs, None
-
-
-def _terminate_rr(proc: subprocess.Popen, deadline: int) -> tuple[str, str, str]:
-    """Stop a timed-out rr without orphaning the backends it is paying for.
-
-    rr launches backend CLIs with start_new_session=True, so they sit in their own
-    process groups and outlive their parent; the only thing that tears them down is rr's
-    own KeyboardInterrupt handler. SIGKILL here would therefore leave a codex process
-    running and billing. Send SIGINT instead, give rr a short window to run that
-    teardown, and kill only if it ignores us.
-    """
-    note = ""
-    try:
-        proc.send_signal(signal.SIGINT)
-    except (OSError, ValueError):
-        note = "; rr had already exited"
-    try:
-        stdout, stderr = proc.communicate(timeout=CLEANUP_GRACE)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        stdout, stderr = proc.communicate()
-        note = f"; rr ignored SIGINT for {CLEANUP_GRACE}s and was killed — backend " \
-               "processes may still be running"
-    return stdout or "", stderr or "", (
-        f"rr exceeded the harness timeout ({deadline}s){note}"
-    )
-
-
-def _extract_backend_result(stdout: str, backend: str) -> tuple[dict | None, str | None]:
-    """Pull this backend's entry out of an rr --json envelope.
-
-    Returns (result, envelope_error): envelope_error is set when the envelope is missing
-    or malformed, which is a harness-visible failure rather than a backend format
-    problem. Every shape is checked rather than assumed — a structurally odd envelope
-    must degrade to one backend_error record, never take the sweep down and lose the run.
-    """
-    try:
-        envelope = json.loads(stdout)
-    except json.JSONDecodeError:
-        return None, "rr did not emit a JSON envelope"
-    if not isinstance(envelope, dict):
-        return None, "rr envelope is not a JSON object"
-    results = envelope.get("results")
-    if not isinstance(results, list):
-        return None, "rr envelope has no results list"
-    for result in results:
-        if isinstance(result, dict) and result.get("backend") == backend:
-            return result, None
-    return None, f"no {backend} entry in rr envelope"
-
-
 def run_case(
     rr_command: list[str], repo: Path, commit: str, backend: str,
     requested_model: str, run: int, timeout: int,
@@ -207,31 +94,14 @@ def run_case(
         "--timeout", str(timeout),
     ]
     case_id = f"{backend}:{commit}:r{run}"
-    started_at = datetime.now(UTC).isoformat()
-    start = time.monotonic()
-    deadline = timeout + SUBPROCESS_GRACE
-    exit_code: int | None = None
-    stdout = ""
-    stderr = ""
-    backend_error: str | None = None
-    try:
-        proc = subprocess.Popen(
-            command, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
-        )
-    except OSError as e:
-        backend_error = f"could not launch rr: {e}"
-    else:
-        try:
-            stdout, stderr = proc.communicate(timeout=deadline)
-        except subprocess.TimeoutExpired:
-            stdout, stderr, backend_error = _terminate_rr(proc, deadline)
-        exit_code = proc.returncode
+    invocation = invoke_rr(command, repo, timeout + SUBPROCESS_GRACE)
+    exit_code = invocation.exit_code
+    stderr = invocation.stderr
+    backend_error = invocation.harness_error
 
-    duration = round(time.monotonic() - start, 2)
     raw = ""
     if backend_error is None:
-        result, envelope_error = _extract_backend_result(stdout, backend)
+        result, envelope_error = extract_backend_result(invocation.stdout, backend)
         if exit_code != 0:
             # Exit status is authoritative. rr prints its envelope before exiting 1 on a
             # failed backend, so stdout can look complete for a run that did not succeed;
@@ -248,8 +118,8 @@ def run_case(
     common = {
         "case_id": case_id, "commit": commit, "backend": backend,
         "requested_model": requested_model, "run": run, "command": command,
-        "exit_code": exit_code, "duration_s": duration, "raw": raw,
-        "started_at": started_at,
+        "exit_code": exit_code, "duration_s": invocation.duration_s, "raw": raw,
+        "started_at": invocation.started_at,
     }
     if backend_error is not None:
         return RunRecord(
@@ -379,20 +249,17 @@ def main(argv: list[str] | None = None) -> int:
     ]
 
     args.out.mkdir(parents=True, exist_ok=True)
-    # Microseconds plus a random suffix, opened "x": two sweeps started in the same
-    # second must not truncate each other's (expensive, unrepeatable) results.
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
-    out_path = args.out / f"sweep-{stamp}-{uuid.uuid4().hex[:8]}.jsonl"
+    out_path = new_results_path(args.out, "sweep")
     header = {
         "type": "header",
         "started_at": datetime.now(UTC).isoformat(),
         # Named for what it is: the rocket-review in the harness environment, which is
         # also the source of the REVIEW_SCHEMA being validated against. It describes the
         # executed rr only when --rr points into this same environment.
-        "harness_rr_version": _harness_rr_version(),
+        "harness_rr_version": harness_rr_version(),
         "rr_command": rr_command,
         "backend_specs": dict(specs),
-        "backend_versions": _backend_versions(backends),
+        "backend_versions": backend_versions(backends),
         "repo": str(args.repo.resolve()),
         "commits": commits,
         "runs": args.runs,

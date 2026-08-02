@@ -1,0 +1,15 @@
+diff --git a/rocket_review/cli.py b/rocket_review/cli.py
+index 868e03c..339794f 100644
+--- a/rocket_review/cli.py
++++ b/rocket_review/cli.py
+@@ -329,8 +329,8 @@ def run_one(
+         if not isinstance(raw, str) or not raw.strip():
+             raise BackendError(f"{name} produced no review output")
+         return name, model, raw, None
+-    except BackendError as e:
+-        return name, model, None, str(e) or f"{name} backend failed"
++    except BackendError:
++        return name, model, "", None
+     except Exception as e:
+         return name, model, None, f"{type(e).__name__}: {e}"
+ 

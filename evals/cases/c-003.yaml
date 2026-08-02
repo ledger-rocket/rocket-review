@@ -1,0 +1,11 @@
+---
+# Clean control: a prompt rewrite with its tests (PR #23). The diff is prose plus
+# assertions rather than logic, which is where reviewers are most tempted to invent
+# severity — exactly what the veto rule is written to catch.
+id: c-003
+mode: diff
+source: merged-pr
+# Four files, ~119 lines. PR #23, merged and never reverted. Also the commit
+# `evals/prompts/pre-prompt-rewrite/` is frozen just before, so this case is the prompt change the
+# two shipped arms differ over; that is provenance, not a defect.
+repo_commit: 88e691a8ef687535c14c374ec3f353c08ed01b7b

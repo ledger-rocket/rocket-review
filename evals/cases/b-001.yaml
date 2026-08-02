@@ -1,0 +1,21 @@
+---
+# Smoke case. The real defect corpora are populated separately; this one exists to prove
+# the mutant pipeline end to end (worktree at repo_commit, patch applied, rr --diff).
+id: b-001
+mode: diff
+source: mutant
+diff: cases/b-001.patch
+repo_commit: 88e691a8ef687535c14c374ec3f353c08ed01b7b
+defect:
+  class: inverted-fallback-rank
+  file: rocket_review/models.py
+  span: [114, 117]
+  expected: >-
+    _severity_rank returns len(SEVERITIES) for an unrecognised severity instead of 0,
+    ranking an invented label below every threshold, so --fail-on stops gating findings
+    whose severity the model made up. The comment directly above still claims the
+    opposite.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_models.py::test_should_fail_unknown_severity_is_conservative

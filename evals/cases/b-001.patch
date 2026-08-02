@@ -1,0 +1,13 @@
+diff --git a/rocket_review/models.py b/rocket_review/models.py
+index c0f8a06..99818e8 100644
+--- a/rocket_review/models.py
++++ b/rocket_review/models.py
+@@ -114,7 +114,7 @@ def parse_backend_output(text: str, backend: str, model: str | None) -> BackendR
+ def _severity_rank(severity: str) -> int:
+     # Unknown severities rank as critical: an LLM inventing a label must not slip the gate.
+     s = severity.lower()
+-    return SEVERITIES.index(s) if s in SEVERITIES else 0
++    return SEVERITIES.index(s) if s in SEVERITIES else len(SEVERITIES)
+ 
+ 
+ def should_fail(results: list[BackendResult], threshold: str) -> bool:

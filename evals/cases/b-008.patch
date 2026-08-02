@@ -1,0 +1,13 @@
+diff --git a/rocket_review/backends/base.py b/rocket_review/backends/base.py
+index e2c99f7..d50f5b3 100644
+--- a/rocket_review/backends/base.py
++++ b/rocket_review/backends/base.py
+@@ -126,7 +126,7 @@ def run_command(cmd: list[str], *, stdin: str | None = None, timeout: int = TIME
+         out, err = proc.communicate(input=stdin, timeout=timeout)
+     except subprocess.TimeoutExpired:
+         _terminate()
+-        raise BackendError(f"{cmd[0]} timed out after {format_duration(timeout)}")
++        return ""
+     except BaseException:
+         # Any other exit — a KeyboardInterrupt that lands here, an OSError from
+         # communicate(), anything — must not strand the child running until the timeout.

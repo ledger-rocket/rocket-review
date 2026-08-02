@@ -1,0 +1,12 @@
+---
+# Clean control, deliberately the largest in the corpus: the multi-backend feature PR
+# (#3). Kept because a corpus of only small controls would measure false-positive rate
+# only where a reviewer has an easy time.
+id: c-006
+mode: diff
+source: merged-pr
+# 23 files, ~3.7k lines. PR #3, merged and never reverted. This is the case that costs
+# real wall time: M0 sweep data has large diffs running 300-600s per review, so budget
+# for it near the 900s default and raise --timeout rather than reading a timeout here as
+# a backend problem.
+repo_commit: a8ee29f02b7e711940c1630fbb8360ecadf5bbcb

@@ -1,0 +1,8 @@
+---
+# Clean control, mid-size feature: versioning the --json envelope (PR #21). Code, tests
+# and docs together — the ordinary shape of a reviewable change.
+id: c-004
+mode: diff
+source: merged-pr
+# Four files, ~244 lines. PR #21, merged and never reverted.
+repo_commit: 20285cdb188c40b873feb390e31c72726b5f442f
