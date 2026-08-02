@@ -287,6 +287,18 @@ def test_api_aliased_model_still_lists(monkeypatch):
     assert _FakeOpenAI.listed
 
 
+def test_api_alias_resolves_to_the_newest_dated_snapshot(monkeypatch):
+    # With several snapshots of one alias available, the newest wins — an alias must not
+    # silently pin the review to a stale build.
+    _install_fake_openai(monkeypatch)
+    monkeypatch.setattr(_FakeOpenAI.models, "list", lambda: [
+        types.SimpleNamespace(id=model_id)
+        for model_id in ("o5-mini-2026-01-01", "o5-mini-2026-06-01", "o5-mini-2025-09-01")
+    ])
+    api._call_openai("content", "instructions", "o5-mini", None)
+    assert _FakeOpenAI.last_create_kwargs["model"] == "o5-mini-2026-06-01"
+
+
 def test_codex_empty_output_raises(monkeypatch):
     def fake_run(cmd, *, stdin=None, timeout=900):
         out = cmd[cmd.index("-o") + 1]
@@ -550,6 +562,18 @@ def test_extract_referenced_files_blocks_sibling_prefix_escape(tmp_path, monkeyp
     assert "SECRET" not in out  # /repo-secret must not pass as inside /repo
 
 
+def test_extract_referenced_files_includes_a_file_of_exactly_max_size(tmp_path, monkeypatch):
+    # The cap is inclusive: a file landing exactly on the limit is still attached, so the
+    # boundary can't quietly drop context the reviewer was told to read.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "exact.py").write_text("E" * 64)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(api, "_get_repo_root", lambda: repo.resolve())
+    out = api.extract_referenced_files("see `exact.py`", max_size=64)
+    assert "E" * 64 in out
+
+
 def test_run_command_replaces_non_utf8_output():
     import sys
 
@@ -699,6 +723,16 @@ def test_terminate_active_commands_escalates_to_sigkill(monkeypatch):
         base._active_procs.discard(proc)
     assert (777, base.signal.SIGTERM) in signals
     assert (777, base.signal.SIGKILL) in signals
+
+
+def test_run_command_nonzero_exit_raises_at_the_base_layer(monkeypatch):
+    # The failure is caught where the process is run, not only where a backend is called:
+    # a non-zero exit must never return the child's partial stdout as a review.
+    proc = _FakeProc(returncode=3)
+    monkeypatch.setattr(base.subprocess, "Popen", lambda *a, **k: proc)
+    _patch_group_signals(monkeypatch)
+    with pytest.raises(BackendError, match=r"x failed \(exit 3\)"):
+        base.run_command(["x"])
 
 
 def test_run_command_unregisters_proc_after_run(monkeypatch):
