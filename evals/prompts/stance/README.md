@@ -6,6 +6,15 @@ never re-exported, `test_arms.py` pins its hash and asserts every file is `curre
 insertions only, and `rocket_review/prompts.py` stays as it is unless a paired sweep
 certifies this arm.
 
+Promotion scope, pre-registered before any sweep. A CERTIFIED verdict on this arm licenses
+promoting the `DIFF_REVIEW_PROMPT` changes to `rocket_review/prompts.py` and nothing else.
+The corpus can only certify `diff` mode — the one class at the ≥5 bar has all five of its
+independent cases there, and `code` mode has no clean controls to run the veto against — so
+the code and plan blocks stay eval-only until their own modes have certifying evidence.
+`get_prompt` composes one body per mode with no cross-mode interaction, which is what makes
+the partial promotion exact rather than a compromise: every mode then runs text that was
+either measured or left alone. See *Promotion scope* in `evals/README.md`.
+
 Placement. STANCE follows the role paragraph directly, because it qualifies who the
 reviewer is rather than what a finding must carry; placed after the evidence rule instead
 it would separate the posture from the role it modifies and read as a rider on evidence.

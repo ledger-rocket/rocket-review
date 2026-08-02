@@ -215,7 +215,8 @@ Three arms ship:
   weak-review patterns in all three. The treatment for the next paired experiment, so it is
   frozen from the day it was written — `test_arms.py` pins its hash and asserts every file
   is `current/` plus insertions, which is what makes a measured difference attributable to
-  the two blocks. Nothing in `rocket_review/prompts.py` moves unless a sweep certifies it.
+  the two blocks. Nothing in `rocket_review/prompts.py` moves unless a sweep certifies it,
+  and then only the `diff` body — see *Promotion scope*.
 
 Adding a prompt constant to `rocket_review/prompts.py` without adding it to every arm is
 also caught: `PROMPT_CONSTANTS` is asserted against the constants the runtime actually
@@ -743,6 +744,40 @@ Defect recall improves on at least one defect class that has **≥5 independent 
   mutant reviewed in `diff` mode and again in `code` mode counts once.
 - A class whose control recall is zero uses the absolute condition alone (≥2 additional
   defects found), since a relative improvement on zero is undefined rather than infinite.
+
+### Promotion scope — which of a certified arm's changes may ship
+
+A verdict certifies the **modes the evidence came from**, not the arm as an object. An arm
+may change several mode bodies at once; a CERTIFIED verdict licenses promoting only those
+bodies whose mode could have certified anything.
+
+Against this corpus, that is **`diff` mode alone**:
+
+- `dropped-guard`, the only class at the ≥5 bar, has all five of its independent cases in
+  `diff` mode. Its two `code`-mode re-expressions are twins of cases already counted and
+  never certify (*Twin dedup*).
+- `plan-flaw` is the only class in `plan` mode and has 2 cases — reported, cannot certify.
+- `code` mode has **no clean controls at all** — the eight are 6 `diff` and 2 `plan` — so
+  the veto, which is computed on clean controls alone, cannot be evaluated there. A
+  `code`-body change could clear a sweep without its false-positive cost being looked at
+  once.
+
+So a certified arm ships its `DIFF_REVIEW_PROMPT` changes to `rocket_review/prompts.py`.
+Its `CODE_REVIEW_PROMPT` and `PLAN_REVIEW_PROMPT` changes stay eval-only until those modes
+have their own certifying evidence: a ≥5-case class **in that mode**, and clean controls in
+that mode to run the veto against.
+
+**Why the partial promotion is exact and not a compromise.** `get_prompt` selects one body
+per mode and concatenates it with one output-format section. No body reads another and
+there is no cross-mode state, so promoting the measured `diff` body while leaving the live
+`code` and `plan` bodies untouched yields a configuration in which every mode runs text
+that was either measured (`diff`) or unchanged (`code`, `plan`). Nothing unmeasured ships.
+Promoting all three off `diff`-mode evidence would ship two bodies no case in this corpus
+can speak to.
+
+**Why the unpromotable bodies stay in the arm anyway.** Their runs are reported signal —
+worth reading, and worth designing the next corpus around. Removing them would cost that
+for nothing, because this rule already refuses to act on them.
 
 ### Scoring rule — when a finding matches a defect
 
