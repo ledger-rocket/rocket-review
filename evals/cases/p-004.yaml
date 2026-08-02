@@ -1,0 +1,9 @@
+---
+# Clean control for the plan path: a small additive change with a real dependency order,
+# a named risk and four falsifiable acceptance criteria. CRITICAL/HIGH findings here are
+# false-positive candidates — see the clean-control adjudication rule in evals/README.md.
+id: p-004
+mode: plan
+source: seeded-plan
+repo_commit: 2456bb657528d61897ac21e18eabea8ae37a5d8f
+path: cases/p-004-plan.md

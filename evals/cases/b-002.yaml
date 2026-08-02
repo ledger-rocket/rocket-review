@@ -1,0 +1,20 @@
+---
+# The containment check that stops a doc link from reaching outside the doc's directory
+# becomes a string-prefix test — the exact bug the comment above it warns against.
+id: b-002
+mode: diff
+source: mutant
+diff: cases/b-002.patch
+repo_commit: 2456bb657528d61897ac21e18eabea8ae37a5d8f
+defect:
+  class: dropped-guard
+  file: rocket_review/cli.py
+  span: [108, 108]
+  expected: >-
+    The link-containment check is a string-prefix test instead of is_relative_to, so a
+    sibling directory whose name extends the base (/project-other beside /project) passes
+    as inside it and its files are read into the prompt.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_docs.py::test_read_doc_blocks_sibling_prefix_escape

@@ -1,0 +1,19 @@
+---
+# A boundary shifted by one on the API backend's shared deadline: exhausted-to-exactly-zero
+# stops failing closed and is passed to the SDK as timeout=0.
+id: b-007
+mode: diff
+source: mutant
+diff: cases/b-007.patch
+repo_commit: 2456bb657528d61897ac21e18eabea8ae37a5d8f
+defect:
+  class: off-by-one-bound
+  file: rocket_review/backends/api.py
+  span: [174, 174]
+  expected: >-
+    A budget consumed to exactly zero by model resolution is no longer treated as
+    exhausted, and timeout=0 is handed to the SDK instead of raising a BackendError.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_backends.py::test_api_timeout_exhausted_by_resolution_fails_closed

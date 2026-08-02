@@ -1,0 +1,13 @@
+diff --git a/rocket_review/models.py b/rocket_review/models.py
+index c0f8a06..350bc70 100644
+--- a/rocket_review/models.py
++++ b/rocket_review/models.py
+@@ -128,7 +128,7 @@ def should_fail(results: list[BackendResult], threshold: str) -> bool:
+         return True
+     limit = SEVERITIES.index(threshold)
+     return any(
+-        _severity_rank(f.severity) <= limit
++        _severity_rank(f.severity) >= limit
+         for r in results for f in r.findings
+     )
+ 

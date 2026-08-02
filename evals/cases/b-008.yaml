@@ -1,0 +1,21 @@
+---
+# The timeout path tears the process group down but returns an empty string instead of
+# raising, so a run that produced nothing reads as a run that produced nothing wrong.
+id: b-008
+mode: diff
+source: mutant
+diff: cases/b-008.patch
+repo_commit: 2456bb657528d61897ac21e18eabea8ae37a5d8f
+defect:
+  class: swallowed-error
+  file: rocket_review/backends/base.py
+  span: [129, 129]
+  expected: >-
+    A backend that outlives its timeout returns "" rather than raising BackendError, so
+    the timeout is reported as a review instead of an error and never reaches the gate.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_backends.py::test_run_command_timeout_message_uses_seconds_when_not_whole_minutes
+  - tests/test_backends.py::test_run_command_timeout_message_uses_minutes_for_whole_minutes
+  - tests/test_backends.py::test_run_command_timeout_kills_process_group

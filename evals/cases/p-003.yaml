@@ -1,0 +1,16 @@
+---
+# Seeded plan flaw: a success criterion nothing can fail. Steps and risks are sound and
+# specific, so the only thing to find is that the plan cannot tell whether it worked.
+id: p-003
+mode: plan
+source: seeded-plan
+repo_commit: 2456bb657528d61897ac21e18eabea8ae37a5d8f
+path: cases/p-003-plan.md
+defect:
+  class: plan-flaw
+  file: cases/p-003-plan.md
+  span: [27, 28]
+  expected: >-
+    The only validation is that start-up "feels snappier" — no measurement, no threshold
+    and no automated test — so a change that made start-up slower would pass it, and the
+    byte-identical-output requirement in step 3 is left unverified entirely.

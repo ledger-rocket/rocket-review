@@ -7,8 +7,12 @@ Developer tooling, never installed and never run in CI. Two harnesses live here:
 - **The paired prompt-arm harness** (`paired_runner.py`, `prompts/`, `cases/`, `tier1.py`)
   — whether a prompt change made `rr` sharper or just noisier.
 
-Both spend real tokens, both refuse to start when `CI` is set in the environment, and
-nothing in `.github/workflows/` invokes either. Only the test modules run in CI, and none
+Both spend real tokens. A third script, `verify_cases.py`, spends none but runs the
+project's test suite once per case; it is what proves the defect corpus is made of real
+defects. See *The corpora*.
+
+All three refuse to start when `CI` is set in the environment, and nothing in
+`.github/workflows/` invokes any of them. Only the test modules run in CI, and none
 of them launches a backend. They need the `dev` extra, which is where `jsonschema` and
 `PyYAML` live — runtime `dependencies` stays empty on purpose, and no runtime path reads
 YAML or validates strictly.
@@ -250,13 +254,15 @@ id: b-017
 mode: diff            # diff | code | plan — which prompt/mode this case exercises
 source: mutant        # mutant | merged-pr | seeded-plan
 diff: cases/b-017.patch     # mutant only; path relative to evals/
-path: cases/b-017-plan.md   # seeded-plan / code only; path relative to evals/
+path: cases/b-017-plan.md   # seeded-plan only; path relative to evals/
 repo_commit: <oid>    # exact snapshot the case is defined against
-defect:               # present for defect-bearing cases only (corpus B)
-  class: dropped-null-check
+defect:               # present for defect-bearing cases only (corpus B and seeded plans)
+  class: dropped-guard
   file: rocket_review/models.py
   span: [84, 91]      # inclusive line range a correct finding must overlap
   expected: one-line description of the injected defect
+killed_by:            # mutants only; written by verify_cases.py, never by hand
+  - tests/test_models.py::test_should_fail_threshold
 ```
 
 A case with no `defect` is a **clean control**; that absence is the whole definition.
@@ -264,11 +270,15 @@ A case with no `defect` is a **clean control**; that absence is the whole defini
 How each source is materialized, and why:
 
 - **`mutant`** — a detached `git worktree` at `repo_commit` with the patch applied to the
-  working tree, reviewed with `rr --diff`. That is the faithful shape: the agentic backends
-  are told to run `git diff HEAD` and can navigate the whole snapshot around the change,
-  exactly as on a real uncommitted edit. Feeding the patch on stdin instead would hand every
-  backend the same bytes but strip the repository context `rr`'s primary mode depends on, so
-  a prompt change affecting repo navigation would not show up at all.
+  working tree. In `diff` mode it is reviewed with `rr --diff`. That is the faithful shape:
+  the agentic backends are told to run `git diff HEAD` and can navigate the whole snapshot
+  around the change, exactly as on a real uncommitted edit. Feeding the patch on stdin
+  instead would hand every backend the same bytes but strip the repository context `rr`'s
+  primary mode depends on, so a prompt change affecting repo navigation would not show up
+  at all. In `code` mode the same worktree is reviewed as `rr <defect.file>` — the whole
+  file, with nothing pointing at the change — which is what asks whether a defect is only
+  found when a diff frames it. The path is passed repo-relative so findings cite the path
+  the manifest and the file:line resolver use, not a throwaway worktree's absolute path.
 - **`merged-pr`** — `rr --commit <oid>` in the repo itself. A commit is immutable, so this
   is already reproducible without a worktree, and it exercises rr's `git show` path.
 - **`seeded-plan`** (and standalone `code` files) — reviewed as an ordinary file argument
@@ -288,9 +298,67 @@ state to be discovered later.
 `rr --mode` is always passed explicitly from the manifest rather than left to
 auto-detection, so the manifest decides which prompt constant the arm is measured on.
 
-**Three smoke cases ship** (`b-001` mutant, `c-001` clean control, `p-001` plan) — enough to
-prove the pipeline end to end, one per source type. Populating real corpora is separate work;
-nothing here should be read as a corpus.
+## The corpora
+
+Every case is sourced from **this repository only**. It is public, so nothing from another
+codebase can be committed here; that bounds how varied the corpus can be, and the caveats at
+the end of this file are written with that in mind.
+
+### Corpus B — injected defect mutants (recall)
+
+14 cases over 11 distinct one-hunk mutations of `rocket_review/`; three of the eleven are
+expressed a second time as `code`-mode cases (same patch, different id) so the same defect
+can be scored with and without a diff framing it. Six class labels — `dropped-guard`,
+`flipped-comparison`, `off-by-one-bound`, `swallowed-error`, `wrong-variable`, two distinct
+mutants each, plus `b-001`'s singleton `inverted-fallback-rank` — across five runtime
+modules (`cli.py`, `models.py`, `backends/base.py`, `backends/api.py`, `backends/claude.py`).
+
+**A mutant is admitted only if the project's own test suite kills it**, and the proof is
+mechanical:
+
+```
+python evals/verify_cases.py            # check the committed corpus
+python evals/verify_cases.py --write    # record what killed each mutant
+```
+
+It checks out `repo_commit` in a throwaway worktree, applies the patch, runs the suite, and
+writes the failing node ids to the manifest's `killed_by`. It first runs the suite unpatched
+at each `repo_commit` and refuses to judge anything if that is not green — against a red
+baseline every "kill" could be the pre-existing failure. A mutant nothing fails on is an
+**equivalent mutant**: the code still behaves correctly, so it is not a defect and scoring a
+reviewer on finding it would measure nothing. Those candidates are dropped rather than
+weakened into cases.
+
+The script is minutes of worktrees and full suite runs, so it is developer tooling, not a CI
+gate. What CI enforces is the cheap half: `test_cases.py` asserts every mutant manifest
+*carries* a `killed_by` naming tests that exist at its `repo_commit`, that `defect.file` is a
+file the patch actually touches, and that `defect.span` ends inside that file. Those catch a
+manifest that drifted from its patch; only `verify_cases.py` can tell you the patch is still
+a real defect.
+
+### Corpus C — clean controls (false positives)
+
+Six merged, never-reverted commits from this repo's own history, reviewed with
+`rr --commit <oid>`. Sizes span a 13-line docs change to a 23-file, ~3.7k-line feature —
+deliberately, because a corpus of only small controls would measure the false-positive rate
+only where a reviewer has an easy time. The large one (`c-006`) is also the expensive one:
+M0 data has large diffs running 300–600s per review, so it sits near the default 900s
+timeout and wants `--timeout` raised rather than its timeouts read as backend failures.
+
+Every commit here is squash-merged, so `repo_commit` is the merge commit itself and
+`git show <oid>` is the whole PR diff; there is no separate parent to review against.
+
+### Plan set
+
+Four cases: two seeded-flaw plans (`class: plan-flaw` — one step depending on something no
+step creates, one plan whose only success criterion cannot fail) and two controls. The
+seeded flaws are planted in plans that are otherwise deliberately sound, so a reviewer has
+to read for the flaw rather than for general weakness. `p-001` predates the designed set and
+is a pipeline smoke case rather than a scoring control; read it as such.
+
+Four cases cannot certify anything about plan-mode prompts, and the decision rules below say
+so — no defect class reaches the ≥5 independent cases the success criterion requires, in the
+plan set or anywhere else in this corpus.
 
 ## Running a paired sweep
 
@@ -486,9 +554,13 @@ launches a real backend.
 - `test_arms.py` — the `current/` drift guard, the constant-coverage guard, hash stability
   and sensitivity, arm loading errors, and that applying an arm actually changes what
   `get_prompt` and `build_agent_prompt` return.
-- `test_cases.py` — manifest validation, and materialization of all three source types
-  against a throwaway git repository, including that a patch which does not apply fails
-  loudly and leaves no worktree behind.
+- `test_cases.py` — manifest validation, materialization of all three source types against a
+  throwaway git repository (including that a patch which does not apply fails loudly and
+  leaves no worktree behind), and the integrity of the shipped corpus itself: every case's
+  `repo_commit` is a full oid naming a commit in this repo, every patch parses and touches
+  the file its manifest scores against, every referenced path exists at that commit, every
+  span ends inside its file, every mutant carries a `killed_by`, and no clean control has
+  grown a defect block. All of it reads the git object database; nothing is checked out.
 - `test_paired_runner.py` — the injection proof, arm alternation, and complete paired runs
   against a stub `codex` binary: result-file shape, per-row provenance, the retry path, CI
   refusal, and worktree teardown.

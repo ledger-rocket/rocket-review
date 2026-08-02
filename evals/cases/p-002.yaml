@@ -1,0 +1,17 @@
+---
+# Seeded plan flaw: a step that consumes something no step ever produces. The rest of the
+# plan is deliberately sound — ordering, risks and validation all hold up — so a reviewer
+# that flags step 4 has read the plan as a dependency graph rather than a list.
+id: p-002
+mode: plan
+source: seeded-plan
+# Provenance only. A plan is a standalone artifact, not a repository snapshot.
+repo_commit: 2456bb657528d61897ac21e18eabea8ae37a5d8f
+path: cases/p-002-plan.md
+defect:
+  class: plan-flaw
+  file: cases/p-002-plan.md
+  span: [19, 21]
+  expected: >-
+    Step 4 reads "the review cache written in step 3", but step 3 writes no cache and no
+    step in the plan creates one; the caching behaviour step 4 promises has no source.

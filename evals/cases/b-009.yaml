@@ -1,0 +1,23 @@
+---
+# A BackendError is caught and converted into a successful empty review, which unlike the
+# timeout mutant also flips the process exit status.
+id: b-009
+mode: diff
+source: mutant
+diff: cases/b-009.patch
+repo_commit: 2456bb657528d61897ac21e18eabea8ae37a5d8f
+defect:
+  class: swallowed-error
+  file: rocket_review/cli.py
+  span: [332, 333]
+  expected: >-
+    A failing backend is reported as an empty successful review rather than an error, so a
+    run in which every backend failed prints nothing and exits 0.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - evals/test_paired_runner.py::test_a_failed_run_is_retried_once_and_both_attempts_are_kept
+  - evals/test_paired_runner.py::test_a_run_that_never_succeeds_is_recorded_not_dropped
+  - tests/test_cli.py::test_fanout_all_fail_exits_1
+  - tests/test_cli.py::test_fanout_partial_fail_warns_and_exits_0
+  - tests/test_cli.py::test_text_mode_all_fail_omits_hint

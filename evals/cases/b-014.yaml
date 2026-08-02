@@ -1,0 +1,20 @@
+---
+# b-003's mutant reviewed as a whole file. claude.py is 64 lines, so this is the case
+# where whole-file context is most nearly free — the sandbox rationale is right there.
+id: b-014
+mode: code
+source: mutant
+diff: cases/b-003.patch
+repo_commit: 2456bb657528d61897ac21e18eabea8ae37a5d8f
+defect:
+  class: dropped-guard
+  file: rocket_review/backends/claude.py
+  span: [37, 37]
+  expected: >-
+    The git view command is allow-listed as a `:*` wildcard rather than by exact match, so
+    prompt-injected content can append `--output=<path>` to it and write files through git
+    despite the read-only review sandbox.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_backends.py::test_claude_git_view_rule_is_exact_match_not_wildcard

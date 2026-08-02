@@ -1,0 +1,9 @@
+---
+# Clean control, smallest end of the range: a docs-only PR (#19). Nothing here is a code
+# change at all, so a CRITICAL or HIGH finding is a strong false-positive signal.
+# See the clean-control adjudication rule in evals/README.md before scoring any of them.
+id: c-002
+mode: diff
+source: merged-pr
+# One file, 13 lines. PR #19, merged and never reverted.
+repo_commit: dd56c0d388b841fac84e07f968f84eea95953044

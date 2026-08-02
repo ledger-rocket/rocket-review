@@ -1,0 +1,13 @@
+diff --git a/rocket_review/cli.py b/rocket_review/cli.py
+index 868e03c..a148e7c 100644
+--- a/rocket_review/cli.py
++++ b/rocket_review/cli.py
+@@ -105,7 +105,7 @@ def read_doc_with_links(doc_path: Path) -> str:
+         linked_path = (base_dir / link).resolve()
+         # Prevent path traversal outside the doc's directory. is_relative_to, not a
+         # string-prefix check: /a/b-sibling must not pass as inside /a/b.
+-        if not linked_path.is_relative_to(base_dir):
++        if not str(linked_path).startswith(str(base_dir)):
+             print(f"Warning: skipping link outside project: {raw_link}", file=sys.stderr)
+             continue
+         if linked_path.is_file():
