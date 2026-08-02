@@ -8,7 +8,9 @@ that mean nothing. Everything else builds on that proof.
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
+from threading import Lock
 
 import pytest
 import rocket_review.prompts as rr_prompts
@@ -21,12 +23,19 @@ from paired_runner import (
     CONTROL,
     MAX_ATTEMPTS,
     TREATMENT,
+    RepGroup,
     build_tasks,
     main,
+    resolve_interpreter,
+    run_groups,
 )
 from rr_arm_launcher import ARM_ENV
 from strict_validator import BACKEND_ERROR, VALID
 from tier1 import compute
+
+#: Well-formed 40-hex oids that no repository has.
+FAKE_OID = "abc1234000000000000000000000000000000000"
+ABSENT_OID = "deadbeefbeefbeefbeefbeefbeefbeefbeefbeef"
 
 MARKER = "MARKER-0d5f-{name}-ARM-{arm}"
 
@@ -155,7 +164,8 @@ def test_arms_alternate_within_each_case(tmp_path, arms):
     directory = tmp_path / "corpus" / "cases"
     directory.mkdir(parents=True)
     (directory / "c-001.yaml").write_text(
-        "id: c-001\nmode: diff\nsource: merged-pr\nrepo_commit: abc1234\n", encoding="utf-8"
+        f"id: c-001\nmode: diff\nsource: merged-pr\nrepo_commit: {FAKE_OID}\n",
+        encoding="utf-8",
     )
     cases = load_cases(directory)
     staged = {"c-001": None}
@@ -178,7 +188,8 @@ def test_order_index_restarts_per_case_and_backend(tmp_path, arms):
     directory.mkdir(parents=True)
     for case_id in ("a-001", "b-002"):
         (directory / f"{case_id}.yaml").write_text(
-            f"id: {case_id}\nmode: diff\nsource: merged-pr\nrepo_commit: abc1234\n",
+            f"id: {case_id}\nmode: diff\nsource: merged-pr\n"
+            f"repo_commit: {FAKE_OID}\n",
             encoding="utf-8",
         )
     cases = load_cases(directory)
@@ -190,6 +201,109 @@ def test_order_index_restarts_per_case_and_backend(tmp_path, arms):
     for task in tasks:
         grouped.setdefault((task.case.id, task.backend), []).append(task.order_index)
     assert list(grouped.values()) == [[0, 1]] * 4
+
+
+# --- scheduling ---------------------------------------------------------------------------
+
+
+def fake_groups(cases=("a", "b"), backends=("codex",), runs=2):
+    """Rep groups whose tasks carry only what the scheduler looks at."""
+    groups = []
+    for case_id in cases:
+        for backend in backends:
+            for rep in range(1, runs + 1):
+                groups.append(RepGroup(
+                    stream=(case_id, backend), rep=rep,
+                    tasks=(f"{case_id}-r{rep}-{CONTROL}", f"{case_id}-r{rep}-{TREATMENT}"),
+                ))
+    return groups
+
+
+def test_a_repetitions_two_runs_finish_before_the_next_one_starts():
+    # The pairing is only real if it survives scheduling. Submitting the whole sweep lets a
+    # fast arm run ahead, so a repetition's control and treatment stop facing the same
+    # conditions — which is the confound the design exists to remove.
+    events: list[tuple[str, str]] = []
+    lock = Lock()
+
+    def execute(task):
+        with lock:
+            events.append(("start", task))
+        time.sleep(0.01)
+        with lock:
+            events.append(("end", task))
+
+    run_groups(fake_groups(runs=3), concurrency=4, execute=execute)
+
+    order = [(kind, task) for kind, task in events]
+    for case_id in ("a", "b"):
+        for rep in (1, 2):
+            ends = [
+                i for i, (kind, task) in enumerate(order)
+                if kind == "end" and task.startswith(f"{case_id}-r{rep}-")
+            ]
+            starts = [
+                i for i, (kind, task) in enumerate(order)
+                if kind == "start" and task.startswith(f"{case_id}-r{rep + 1}-")
+            ]
+            assert len(ends) == 2 and len(starts) == 2
+            assert max(ends) < min(starts), f"{case_id} rep{rep + 1} started too early"
+
+
+def test_different_cases_still_run_concurrently():
+    running = 0
+    peak = 0
+    lock = Lock()
+
+    def execute(task):
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        time.sleep(0.02)
+        with lock:
+            running -= 1
+
+    run_groups(fake_groups(cases=("a", "b"), runs=1), concurrency=4, execute=execute)
+    assert peak > 2, "two cases with four slots should overlap"
+
+
+def test_only_a_bounded_number_of_runs_is_ever_queued():
+    started: list[str] = []
+    lock = Lock()
+
+    def execute(task):
+        with lock:
+            started.append(task)
+        time.sleep(0.005)
+
+    run_groups(fake_groups(cases=("a", "b", "c"), runs=3), concurrency=2, execute=execute)
+    assert len(started) == 18
+
+
+@pytest.mark.parametrize("blow_up", [RuntimeError, KeyboardInterrupt])
+def test_a_failure_stops_the_sweep_instead_of_launching_the_rest(blow_up):
+    # Every queued task is a billed review, so an interrupt has to mean "stop spending",
+    # not "finish the queue". executor.map submits everything up front and cannot.
+    started: list[str] = []
+    lock = Lock()
+
+    def execute(task):
+        with lock:
+            started.append(task)
+            first = len(started) == 1
+        if first:
+            raise blow_up("stop")
+        time.sleep(0.005)
+
+    groups = fake_groups(cases=("a", "b", "c"), runs=3)
+    with pytest.raises(blow_up):
+        run_groups(groups, concurrency=2, execute=execute)
+
+    total = sum(len(g.tasks) for g in groups)
+    assert total == 18
+    # Only the failing repetition's own two runs may have started.
+    assert len(started) <= 2, started
 
 
 # --- end to end ------------------------------------------------------------------------
@@ -242,6 +356,7 @@ def test_a_paired_run_produces_a_complete_result_file(
         assert row["arm_hash"] == arm_hash
         assert row["repo_commit"] == header["cases"][0]["repo_commit"]
         assert row["requested_model"] == "stub-model"
+        assert row["sweep_id"] == header["sweep_id"]
         assert row["backend_version"] == "stub-codex 0.0.1"
         assert row["harness_rr_version"] == header["harness_rr_version"]
         # Which decision rule governs this row, on the row itself — under the same key
@@ -389,10 +504,53 @@ def test_an_a_a_run_records_and_summarises_both_roles_separately(
     assert f"codex / {TREATMENT} (alpha)" in summary[1]
     assert [line.split()[-1] for line in summary] == ["4", "4"]
 
-    metrics = compute(rows, lambda commit, path: 5, git_repo)
+    metrics, incomplete = compute(rows, lambda commit, path: 5, git_repo)
+    assert incomplete == []
     assert [(m.arm_role, m.scores.runs_scored) for m in metrics] == [
         (CONTROL, 4), (TREATMENT, 4),
     ]
+
+
+def test_the_interpreter_is_resolved_to_an_absolute_path():
+    resolved, error = resolve_interpreter(sys.executable)
+    assert error is None
+    assert Path(resolved).is_absolute()
+    # Not symlink-resolved: a venv's bin/python points at the base interpreter, which
+    # cannot import the rocket_review the venv installed.
+    assert Path(resolved).name == Path(sys.executable).name
+
+
+def test_an_interpreter_that_does_not_exist_is_rejected_before_any_spend(
+    tmp_path, corpus, arms, monkeypatch, capsys,
+):
+    monkeypatch.delenv("CI", raising=False)
+    control, treatment = arms
+    assert main([
+        "--control", str(control), "--treatment", str(treatment),
+        "--backends", "codex:stub-model", "--cases", str(corpus),
+        "--python", str(tmp_path / "no-such-python"),
+    ]) == 1
+    assert "is not on PATH and is not a file" in capsys.readouterr().err
+
+
+def test_a_case_naming_an_unknown_commit_stops_the_run_before_any_spend(
+    tmp_path, git_repo, corpus, arms, monkeypatch, stub_backend, capsys,
+):
+    monkeypatch.delenv("CI", raising=False)
+    for key, value in stub_backend.env().items():
+        monkeypatch.setenv(key, value)
+    (corpus / "c-001.yaml").write_text(
+        f"id: c-001\nmode: diff\nsource: merged-pr\nrepo_commit: {ABSENT_OID}\n",
+        encoding="utf-8",
+    )
+    control, treatment = arms
+    assert main([
+        "--control", str(control), "--treatment", str(treatment),
+        "--backends", "codex:stub-model", "--cases", str(corpus),
+        "--repo", str(git_repo), "--out", str(tmp_path / "results"),
+    ]) == 1
+    assert "repo_commit not found" in capsys.readouterr().err
+    assert stub_backend.captured_prompts() == []
 
 
 def test_an_unknown_arm_is_rejected(tmp_path, corpus, arms, monkeypatch, capsys):
