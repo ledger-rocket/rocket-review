@@ -2,12 +2,12 @@
 # One guard lifted out of a run of four sibling argument checks, so the block still reads
 # as complete. The removal is silent rather than loud: --fail-on keeps working, it just
 # never has anything to gate on. A deleted guard has no lines of its own, so the span is
-# where it belonged: argument parsing through the sibling check it used to sit beside.
-#
-# Adjudication hazard: the sharpest evidence sits OUTSIDE the span. --fail-on's own help
-# text at cli.py:429 still reads "(requires --json)", and any repo-navigating backend can
-# quote it — so a reviewer who has this exactly right may well cite the argparse block
-# rather than the deleted check, and score as a miss under scoring rule 2.
+# where it belonged — and it starts at the strongest evidence rather than at the deletion.
+# --fail-on's own help text at cli.py:429 still promises "(requires --json)", which is the
+# line a repo-navigating backend is most likely to quote when it notices nothing enforces
+# that promise; citing it is having the defect right, so the span covers it through to the
+# sibling check the deleted guard sat beside. Rule 3's human read is what still separates
+# that from a finding that merely lands in the same region.
 id: b-017
 mode: diff
 source: mutant
@@ -16,7 +16,7 @@ repo_commit: c4fd306b4312f3c915766709a3468fbd13f0fc40
 defect:
   class: dropped-guard
   file: rocket_review/cli.py
-  span: [436, 440]
+  span: [429, 440]
   expected: >-
     --fail-on is accepted without --json. Prose results carry no parsed findings, so
     should_fail sees nothing to trip on and `rr --diff --fail-on critical` exits 0 on

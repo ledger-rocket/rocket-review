@@ -1,14 +1,17 @@
 ---
 # The timeout path tears the process group down but returns an empty string instead of
-# raising. Every CLI backend re-detects the emptiness a layer down, so what the mutation
-# actually costs is the diagnosis — and, on codex, the detection too.
+# raising. Every CLI backend re-detects the emptiness a layer down, so the run still fails —
+# it just fails with the wrong cause. That is what makes this `lost-diagnostic` rather than
+# `swallowed-error`: "" is a value every caller already rejects, so nothing survives it. Its
+# sibling b-018 returns the child's real stdout on the exit-status path, which no caller
+# rejects, and that one does turn a failure into a review.
 id: b-008
 mode: diff
 source: mutant
 diff: cases/b-008.patch
 repo_commit: 88e691a8ef687535c14c374ec3f353c08ed01b7b
 defect:
-  class: swallowed-error
+  class: lost-diagnostic
   file: rocket_review/backends/base.py
   span: [129, 129]
   expected: >-

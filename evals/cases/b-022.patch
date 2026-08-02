@@ -1,0 +1,13 @@
+diff --git a/rocket_review/backends/api.py b/rocket_review/backends/api.py
+index 46bfdce..cc18bc2 100644
+--- a/rocket_review/backends/api.py
++++ b/rocket_review/backends/api.py
+@@ -78,7 +78,7 @@ def extract_referenced_files(text: str, max_size: int = 100_000) -> str:
+         p = Path(c).resolve()
+         # Only include files within the repo/cwd. is_relative_to, not a string-prefix
+         # check: /repo-sibling must not pass as inside /repo.
+-        if not p.is_relative_to(repo_root):
++        if not str(p).startswith(str(repo_root)):
+             continue
+         if p.is_file() and p not in seen:
+             try:
