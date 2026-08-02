@@ -6,6 +6,6 @@ id: c-003
 mode: diff
 source: merged-pr
 # Four files, ~119 lines. PR #23, merged and never reverted. Also the commit
-# `evals/prompts/pre-m3a/` is frozen just before, so this case is the prompt change the
+# `evals/prompts/pre-prompt-rewrite/` is frozen just before, so this case is the prompt change the
 # two shipped arms differ over; that is provenance, not a defect.
 repo_commit: 88e691a8ef687535c14c374ec3f353c08ed01b7b

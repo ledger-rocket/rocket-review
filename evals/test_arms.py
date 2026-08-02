@@ -47,7 +47,7 @@ def test_current_arm_is_byte_identical_to_the_live_prompts():
 
 
 def test_pre_m3a_arm_loads_and_differs_from_current():
-    pre = load_arm("pre-m3a")
+    pre = load_arm("pre-prompt-rewrite")
     assert pre.content_hash != load_arm("current").content_hash
     assert set(pre.texts) == set(PROMPT_CONSTANTS)
 
