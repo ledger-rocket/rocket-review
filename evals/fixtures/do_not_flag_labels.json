@@ -1,0 +1,101 @@
+{
+  "about": [
+    "Hand-labelled titles for the DO-NOT-FLAG tripwire in evals/tier1.py. `label` is the",
+    "category a human says the finding belongs to, or null for a finding the prompt does",
+    "want raised. `why` is recorded to keep the labels readable and to pin the design",
+    "decision that classification reads the title only — several negatives below carry",
+    "trigger words in `why` and must still come back null."
+  ],
+  "labelled": [
+    {
+      "title": "Inconsistent indentation in the new helper",
+      "why": "The block mixes four and eight spaces.",
+      "label": "formatting"
+    },
+    {
+      "title": "Trailing whitespace on the added lines",
+      "why": "Several new lines end in a space.",
+      "label": "formatting"
+    },
+    {
+      "title": "Line exceeds 100 characters",
+      "why": "The call does not fit the configured width.",
+      "label": "formatting"
+    },
+    {
+      "title": "Imports are not sorted alphabetically",
+      "why": "shutil comes after subprocess in the stdlib group.",
+      "label": "import-ordering"
+    },
+    {
+      "title": "Mixed single-quote and double-quote strings in the new module",
+      "why": "The file uses both styles.",
+      "label": "quote-style"
+    },
+    {
+      "title": "Missing semicolon after the return statement",
+      "why": "ASI will insert one, but the project style requires it explicitly.",
+      "label": "quote-style"
+    },
+    {
+      "title": "run_case does not follow the project naming convention",
+      "why": "Other runners in this package are named *_sweep.",
+      "label": "naming"
+    },
+    {
+      "title": "Missing type annotations on run_attempt",
+      "why": "The signature leaves every parameter untyped.",
+      "label": "missing-annotations"
+    },
+    {
+      "title": "load_cases has no docstring",
+      "why": "Every other public function in the module documents itself.",
+      "label": "docs-only"
+    },
+    {
+      "title": "Typo in the comment above _severity_rank",
+      "why": "\"invented\" is spelled \"invneted\".",
+      "label": "docs-only"
+    },
+    {
+      "title": "should_fail returns False when a backend errored, so the gate fails open",
+      "why": "A backend that never produced a review lets --fail-on pass silently.",
+      "label": null
+    },
+    {
+      "title": "Diff is normalized before it reaches the backends",
+      "why": "get_diff must return the patch verbatim; stripping trailing whitespace changes the bytes each backend reviews, so two backends can disagree about a line that was never in the diff.",
+      "label": null
+    },
+    {
+      "title": "Trailing comma in the emitted JSON breaks strict parsers",
+      "why": "The envelope is assembled by string concatenation and leaves a comma before the closing brace.",
+      "label": null
+    },
+    {
+      "title": "Semicolon-separated PATH entries are split on ':' on every platform",
+      "why": "os.pathsep is ';' on Windows, so the split silently produces one bogus entry.",
+      "label": null
+    },
+    {
+      "title": "The return type annotation says str but the function returns bytes",
+      "why": "Callers that trust the annotation will concatenate bytes onto a str and raise.",
+      "label": null
+    },
+    {
+      "title": "Blank line handling in extract_json drops the closing fence",
+      "why": "The regex stops at the first blank line, so a fenced object containing one is truncated.",
+      "label": null
+    },
+    {
+      "title": "Importing yaml at module scope makes evals fail without the dev extra",
+      "why": "PyYAML is a dev-only dependency and cases.py is imported by the runner unconditionally.",
+      "label": null
+    },
+    {
+      "title": "extract_json returns the first fenced block even when a later one is the payload",
+      "why": "A review that quotes example JSON before its real answer is parsed as the example.",
+      "label": null
+    }
+  ]
+}
