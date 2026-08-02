@@ -898,6 +898,21 @@ because the sample is thin would be failing in the wrong direction — the whole
 *What this release can and cannot decide* is that this harness may block on less evidence
 than it may certify on.
 
+**At `--runs 5` there is no slack at all.** Five is a *floor on complete repetitions*, not a
+target: a repetition that loses either arm leaves both (see *Complete repetitions*), so one
+failed run on any scored case — a defect case of the certifying class or a clean control —
+drops that case to four and voids the certification outright. It does not weaken the result;
+it removes it. The long, noisy cases are exactly the ones that time out, so this is not a
+remote possibility.
+
+**Run decision sweeps at `--runs 7`.** Seven absorbs two lost repetitions and still clears
+the floor, and of the depths worth considering it also has the most lenient majority bar: a
+case scored at seven needs 4 of 7, where six needs 4 of 6 and five needs 3 of 5. Six buys one
+repetition of slack and tightens the bar to do it. The floor stays at five because five is
+the depth the thresholds above were argued at — going deeper costs tokens and buys
+robustness, which is a budget decision rather than a rule, and each case is majority-tested
+at the depth it actually reached rather than the depth that was requested.
+
 ### Veto arithmetic
 
 Per clean-control case, the mean count of **adjudicated-false-positive** CRITICAL+HIGH
@@ -947,6 +962,15 @@ recorded against a finding that satisfies scoring rules 1 and 2 — a finding ab
 defect. The claim is that the defect is not a defect, so it is made where the evidence for
 it is.
 
+Worth naming rather than trusting nobody notices: **invalidation is a general lever on the
+arithmetic**, not only the twin hole above. Dropping a case the control found and the
+treatment missed raises the treatment's gain; dropping one both arms found shrinks the
+baseline the ≥20% is measured against. Two things bound it, and neither is a matter of
+taste — the class still needs ≥5 independent cases afterwards, so invalidations run out of
+room quickly, and every one on a defect case must be recorded against a rule-1-and-2 finding
+with a written rationale in a committed artifact. The incentive exists; the audit trail is
+the answer to it.
+
 ### Zero baselines and the criterion itself
 
 `≥20%` relative **and** `≥2` absolute, both, exactly as the success criterion is written
@@ -992,9 +1016,10 @@ land on a verdict code**:
 - `3` no verdict could be computed: unreadable input, an incomplete adjudication, a sweep
   where no repetition survived;
 - `4` `--pending` drafted a work list. Drafting decides nothing, so it must not exit 0;
-- `64` a usage error. argparse exits 2 by default, which is VETOED here, so the parser is
-  overridden — a caller gating a prompt change on exit status must not read a mistyped flag
-  as a blocked change.
+- `64` a usage error, and `--help`. Both of argparse's own exits are verdicts here — 2 on a
+  bad argument is VETOED, 0 after printing help is CERTIFIED — so the parser is overridden
+  and neither can reach one. A caller gating a prompt change on exit status must not read a
+  mistyped flag as a blocked change or a help screen as a certified one.
 
 A sweep that could not be scored, a sweep that was refused, and a command that was never
 run are three different outcomes, and a caller that could not tell them apart would read one

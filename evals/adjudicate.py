@@ -501,7 +501,9 @@ class BackendCertification:
     reasons: list[str] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
+# Not frozen, unlike its neighbours: a frozen dataclass advertises a __hash__ this one
+# cannot honour, because `by_role` is a dict.
+@dataclass
 class CrossArmInconsistency:
     title: str
     #: Arm role -> the distinct decisions recorded against this exact finding text there.
@@ -1164,16 +1166,22 @@ def render_pending(sweep_id: str, results: Path, pending: list[PendingFinding]) 
 
 
 class _Parser(argparse.ArgumentParser):
-    """An argument parser whose usage errors cannot be mistaken for a verdict.
+    """An argument parser that cannot exit on a verdict code.
 
-    argparse exits 2 on a bad argument, and 2 is VETOED here. A caller gating a prompt
-    change on exit status would read a mistyped flag as a blocked change — quietly, and in
-    the direction that looks responsible.
+    Two of argparse's defaults are verdicts here: it exits 2 on a bad argument, which is
+    VETOED, and 0 after printing `--help`, which is CERTIFIED. A caller gating a prompt
+    change on exit status would read a mistyped flag as a blocked change and a help screen
+    as a certified one — quietly, and one of them in the direction that looks responsible.
+    Both become EXIT_USAGE: asking for usage and getting usage wrong are the same kind of
+    outcome, and neither is a decision about a prompt.
     """
 
     def error(self, message: str) -> NoReturn:
         self.print_usage(sys.stderr)
         self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
+
+    def exit(self, status: int = 0, message: str | None = None) -> NoReturn:
+        super().exit(EXIT_USAGE if status == 0 else status, message)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

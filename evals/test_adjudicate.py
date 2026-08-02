@@ -1049,13 +1049,16 @@ def test_adjudications_are_required_unless_drafting(tmp_path, capsys):
     assert "--adjudications is required" in capsys.readouterr().err
 
 
-def test_a_usage_error_never_lands_on_a_verdict_code(tmp_path):
-    # argparse exits 2 by default, and 2 is VETOED. A caller gating on status would read a
-    # mistyped flag as a blocked prompt change.
+@pytest.mark.parametrize("argv", [["--not-a-flag"], ["--help"]])
+def test_argparse_never_lands_on_a_verdict_code(tmp_path, capsys, argv):
+    # Both of argparse's own exits are verdicts here: 2 on a bad argument is VETOED, and 0
+    # after --help is CERTIFIED. A caller gating on status would read a mistyped flag as a
+    # blocked prompt change and a help screen as a certified one.
     with pytest.raises(SystemExit) as excinfo:
-        main([str(tmp_path / "paired.jsonl"), "--not-a-flag"])
+        main([str(tmp_path / "paired.jsonl"), *argv])
+    capsys.readouterr()
     assert excinfo.value.code == EXIT_USAGE
-    assert excinfo.value.code not in (0, 1, 2, 3)
+    assert excinfo.value.code not in (0, 1, 2, 3, EXIT_DRAFTED)
 
 
 def test_drafting_does_not_exit_on_a_verdict_code(tmp_path, capsys):
