@@ -338,8 +338,8 @@ are:
 
 | class | distinct mutants | what it names |
 |-------|------------------|---------------|
-| `dropped-guard` | 5 | a check that still runs but no longer excludes what it was written to exclude |
-| `swallowed-error` | 5 | a failure path that returns instead of raising |
+| `dropped-guard` | 5 | a check removed outright, or left running but no longer excluding what it was written to exclude |
+| `swallowed-error` | 5 | a failure that stops producing a failing outcome — returned instead of raised, or recorded and then not acted on |
 | `flipped-comparison` | 2 | a comparison or exit-status test read the wrong way round |
 | `off-by-one-bound` | 2 | a boundary shifted by one element or one line |
 | `wrong-set-members` | 1 | a membership test naming the wrong members |
@@ -349,6 +349,14 @@ are:
 Labels describe what the mutation *is*, not how it was authored, because recall is
 aggregated by them: a label two mutants share only loosely would pool numbers about
 different things. That is why the last three are singletons rather than one tidier bucket.
+
+`dropped-guard` and `swallowed-error` are adjacent enough that the boundary between them is
+worth stating, since both now carry the gate: a mutant is **`swallowed-error`** when the thing
+suppressed is a failure of the review pipeline itself — a backend that errored, timed out, or
+produced nothing — and **`dropped-guard`** when what gets through is invalid input, an invalid
+argument combination, or malformed model output. `b-021` is the case that most needs the rule:
+it mutates a boolean guard, but the arm it removes is the errored-backend arm, so it lands on
+the `swallowed-error` side.
 
 The two five-case classes are the ones the decision rules can certify on, so what makes
 their members *independent* is written out here rather than left to the label:
@@ -361,19 +369,24 @@ their members *independent* is written out here rather than left to the label:
   a silent no-op (`b-017`). Three modules, five checks, five different things getting through.
 - **`swallowed-error`** — `base.run_command`'s timeout arm (`b-008`) and its non-zero-exit arm
   (`b-018`), two different ways a subprocess fails and two different things returned in place
-  of the raise; `cli.run_one`'s `BackendError` handler (`b-009`) and the blank-output check
-  three lines above it (`b-019`), one triggered by a backend that raised and one by a backend
-  that returned nothing; and `api._output_text`'s unfinished-response check (`b-020`), where
-  the fragment of a truncated review is returned as the whole of it.
+  of the raise; `cli.run_one`'s `BackendError` handler (`b-009`), where the error is lost
+  before it is ever recorded; `api._output_text`'s unfinished-response check (`b-020`), where
+  the fragment of a truncated review is returned as the whole of it; and `models.should_fail`'s
+  errored-backend arm (`b-021`), where the error *is* recorded and then not acted on, so the
+  gate passes a run that never completed. Four modules, five failures, five ways of not
+  failing.
 
-Three of those pairs share a file, and two of the three share a function: `b-008`/`b-018` are
-both in `run_command`, `b-009`/`b-019` both in `run_one`, and `b-003`/`b-015` are the claude
-sandbox's two layers. They are admitted as distinct because the *trigger* differs — a hung
-process vs. one that exited non-zero, a backend that raised vs. one that returned whitespace,
-a widened allow rule vs. an allowlist that stopped being consulted — and so does what the
+Two of those pairs share a file, and one shares a function: `b-008`/`b-018` are both in
+`run_command`, and `b-003`/`b-015` are the claude sandbox's two layers. They are admitted as
+distinct because the *trigger* differs — a hung process vs. one that exited non-zero, a
+widened allow rule vs. an allowlist that stopped being consulted — and so does what the
 caller is then handed. Proximity is not the test; a second flavour of one bug would not be
 admitted however far apart it sat. Where that reading is arguable it is arguable in the
 direction of fewer independent cases, which is why it is written down here to be argued with.
+
+Ids are never reused. A case retired during construction leaves its number behind rather than
+freeing it, because the id keys every result row and a reused one would make two different
+defects share a history — so the sequence can have gaps.
 
 **A mutant is admitted only if the project's own test suite kills it**, and the proof is
 mechanical:
@@ -420,7 +433,8 @@ is a pipeline smoke case rather than a scoring control; read it as such.
 
 Four cases cannot certify anything about plan-mode prompts, and the decision rules below say
 so: `plan-flaw` is two independent cases, well under the ≥5 the success criterion requires.
-The two classes that do reach five are mutant classes scored in `diff` and `code` mode, so
+The two classes that do reach five are mutant classes, every case of both scored in `diff`
+mode; of the two, only `dropped-guard` has `code`-mode twins, and neither has a plan case. So
 nothing that clears the gate says anything about the plan prompt.
 
 ## Running a paired sweep
