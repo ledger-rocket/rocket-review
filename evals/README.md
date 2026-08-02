@@ -777,9 +777,10 @@ JSONL and the case manifests, so a verdict can be recomputed and disputed line b
 ```yaml
 sweep_id: 9f3c1a2b4d5e6f708192a3b4c5d6e7f8   # must match the results file's sweep
 results_file: paired-20260802T162519.864653Z-312692e3.jsonl   # provenance only
-# Written by --pending, checked before anything scores. Do not edit.
-corpus_digest: 4d0f2b8e9c1a7f36d5b0e8c24a91f7de3b60c5a8192e4f7d0a3b6c9e2f5081d4a
-results_digest: 7c1e4a90b2d8f635e0a7c94b1f8d26e30594a7c1b8e2f0d635a9c47e10b8d2f96
+# Written by --pending, checked before anything scores. Do not edit. Placeholders here:
+# a real one is 64 hex characters of sha256, and no hand-written value will ever match.
+corpus_digest: "0000000000000000000000000000000000000000000000000000000000000000"
+results_digest: "0000000000000000000000000000000000000000000000000000000000000000"
 adjudicator: your-name
 decisions:
   - case_id: b-002
