@@ -2,7 +2,12 @@
 
 Prompt-engineering patterns in `rocket_review/prompts.py` are adapted from GSD
 (<https://github.com/gsd-build/get-shit-done>), used under the MIT licence reproduced
-below.
+below. Most of what is borrowed is technique rather than text, but the finding-validity
+wording is close enough to GSD's to be treated as derived: each review prompt's "Every
+finding MUST carry a severity. A finding without one is not valid output." follows
+`agents/gsd-code-reviewer.md`, which requires a classification on every finding and states
+that "Findings without a classification are not valid output." The project's declared
+licence is `Apache-2.0 AND MIT` for that reason.
 
 ## GSD (get-shit-done)
 
