@@ -396,16 +396,17 @@ def test_api_refusal_raises_instead_of_returning_empty_text(monkeypatch):
     [
         (_response(status="incomplete", output_text="half a review",
                    incomplete_details=types.SimpleNamespace(reason="max_output_tokens")),
-         ("unfinished", "incomplete", "max_output_tokens")),
+         ("unfinished", "incomplete", "max_output_tokens", "partial output discarded")),
         (_response(status="failed",
                    error=types.SimpleNamespace(message="server had a bad day")),
-         ("unfinished", "failed", "server had a bad day")),
-        (_response(status="incomplete"), ("unfinished", "incomplete")),
+         ("unfinished", "failed", "server had a bad day", "partial output discarded")),
+        (_response(status="incomplete"), ("unfinished", "incomplete", "partial output discarded")),
     ],
 )
 def test_api_unfinished_response_raises_naming_the_cause(monkeypatch, response, fragments):
     # A truncated or failed response must not reach the caller as a review: its partial
-    # text would be reported as the model's answer.
+    # text would be reported as the model's answer. Prose loses that fragment, so the
+    # error has to say the output was dropped rather than imply nothing was produced.
     _install_fake_openai(monkeypatch)
     _FakeOpenAI.next_response = response
     with pytest.raises(BackendError) as exc:

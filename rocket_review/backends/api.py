@@ -142,15 +142,17 @@ def _status_detail(response) -> str:
 def _output_text(response) -> str:
     """The review text, or a BackendError naming why there is none.
 
-    A refused or truncated response still carries an `output_text` of "" — returning it
-    would present a non-answer as a clean review, and under --json the parser would blame
-    the model for unparsable output rather than surfacing the refusal.
+    A refusal carries an `output_text` of ""; a truncated response carries a fragment.
+    Either one returned as-is reads like a finished review, and under --json the parser
+    would blame the model for unparsable output rather than surfacing the cause. A prose
+    review does lose the fragment, which is why the error says so — a partial review
+    presented as a whole one is worse than an error.
     """
     status = getattr(response, "status", None)
     if status is not None and status != "completed":
         raise BackendError(
             f"OpenAI API returned an unfinished response "
-            f"(status {status}){_status_detail(response)}"
+            f"(status {status}){_status_detail(response)}; partial output discarded"
         )
     if refusal := _refusal(response):
         raise BackendError(f"OpenAI API refused the request: {refusal}")

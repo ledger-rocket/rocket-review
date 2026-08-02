@@ -220,8 +220,9 @@ That guard is also why the surface is exactly five names. `get_prompt` composes 
 body with one output-format section, and the *prose* format sections are private to
 `prompts.py`: a sixth public constant would need a file in every arm, and the frozen
 historical arm cannot grow one without ceasing to be history. Nothing is lost, because
-every measured run is `--json`, where the assembled prompt is the arm's mode body plus the
-arm's `JSON_OUTPUT_ADDENDUM` and nothing else — asserted in `test_arms.py`.
+every measured run is `--json`, where the assembled prompt is the arm's mode body, its
+`PROJECT_STANDARDS_ADDENDUM` when the case supplies docs, and its `JSON_OUTPUT_ADDENDUM` —
+arm bytes throughout, with no live text anywhere in it. Asserted in `test_arms.py`.
 
 ## The injection seam
 
