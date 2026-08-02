@@ -3,6 +3,11 @@
 # as complete. The removal is silent rather than loud: --fail-on keeps working, it just
 # never has anything to gate on. A deleted guard has no lines of its own, so the span is
 # where it belonged: argument parsing through the sibling check it used to sit beside.
+#
+# Adjudication hazard: the sharpest evidence sits OUTSIDE the span. --fail-on's own help
+# text at cli.py:429 still reads "(requires --json)", and any repo-navigating backend can
+# quote it — so a reviewer who has this exactly right may well cite the argparse block
+# rather than the deleted check, and score as a miss under scoring rule 2.
 id: b-017
 mode: diff
 source: mutant

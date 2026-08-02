@@ -1,6 +1,7 @@
 ---
 # The timeout path tears the process group down but returns an empty string instead of
-# raising, so a run that produced nothing reads as a run that produced nothing wrong.
+# raising. Every CLI backend re-detects the emptiness a layer down, so what the mutation
+# actually costs is the diagnosis — and, on codex, the detection too.
 id: b-008
 mode: diff
 source: mutant
@@ -11,8 +12,12 @@ defect:
   file: rocket_review/backends/base.py
   span: [129, 129]
   expected: >-
-    A backend that outlives its timeout returns "" rather than raising BackendError, so
-    the timeout is reported as a review instead of an error and never reaches the gate.
+    A backend that outlives its timeout gets "" back instead of a BackendError, so the
+    timeout is never named: claude and opencode re-detect the empty string and fail with
+    "produced no output", losing the cause and the elapsed budget. codex discards the
+    return value and reads its output file instead, so it reports the same — unless the
+    killed process had already written part of that file, in which case the fragment is
+    returned as a complete review.
 # Admission proof: these tests pass at repo_commit and fail with `diff` applied.
 # Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
 killed_by:
