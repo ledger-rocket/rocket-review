@@ -262,11 +262,11 @@ text is present and the live prompt text is *absent* — substitution, not addit
 One YAML file per case under `evals/cases/`. The file name is the case id.
 
 ```yaml
-id: b-017
+id: b-999             # illustrative; the shipped ids run b-001…
 mode: diff            # diff | code | plan — which prompt/mode this case exercises
 source: mutant        # mutant | merged-pr | seeded-plan
-diff: cases/b-017.patch     # mutant only; path relative to evals/
-path: cases/b-017-plan.md   # seeded-plan only; path relative to evals/
+diff: cases/b-999.patch     # mutant only; path relative to evals/
+path: cases/b-999-plan.md   # seeded-plan only; path relative to evals/
 repo_commit: <oid>    # exact snapshot the case is defined against
 defect:               # present for defect-bearing cases only (corpus B and seeded plans)
   class: dropped-guard
@@ -330,7 +330,7 @@ it, and no mutant can be materialized at all. A case authored on a branch theref
 
 ### Corpus B — injected defect mutants (recall)
 
-14 cases over 11 distinct one-hunk mutations of `rocket_review/`; three of the eleven are
+20 cases over 17 distinct one-hunk mutations of `rocket_review/`; three of the seventeen are
 expressed a second time as `code`-mode cases (same patch, different id) so the same defect
 can be scored with and without a diff framing it. Across five runtime modules (`cli.py`,
 `models.py`, `backends/base.py`, `backends/api.py`, `backends/claude.py`), the class labels
@@ -338,10 +338,10 @@ are:
 
 | class | distinct mutants | what it names |
 |-------|------------------|---------------|
-| `dropped-guard` | 2 | a check that still runs but no longer excludes what it was written to exclude |
+| `dropped-guard` | 5 | a check that still runs but no longer excludes what it was written to exclude |
+| `swallowed-error` | 5 | a failure path that returns instead of raising |
 | `flipped-comparison` | 2 | a comparison or exit-status test read the wrong way round |
 | `off-by-one-bound` | 2 | a boundary shifted by one element or one line |
-| `swallowed-error` | 2 | a failure path that returns instead of raising |
 | `wrong-set-members` | 1 | a membership test naming the wrong members |
 | `wrong-reducer` | 1 | a reduction over an ordering that selects the opposite end |
 | `inverted-fallback-rank` | 1 | `b-001`, prior work |
@@ -349,6 +349,31 @@ are:
 Labels describe what the mutation *is*, not how it was authored, because recall is
 aggregated by them: a label two mutants share only loosely would pool numbers about
 different things. That is why the last three are singletons rather than one tidier bucket.
+
+The two five-case classes are the ones the decision rules can certify on, so what makes
+their members *independent* is written out here rather than left to the label:
+
+- **`dropped-guard`** — the doc-link containment check (`cli.read_doc_with_links`, `b-002`);
+  the exact-match git allow rule in the claude sandbox's tool allowlist (`b-003`); that same
+  sandbox's deny-by-default permission mode, the layer the allowlist depends on to mean
+  anything (`b-015`); the verdict-validity check in `models.parse_backend_output` (`b-016`);
+  and the `--fail-on` requires `--json` argument check, whose removal turns the CI gate into
+  a silent no-op (`b-017`). Three modules, five checks, five different things getting through.
+- **`swallowed-error`** — `base.run_command`'s timeout arm (`b-008`) and its non-zero-exit arm
+  (`b-018`), two different ways a subprocess fails and two different things returned in place
+  of the raise; `cli.run_one`'s `BackendError` handler (`b-009`) and the blank-output check
+  three lines above it (`b-019`), one triggered by a backend that raised and one by a backend
+  that returned nothing; and `api._output_text`'s unfinished-response check (`b-020`), where
+  the fragment of a truncated review is returned as the whole of it.
+
+Three of those pairs share a file, and two of the three share a function: `b-008`/`b-018` are
+both in `run_command`, `b-009`/`b-019` both in `run_one`, and `b-003`/`b-015` are the claude
+sandbox's two layers. They are admitted as distinct because the *trigger* differs — a hung
+process vs. one that exited non-zero, a backend that raised vs. one that returned whitespace,
+a widened allow rule vs. an allowlist that stopped being consulted — and so does what the
+caller is then handed. Proximity is not the test; a second flavour of one bug would not be
+admitted however far apart it sat. Where that reading is arguable it is arguable in the
+direction of fewer independent cases, which is why it is written down here to be argued with.
 
 **A mutant is admitted only if the project's own test suite kills it**, and the proof is
 mechanical:
@@ -394,8 +419,9 @@ to read for the flaw rather than for general weakness. `p-001` predates the desi
 is a pipeline smoke case rather than a scoring control; read it as such.
 
 Four cases cannot certify anything about plan-mode prompts, and the decision rules below say
-so — no defect class reaches the ≥5 independent cases the success criterion requires, in the
-plan set or anywhere else in this corpus.
+so: `plan-flaw` is two independent cases, well under the ≥5 the success criterion requires.
+The two classes that do reach five are mutant classes scored in `diff` and `code` mode, so
+nothing that clears the gate says anything about the plan prompt.
 
 ## Running a paired sweep
 
@@ -569,26 +595,33 @@ as the results it would reinterpret.
 
 ### What this release can and cannot decide
 
-> **This corpus is measurement-only. It cannot certify a prompt change.**
+> **The success gate is usable on two defect classes. Everywhere else this corpus is still
+> measurement-only.**
 >
-> The success criterion below needs a defect class with **≥5 independent cases**, and no
-> class in the shipped corpus has five. The corpus was built breadth-first on purpose —
-> covering many defect classes shallowly is what tells us which classes are worth deepening
-> — but the consequence is deliberate and absolute: **no treatment can pass the success
-> gate today**, whatever its numbers look like.
+> The success criterion below needs a defect class with **≥5 independent cases**.
+> `dropped-guard` and `swallowed-error` each have five (listed case by case under *Corpus B*),
+> so a prompt change can now be certified — on those two classes and on nothing else.
 >
-> What the harness *can* do now: establish the run-to-run noise floor (A/A), and apply the
-> veto — which needs only clean controls, of which there are enough. So a prompt change can
-> be **blocked** by these results; it cannot be **certified** by them.
+> Every other class is below five and is **reported but cannot certify**: `flipped-comparison`
+> (2), `off-by-one-bound` (2), `plan-flaw` (2), `wrong-set-members` (1), `wrong-reducer` (1),
+> `inverted-fallback-rank` (1). A treatment whose only gain is there has not passed the gate,
+> whatever its numbers look like; those rows are descriptive.
+>
+> Five is the floor the rule names, not a comfortable sample, and it is why the criterion is
+> conjunctive — a relative improvement AND ≥2 additional defects. On five cases one case
+> flipping is worth a large percentage and exactly one defect, so the absolute half of the
+> rule refuses it however good the ratio looks.
 >
 > **Two cases of the same mutant in different modes are not independent.** A `diff`-mode and
 > a `code`-mode re-expression of one seeded defect is one case counted twice: the same bug,
 > the same lines, the same reason a reviewer would or would not see it. Counting them as two
 > toward the ≥5 threshold would let the gate be satisfied by re-encoding rather than by
-> evidence.
+> evidence. The five-case counts above are of distinct mutants; the corpus's three `code`-mode
+> re-expressions are not among them.
 >
-> Deepening at least one defect class to five genuinely independent cases is planned, and is
-> a prerequisite for any gated prompt change shipping on the strength of this harness.
+> Unchanged: the veto is computed on clean controls alone, so it is indifferent to how large
+> any defect class is. A prompt change can still be **blocked** by results that could never
+> have certified it.
 
 ### Veto — must hold
 
@@ -616,8 +649,9 @@ Defect recall improves on at least one defect class that has **≥5 independent 
 **≥20% relative AND ≥2 additional defects found**. Both conditions, not either.
 
 - Classes with fewer than 5 cases are reported but **cannot certify** a change. They are too
-  small to distinguish a real improvement from a run of luck. **This is currently every
-  class in the corpus** — see *What this release can and cannot decide* above.
+  small to distinguish a real improvement from a run of luck. **`dropped-guard` and
+  `swallowed-error` are the only classes at or above the bar today** — see *What this release
+  can and cannot decide* above for the rest.
 - **Independent** means a separate defect, not a separate encoding of one. The same seeded
   mutant reviewed in `diff` mode and again in `code` mode counts once.
 - A class whose control recall is zero uses the absolute condition alone (≥2 additional
