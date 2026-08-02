@@ -24,9 +24,14 @@ sent.
 - **`decode_failure`** — no JSON object could be recovered at all (a refusal, prose, a
   truncated response). The record keeps a 400-character excerpt so a human can triage what
   happened; nothing here guesses at the cause.
-- **`backend_error`** — the run never produced output to judge: timeout, non-zero exit,
-  crash. Only the sweep runner can observe this, so only it records it; the validator never
-  returns it.
+- **`backend_error`** — the run never produced output that can be judged: timeout, non-zero
+  exit, crash, malformed envelope. Only the sweep runner can observe this, so only it records
+  it; the validator never returns it.
+
+**Exit status is authoritative.** `rr` prints its envelope *before* exiting non-zero when a
+backend fails, so stdout for a failed run can look complete. Any non-zero exit is
+`backend_error` regardless of what was on stdout — otherwise a run that did not succeed could
+be scored `valid`.
 
 Two details worth knowing when reading results:
 
@@ -40,7 +45,7 @@ Two details worth knowing when reading results:
 
 ## Where the raw output comes from
 
-The sweep runs `rr --commit <sha> --backend <name> --json --full` and validates
+The sweep runs `rr --commit <sha> --backend <name>:<model> --json --full` and validates
 `results[].raw` from the envelope. That field is the exact string
 `parse_backend_output` was handed, which makes it the most faithful available view of what
 the backend produced — anything reconstructed from the parsed `findings` would already have
@@ -53,24 +58,51 @@ truncated review is unparsable by construction, so every long review would score
 ## Running a sweep
 
 ```
-python evals/m0_sweep.py --commits 4923a44,dd56c0d --backends codex --runs 3 --timeout 900
+python evals/m0_sweep.py --commits 4923a44,dd56c0d --backends codex:gpt-5.6-sol \
+    --runs 3 --timeout 900
 ```
 
-Defaults: five representative commits from this repo's history, the `codex` backend, 3 runs
-each, a 900s per-run timeout passed through to `rr`, and up to 3 parallel `rr` subprocesses
-(`--concurrency`). `--rr` overrides the command used to invoke rocket-review, which is how
-you exercise the harness against a stub instead of a real backend.
+`--backends` is required and every spec must be `name:model` — see *Model provenance* below.
+One model per backend per sweep; run separate sweeps to compare two models of the same
+backend, since case ids and the summary both key on the backend name.
+
+Other defaults: five representative commits from this repo's history, 3 runs each, a 900s
+per-run timeout passed through to `rr`, and up to 3 parallel `rr` subprocesses
+(`--concurrency`).
 
 **Every case is a real, billed backend review.** The script refuses to start when `CI` is
-set in the environment, and nothing in `.github/workflows/` invokes it. Only
-`test_strict_validator.py` runs in CI, and it never launches a backend.
+set in the environment, and nothing in `.github/workflows/` invokes it. Only the two test
+modules run in CI, and neither launches a backend.
+
+A run that outlives its timeout is stopped with SIGINT, not SIGKILL. `rr` starts each backend
+CLI in its own process group and only tears those groups down from its own interrupt handler,
+so killing `rr` outright would leave a backend running — and billing — with nothing left to
+stop it. The harness gives `rr` ten seconds to do that cleanup before killing it as a last
+resort, and says so in the record when it comes to that.
+
+### Model provenance
+
+The recorded `requested_model` is the model *asked for*, not the one that answered. `rr`'s
+envelope reports the model argument it was given, and a backend left on its own default
+reports `null` — codex, for instance, resolves its default from `~/.codex/config.toml`
+internally, where neither `rr` nor this harness can see it. Requiring an explicit model per
+backend is what keeps the field meaningful; recording the genuinely resolved model would need
+`rr` to report it in the envelope, which is out of scope here.
+
+`--rr` overrides the command used to invoke rocket-review. It is meant for stubs or another
+`rr` in this same environment: `REVIEW_SCHEMA` and the recorded `harness_rr_version` both come
+from the rocket-review importable *here*, so pointing `--rr` at a different installation
+leaves the results with unverified schema provenance — they may have been validated against a
+schema the executed `rr` never sent.
 
 ### Output
 
-One JSONL file per sweep in `evals/results/`. The first line is a header (rr version,
-backend CLI versions, commits, backends, runs, timeout, concurrency); every line after it is
-one run: case id, backend, resolved model, the exact command, exit code, wall time, the raw
-output, and the validator outcome with its errors or excerpt.
+One JSONL file per sweep in `evals/results/`, named with a microsecond timestamp and a random
+suffix and created exclusively, so two sweeps started in the same second cannot truncate each
+other's results. The first line is a header (harness rocket-review version, backend specs,
+backend CLI versions, commits, runs, timeout, concurrency); every line after it is one run:
+case id, backend, requested model, the exact command, exit code, wall time, the raw output,
+and the validator outcome with its errors or excerpt.
 
 `results/` is gitignored and never committed — the records embed full review text for real
 commits, and they are measurements of a specific model version at a specific time rather
@@ -108,7 +140,9 @@ on `--json` output has to account for it before the results mean anything.
 
 `evals/test_strict_validator.py` covers the validator with fixtures only (compliant review,
 extra property, invalid severity, missing required field, non-JSON prose, fenced JSON).
-`evals/test_m0_sweep.py` covers the sweep's pure parts — envelope extraction and the summary
-counts — without launching rr or a backend. Both are collected by the repo's normal
-`pytest -q` run. They require the `dev` extra, which is where `jsonschema` lives — runtime
-`dependencies` stays empty on purpose.
+`evals/test_m0_sweep.py` covers envelope extraction (including the malformed shapes that must
+degrade to a record rather than take the sweep down), backend-spec parsing, the summary
+counts, and `run_case` end to end against a generated stub `rr` — no real backend is ever
+launched. Both modules are collected by the repo's normal `pytest -q` run. They require the
+`dev` extra, which is where `jsonschema` lives — runtime `dependencies` stays empty on
+purpose.
