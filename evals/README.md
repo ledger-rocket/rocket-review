@@ -200,7 +200,7 @@ An arm is immutable input. The runner loads it, content-hashes it (sha256 over a
 length-prefixed concatenation in a fixed constant order), and writes that hash on **every**
 result row, so any row can be traced back to the exact prompt bytes that produced it.
 
-Two arms ship:
+Three arms ship:
 
 - **`current/`** — a byte-exact export of the constants at HEAD. `test_arms.py` asserts it
   still matches the live `prompts.py`, so editing the runtime prompts without re-exporting
@@ -210,6 +210,12 @@ Two arms ship:
   overwriting one that is already filled in.
 - **`pre-prompt-rewrite/`** — the constants as of commit `41da0e8`, the last commit before the review
   prompts were rewritten. Frozen history; never re-exported.
+- **`stance/`** — `current/` at commit `285ec3b` with two blocks inserted and nothing else
+  touched: an adversarial STANCE paragraph in the code and diff bodies, and a list of
+  weak-review patterns in all three. The treatment for the next paired experiment, so it is
+  frozen from the day it was written — `test_arms.py` pins its hash and asserts every file
+  is `current/` plus insertions, which is what makes a measured difference attributable to
+  the two blocks. Nothing in `rocket_review/prompts.py` moves unless a sweep certifies it.
 
 Adding a prompt constant to `rocket_review/prompts.py` without adding it to every arm is
 also caught: `PROMPT_CONSTANTS` is asserted against the constants the runtime actually
@@ -1109,7 +1115,8 @@ launches a real backend.
   `run_case` end to end against a generated stub `rr`.
 - `test_arms.py` — the `current/` drift guard, the constant-coverage guard, hash stability
   and sensitivity, arm loading errors, and that applying an arm actually changes what
-  `get_prompt` and `build_agent_prompt` return.
+  `get_prompt` and `build_agent_prompt` return. Also the frozen arms: a pinned hash each,
+  and for `stance/` that every file is `current/` with lines added and none removed.
 - `test_cases.py` — manifest validation, materialization of all three source types against a
   throwaway git repository (including that a patch which does not apply fails loudly and
   leaves no worktree behind), and the integrity of the shipped corpus itself: every case's
@@ -1121,7 +1128,10 @@ launches a real backend.
   which is why `ci.yml`'s test job needs `fetch-depth: 0`.
 - `test_paired_runner.py` — the injection proof, arm alternation, and complete paired runs
   against a stub `codex` binary: result-file shape, per-row provenance, the retry path, CI
-  refusal, and worktree teardown.
+  refusal, and worktree teardown. Plus `current` against `stance` over a diff-and-plan
+  corpus, which is where the shipped treatment's added text is shown to reach a backend at
+  all — the two arms differ only by insertions, so a launcher that fell back to the live
+  prompts would otherwise produce a full result file measuring `current` twice.
 - `test_tier1.py` — every tier-1 metric on fixed rows, plus the hand-labelled DO-NOT-FLAG
   fixture.
 - `test_adjudicate.py` — the certification arithmetic on synthetic sweeps: input binding
