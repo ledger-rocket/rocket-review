@@ -46,6 +46,22 @@ def test_mode_selects_only_its_own_body(mode):
         assert MODE_INTERIOR_MARKERS[other] not in prompt
 
 
+def test_only_the_plan_prompt_asks_what_is_good():
+    # Asymmetry is deliberate: on a plan, knowing what is solid tells the reader what to
+    # keep. On code and diffs an instructed search for praise softens the critical read and
+    # spends output budget that belongs to findings.
+    assert "**Strengths**" in get_prompt("plan")
+    for mode in ("code", "diff"):
+        prompt = get_prompt(mode)
+        for marker in ("Positive Aspects", "What looks good", "positives"):
+            assert marker not in prompt
+
+
+@pytest.mark.parametrize("mode", list(MODE_MARKERS))
+def test_every_mode_makes_severity_mandatory(mode):
+    assert "Every finding MUST carry a severity" in get_prompt(mode)
+
+
 def test_unknown_mode_raises_key_error():
     with pytest.raises(KeyError):
         get_prompt("bogus")
