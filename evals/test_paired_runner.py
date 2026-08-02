@@ -16,7 +16,12 @@ import pytest
 import rocket_review.prompts as rr_prompts
 from arms import PROMPT_CONSTANTS, load_arm
 from cases import remove_worktree
-from conftest import git
+from conftest import (
+    STANCE_MARKER,
+    WEAK_PATTERNS_HEADING,
+    WEAK_PLAN_PATTERNS_HEADING,
+    git,
+)
 from paired_runner import (
     ALTERNATION_SCHEME,
     LAUNCHER,
@@ -504,6 +509,76 @@ def test_the_runner_leaves_no_worktree_behind(
 ):
     run_paired(tmp_path, git_repo, corpus, arms, monkeypatch, stub_backend)
     assert "case-m-001" not in git(git_repo, "worktree", "list").stdout
+
+
+# --- the shipped arms, paired ------------------------------------------------------------
+
+
+@pytest.fixture
+def stance_smoke_corpus(corpus, head_oid) -> Path:
+    """The two diff cases plus a plan case.
+
+    The stance arm inserts into the diff body and the plan body, and the blocks differ
+    between them, so a corpus of one mode would leave half the arm unproven end to end.
+    """
+    plans = corpus.parent / "plans"
+    plans.mkdir()
+    (plans / "cache.md").write_text(
+        "# Plan\n\n1. Add a write-through cache in front of the ranking table.\n"
+        "2. Backfill it from the primary.\n3. Cut reads over to it.\n",
+        encoding="utf-8",
+    )
+    (corpus / "p-001.yaml").write_text(
+        f"id: p-001\nmode: plan\nsource: seeded-plan\npath: plans/cache.md\n"
+        f"repo_commit: {head_oid}\n",
+        encoding="utf-8",
+    )
+    return corpus
+
+
+def test_a_paired_run_of_current_against_stance_delivers_each_arms_own_text(
+    tmp_path, git_repo, stance_smoke_corpus, monkeypatch, stub_backend,
+):
+    """The smoke test for the stance experiment: the treatment's added text really lands.
+
+    The arms differ only by insertions, so a launcher that silently fell back to the live
+    prompts would still produce a plausible result file — every row would just be measuring
+    `current` twice. This pins the difference where it has to exist: in the bytes a backend
+    was handed.
+    """
+    monkeypatch.delenv("CI", raising=False)
+    for key, value in stub_backend.env().items():
+        monkeypatch.setenv(key, value)
+    out = tmp_path / "results"
+    assert main([
+        "--control", "current", "--treatment", "stance",
+        "--backends", "codex:stub-model", "--cases", str(stance_smoke_corpus),
+        "--runs", "1", "--concurrency", "1", "--timeout", "60",
+        "--repo", str(git_repo), "--out", str(out),
+    ]) == 0
+
+    current, stance = load_arm("current"), load_arm("stance")
+    captured = stub_backend.captured_prompts()
+    assert len(captured) == 6  # 3 cases x 2 arms x 1 rep
+
+    modes = ("DIFF_REVIEW_PROMPT", "PLAN_REVIEW_PROMPT")
+    control_prompts, treatment_prompts = [], []
+    for prompt in captured:
+        from_control = [n for n in modes if current.texts[n].strip() in prompt]
+        from_treatment = [n for n in modes if stance.texts[n].strip() in prompt]
+        # Substitution, not addition: a prompt carries one arm's body and not the other's.
+        assert len(from_control) + len(from_treatment) == 1, prompt
+        (control_prompts if from_control else treatment_prompts).append(prompt)
+    assert len(control_prompts) == len(treatment_prompts) == 3
+
+    # The treatment's markers, in the modes the arm puts them in and no others.
+    assert sum(STANCE_MARKER in p for p in treatment_prompts) == 2
+    assert sum(WEAK_PATTERNS_HEADING in p for p in treatment_prompts) == 2
+    assert sum(WEAK_PLAN_PATTERNS_HEADING in p for p in treatment_prompts) == 1
+    for prompt in control_prompts:
+        assert STANCE_MARKER not in prompt
+        assert WEAK_PATTERNS_HEADING not in prompt
+        assert WEAK_PLAN_PATTERNS_HEADING not in prompt
 
 
 # --- refusals --------------------------------------------------------------------------

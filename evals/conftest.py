@@ -19,6 +19,13 @@ import pytest
 
 GOOD_REVIEW = {"verdict": "approve", "summary": "stub review", "findings": []}
 
+# Text unique to the `stance` arm. Shared because two modules pin it from opposite ends —
+# test_arms.py that the arm carries it, test_paired_runner.py that a backend receives it —
+# and a marker each module spelled for itself could drift into testing nothing.
+STANCE_MARKER = "Begin from the presumption that this code is defective."
+WEAK_PATTERNS_HEADING = "WEAK REVIEW PATTERNS"
+WEAK_PLAN_PATTERNS_HEADING = "WEAK PLAN REVIEW PATTERNS"
+
 # Reads the prompt rr wrote for it, records the exact bytes, and answers with whatever
 # review the test asked for. STUB_FAIL_UNTIL makes the first N invocations fail, which is
 # how the retry path is exercised without a real flaky backend.

@@ -1,5 +1,6 @@
 """Arm loading, hashing, and the guards that keep an arm from silently going stale."""
 
+from difflib import unified_diff
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from arms import (
     load_arm,
     runtime_prompt_constants,
 )
+from conftest import STANCE_MARKER, WEAK_PATTERNS_HEADING, WEAK_PLAN_PATTERNS_HEADING
 
 
 @pytest.fixture
@@ -66,6 +68,55 @@ def test_pre_prompt_rewrite_arm_loads_and_differs_from_current():
     pre = load_arm("pre-prompt-rewrite")
     assert pre.content_hash != load_arm("current").content_hash
     assert set(pre.texts) == set(PROMPT_CONSTANTS)
+
+
+#: Same reasoning as above, for the treatment of the adversarial-stance experiment. It is
+#: pinned from the day it is written rather than once it has history: an arm whose text can
+#: move while a sweep is running is not a treatment, it is two treatments sharing a name.
+STANCE_HASH = (
+    "cf8f4a217e11f8538c765bd1d51555fe852bfb6561755f357bcddc954e692238"
+)
+
+
+def test_the_stance_arm_is_frozen():
+    assert load_arm("stance").content_hash == STANCE_HASH
+
+
+def test_the_stance_arm_is_current_plus_insertions_only():
+    """Every stance file is `current/`'s file with lines added and none removed or edited.
+
+    What the experiment rests on: the arm is meant to isolate two added blocks, so any
+    other edit — a reworded principle, a dropped bullet — would make a measured difference
+    unattributable to the thing under test.
+    """
+    current, stance = load_arm("current"), load_arm("stance")
+    changed = set()
+    for name in PROMPT_CONSTANTS:
+        before = current.texts[name].splitlines(keepends=True)
+        after = stance.texts[name].splitlines(keepends=True)
+        # An edited line shows up as a removal too, so this covers rewording as well as
+        # deletion; n=0 keeps context lines out of the removed/added counts.
+        diff = list(unified_diff(before, after, n=0))
+        removed = [
+            line for line in diff if line.startswith("-") and not line.startswith("---")
+        ]
+        added = [line for line in diff if line.startswith("+") and not line.startswith("+++")]
+        assert not removed, f"{name} is not a pure insertion: {removed}"
+        if added:
+            changed.add(name)
+    # And the insertions actually happened, in the three bodies and nowhere else.
+    assert changed == {"PLAN_REVIEW_PROMPT", "CODE_REVIEW_PROMPT", "DIFF_REVIEW_PROMPT"}
+
+
+def test_the_stance_arm_carries_the_two_blocks_where_the_experiment_expects_them():
+    # Which body gets which block is the design: the plan reviewer is not reviewing code,
+    # so a stance about defective code would not apply to it.
+    stance = load_arm("stance")
+    for name in ("CODE_REVIEW_PROMPT", "DIFF_REVIEW_PROMPT"):
+        assert STANCE_MARKER in stance.texts[name]
+        assert WEAK_PATTERNS_HEADING in stance.texts[name]
+    assert STANCE_MARKER not in stance.texts["PLAN_REVIEW_PROMPT"]
+    assert WEAK_PLAN_PATTERNS_HEADING in stance.texts["PLAN_REVIEW_PROMPT"]
 
 
 def test_every_shipped_arm_documents_its_provenance():
