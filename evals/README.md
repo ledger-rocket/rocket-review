@@ -174,7 +174,11 @@ that moved in between, including the model itself.
 
 Running the *same* arm as both control and treatment is supported and useful: it measures
 the backend's own run-to-run noise floor, which is the number every real comparison has to
-beat. The runner says so on stderr rather than pretending it is a comparison.
+beat. The runner says so on stderr rather than pretending it is a comparison, and both the
+summary and `tier1.py` still report two groups — because **a run is identified by its arm's
+role as well as its name**. That matters beyond A/A: two genuinely different arms can share
+a directory basename (`--control current --treatment /tmp/experiment/current`), and keying
+on the name alone would merge them into one set of numbers with nothing to say so.
 
 ## Prompt arms
 
@@ -203,7 +207,7 @@ Two arms ship:
   stale text. The export writes a complete, loadable arm: it drops files for constants the
   runtime no longer has, and writes a provenance README stub for a new arm without ever
   overwriting one that is already filled in.
-- **`pre-m3a/`** — the constants as of commit `41da0e8`, the last commit before the review
+- **`pre-prompt-rewrite/`** — the constants as of commit `41da0e8`, the last commit before the review
   prompts were rewritten. Frozen history; never re-exported.
 
 Adding a prompt constant to `rocket_review/prompts.py` without adding it to every arm is
@@ -389,7 +393,7 @@ plan set or anywhere else in this corpus.
 
 ```
 python evals/paired_runner.py \
-    --control pre-m3a --treatment current \
+    --control pre-prompt-rewrite --treatment current \
     --backends codex:gpt-5.6-sol --runs 3 --timeout 900
 ```
 
@@ -442,11 +446,17 @@ is re-run, and every number is deterministic given the file. Per backend and arm
   `repo_commit` and whose line falls inside that file. Findings with a null `file` or `line`
   — or a `file` that is not even a string, which a schema-violating review can produce
   because the runtime parser passes that field through uncoerced — make no locatable claim,
-  so they are exempt rather than counted as unresolved. Resolution is against `repo_commit`,
-  which for a mutant case is the *pre-patch* base: a finding citing a line the patch appended
-  past the original end of file would read as unresolvable. Mutants are line-for-line edits
-  by construction, which keeps that rare — but it is why this is a hallucination tripwire and
-  not an exact locator.
+  so they are exempt rather than counted as unresolved. Two more things about the base it
+  resolves against, `repo_commit`:
+  - for a **mutant** case that is the *pre-patch* base, so a finding citing a line the patch
+    appended past the original end of file would read as unresolvable. Mutants are
+    line-for-line edits by construction, which keeps that rare — but it is why this is a
+    hallucination tripwire and not an exact locator.
+  - **seeded-plan cases are exempt entirely.** A plan is a standalone artifact, not a
+    repository snapshot: its `repo_commit` is provenance, and the plan file exists at no
+    commit at all. Resolving its citations would score every one of them a hallucination
+    forever and drag the pooled rate down with them, so plan rows are left out of the
+    denominator on the same principle as a finding that cites nothing.
 - **DO-NOT-FLAG tripwire** — see below.
 - **findings per run, split by severity** — n, mean, median, and range, which is what shows
   a prompt change trading a drop in noise for a drop in real findings. Severities the model
@@ -454,8 +464,11 @@ is re-run, and every number is deterministic given the file. Per backend and arm
   label is one of the things this harness exists to notice, and without the bucket the
   per-severity numbers would stop summing to the total.
 - **CRITICAL+HIGH per run**, reported as its own distribution because the median and range
-  of a sum cannot be recovered from the two severities separately. This is the veto rule's
-  input, before a human has adjudicated which of those findings are false positives.
+  of a sum cannot be recovered from the two severities separately. Printed twice: over all
+  cases, and again over **clean controls only**. The second is the veto rule's input — the
+  pooled figure includes defect cases, where a CRITICAL finding is the correct answer rather
+  than the noise the veto bounds. Both are pre-adjudication: which of those findings are
+  actually false positives is still a human call.
 
 **Everything above is reported twice: pooled across an arm's cases, and per case.** The two
 decision rules read different levels — the success criterion aggregates, the veto is written
@@ -512,9 +525,10 @@ only if:
 - **in aggregate** across clean-control cases, the treatment mean does not exceed the
   control mean at all.
 
-`tier1.py` prints the pre-adjudication form of both numbers directly — `critical+high/run`
-per arm and again per case, with each case labelled control or defect — so the only step
-left at decision time is the human adjudication itself.
+`tier1.py` prints the pre-adjudication form of both numbers directly: `critical+high/run`
+restricted to clean controls (the aggregate condition), and again per case with each case
+labelled control or defect (the per-case condition). Neither has to be recombined by hand —
+the only step left at decision time is the human adjudication itself.
 
 A prompt change that finds more real defects while also inventing more high-severity noise
 on clean code has not improved `rr`; it has moved the cost from missed bugs to wasted review
