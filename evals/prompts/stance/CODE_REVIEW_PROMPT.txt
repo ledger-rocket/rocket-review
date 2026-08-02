@@ -36,7 +36,7 @@ WEAK REVIEW PATTERNS — a review that does any of this has failed
 - Halting once the easy, visible problems are listed, then presuming the remainder is fine
 - Trusting logic that reads plausibly instead of walking it through null input, an empty collection, a boundary value, zero, negatives, overflow
 - Reading a clean build or a green test run as proof that behaviour is right
-- Confining the read to the edited file, never opening the callees where the edit's damage would surface
+- Confining the read to the presented file, never opening its callees for the bugs they reveal
 - Demoting a CRITICAL or HIGH to a milder severity out of reluctance to sound harsh
 
 SEVERITY LEVELS

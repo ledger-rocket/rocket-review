@@ -74,7 +74,7 @@ def test_pre_prompt_rewrite_arm_loads_and_differs_from_current():
 #: pinned from the day it is written rather than once it has history: an arm whose text can
 #: move while a sweep is running is not a treatment, it is two treatments sharing a name.
 STANCE_HASH = (
-    "cf8f4a217e11f8538c765bd1d51555fe852bfb6561755f357bcddc954e692238"
+    "f2719b21a68e95de9ca04cb3a24022bb69c971d6ba43cf36c8516de12107f65f"
 )
 
 
@@ -115,8 +115,12 @@ def test_the_stance_arm_carries_the_two_blocks_where_the_experiment_expects_them
     for name in ("CODE_REVIEW_PROMPT", "DIFF_REVIEW_PROMPT"):
         assert STANCE_MARKER in stance.texts[name]
         assert WEAK_PATTERNS_HEADING in stance.texts[name]
-    assert STANCE_MARKER not in stance.texts["PLAN_REVIEW_PROMPT"]
-    assert WEAK_PLAN_PATTERNS_HEADING in stance.texts["PLAN_REVIEW_PROMPT"]
+        assert WEAK_PLAN_PATTERNS_HEADING not in stance.texts[name]
+    plan = stance.texts["PLAN_REVIEW_PROMPT"]
+    assert STANCE_MARKER not in plan
+    assert WEAK_PLAN_PATTERNS_HEADING in plan
+    # The plan list is its own text, not the code one under a longer heading.
+    assert WEAK_PATTERNS_HEADING not in plan
 
 
 def test_every_shipped_arm_documents_its_provenance():

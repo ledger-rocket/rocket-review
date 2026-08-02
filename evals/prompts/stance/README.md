@@ -17,4 +17,6 @@ The severity bullet lands within a screen of the severity definitions it refers 
 Licensing. Both blocks adapt GSD's adversarial-review technique (see
 THIRD_PARTY_NOTICES.md), so every added sentence was compared word-run by word-run against
 the whole `gsd-build/get-shit-done` corpus and reworded until the longest run shared with
-it anywhere was two words — technique adapted, no wording reproduced.
+it anywhere was two words — technique adapted, no wording reproduced. The borrowing runs
+deeper than the idea of a stance: which soft-failure modes the lists name, and the order
+they come in, follow GSD's own enumeration. The expression here is this project's.

@@ -13,7 +13,7 @@ WEAK PLAN REVIEW PATTERNS — a review that does any of this has failed
 - Accepting a step as feasible because it reads reasonably, without asking what must already hold before it starts, or what the fallout is when it fails
 - Treating a section headed "testing" as though it made the plan testable
 - Raising only additive gaps ("also consider X"), leaving every committed step unchallenged
-- Withholding a "major rework" verdict when the evidence supports it
+- Withholding a blocker verdict when the evidence supports it
 
 Severity levels:
 - CRITICAL: Blocker — plan will fail or produce wrong results without fixing this
