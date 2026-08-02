@@ -8,6 +8,7 @@ handled differently.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ from pathlib import Path
 import yaml
 
 CASES_DIR = Path(__file__).resolve().parent / "cases"
+
+OID_PATTERN = re.compile(r"[0-9a-f]{40}")
 
 MODES = ("diff", "code", "plan")
 SOURCES = ("mutant", "merged-pr", "seeded-plan")
@@ -144,6 +147,16 @@ def load_case(path: Path) -> Case:
         )
     _require(raw["mode"] in MODES, f"{path}: mode must be one of {', '.join(MODES)}")
     _require(raw["source"] in SOURCES, f"{path}: source must be one of {', '.join(SOURCES)}")
+    # A full lowercase oid, never an abbreviation or a symbolic name. `HEAD` or `main`
+    # resolve to something different on every checkout and every day, which would make a
+    # result row's "snapshot" unreproducible; an abbreviation can go ambiguous as the repo
+    # grows. tier1 also refuses to resolve anything that is not a plain oid, so a manifest
+    # written with one would silently score every citation unlocatable.
+    _require(
+        bool(OID_PATTERN.fullmatch(raw["repo_commit"])),
+        f"{path}: repo_commit must be a full 40-character lowercase commit id, "
+        f"got {raw['repo_commit']!r}",
+    )
     _require(
         raw["id"] == path.stem,
         f"{path}: id {raw['id']!r} must match the file name {path.stem!r} — the id keys "
@@ -303,3 +316,25 @@ def remove_worktree(repo: Path, worktree: Path) -> None:
             f"         once it is gone, run `git -C {repo} worktree prune`.",
             file=sys.stderr,
         )
+
+
+def verify_repo_commits(cases: list[Case], repo: Path) -> None:
+    """Fail before any spend if a manifest names a commit this repository does not have.
+
+    A missing commit surfaces late and expensively otherwise: a merged-pr case only finds
+    out when `rr --commit` fails inside a billed run, and a corpus written against a fork
+    or a rewritten history fails one case at a time instead of all at once.
+    """
+    missing: list[str] = []
+    for case in cases:
+        resolved = _git(
+            repo, "rev-parse", "--verify", "--quiet", "--end-of-options",
+            f"{case.repo_commit}^{{commit}}",
+        )
+        if resolved.returncode != 0 or resolved.stdout.strip() != case.repo_commit:
+            missing.append(f"{case.id} ({case.repo_commit})")
+    _require(
+        not missing,
+        f"repo_commit not found in {repo}: {', '.join(missing)}. Fetch the history these "
+        "cases were written against, or point --repo at the right checkout.",
+    )

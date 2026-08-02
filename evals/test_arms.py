@@ -1,5 +1,7 @@
 """Arm loading, hashing, and the guards that keep an arm from silently going stale."""
 
+from pathlib import Path
+
 import pytest
 import rocket_review.prompts as rr_prompts
 from arms import (
@@ -7,6 +9,7 @@ from arms import (
     PROMPTS_DIR,
     ArmError,
     apply_arm,
+    arm_directory,
     arm_hash,
     export_arm,
     live_prompt_texts,
@@ -46,7 +49,20 @@ def test_current_arm_is_byte_identical_to_the_live_prompts():
     )
 
 
-def test_pre_m3a_arm_loads_and_differs_from_current():
+#: Computed from the checked-in arm at the commit that froze it. Pinned, not recomputed:
+#: this arm is history, and history that can be edited without a test noticing is not a
+#: baseline. Every result row records this hash, so a silent edit would retroactively
+#: change what past sweeps claim to have measured.
+PRE_PROMPT_REWRITE_HASH = (
+    "ce5e1a84e5f21131508f374ac977494889c0a4bcddebf56f1b3884f445bac953"
+)
+
+
+def test_the_historical_arm_is_frozen():
+    assert load_arm("pre-prompt-rewrite").content_hash == PRE_PROMPT_REWRITE_HASH
+
+
+def test_pre_prompt_rewrite_arm_loads_and_differs_from_current():
     pre = load_arm("pre-prompt-rewrite")
     assert pre.content_hash != load_arm("current").content_hash
     assert set(pre.texts) == set(PROMPT_CONSTANTS)
@@ -69,8 +85,26 @@ def test_prompt_constants_cover_every_runtime_constant():
 def test_apply_arm_refuses_when_the_runtime_grew_a_constant(tmp_path, monkeypatch,
                                                             restore_prompts):
     monkeypatch.setattr(rr_prompts, "NEW_MODE_PROMPT", "invented", raising=False)
-    with pytest.raises(ArmError, match="NEW_MODE_PROMPT"):
+    with pytest.raises(ArmError, match="present but carried by no arm: NEW_MODE_PROMPT"):
         apply_arm(load_arm(write_arm(tmp_path / "arm")))
+
+
+def test_apply_arm_refuses_when_the_runtime_is_missing_a_constant(tmp_path, monkeypatch,
+                                                                  restore_prompts):
+    # A --python pointing at an older rocket_review. setattr would happily invent the
+    # constant, nothing would read it, and the sweep would look fine while measuring the
+    # wrong prompts — so the check has to run in both directions.
+    monkeypatch.delattr(rr_prompts, "DIFF_REVIEW_PROMPT")
+    with pytest.raises(ArmError, match="missing from this rocket_review: DIFF_REVIEW_PROMPT"):
+        apply_arm(load_arm(write_arm(tmp_path / "arm")))
+
+
+def test_an_arm_path_is_absolute_after_loading(tmp_path, monkeypatch):
+    # The path is handed to a child whose cwd is a case's worktree, so a relative one
+    # would be resolved somewhere this process never was.
+    write_arm(tmp_path / "arm")
+    monkeypatch.chdir(tmp_path)
+    assert load_arm(Path("arm")).path.is_absolute()
 
 
 # --- hashing -------------------------------------------------------------------------
@@ -163,6 +197,20 @@ def test_export_does_not_overwrite_an_arms_recorded_provenance(tmp_path):
     (directory / "README.md").write_text("Taken from commit abc1234.\n", encoding="utf-8")
     export_arm(directory)
     assert (directory / "README.md").read_text(encoding="utf-8") == "Taken from commit abc1234.\n"
+
+
+@pytest.mark.parametrize(
+    "name", ["../escaped", "..", ".", "", "nested/arm", "/tmp/absolute"],
+)
+def test_export_refuses_an_arm_name_that_is_a_path(name):
+    # export deletes *.txt it considers stale, so a name that escapes evals/prompts would
+    # let one typo remove files somewhere else entirely.
+    with pytest.raises(ArmError, match="single directory name"):
+        arm_directory(name)
+
+
+def test_export_accepts_a_plain_arm_name():
+    assert arm_directory("candidate-b").parent == PROMPTS_DIR
 
 
 def test_export_clears_a_prompt_file_the_runtime_no_longer_has(tmp_path):

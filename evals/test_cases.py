@@ -11,9 +11,21 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from cases import CASES_DIR, Case, CaseError, load_case, load_cases, materialize, remove_worktree
+from cases import (
+    CASES_DIR,
+    Case,
+    CaseError,
+    load_case,
+    load_cases,
+    materialize,
+    remove_worktree,
+    verify_repo_commits,
+)
 from conftest import git
 from eval_common import REPO_ROOT
+
+#: A well-formed but non-existent oid: manifests must carry a full 40-hex id.
+FAKE_OID = "abc1234000000000000000000000000000000000"
 
 MUTANT = """\
 id: m-001
@@ -248,80 +260,80 @@ def test_the_shipped_corpus_covers_every_source_and_both_labels():
 
 
 def test_id_must_match_the_file_name(tmp_path):
-    path = write_manifest(tmp_path, "other", MUTANT.format(oid="abc1234"))
+    path = write_manifest(tmp_path, "other", MUTANT.format(oid=FAKE_OID))
     with pytest.raises(CaseError, match="must match the file name"):
         load_case(path)
 
 
 def test_unknown_top_level_key_is_rejected(tmp_path):
-    path = write_manifest(tmp_path, "m-001", MUTANT.format(oid="abc1234") + "notes: hi\n")
+    path = write_manifest(tmp_path, "m-001", MUTANT.format(oid=FAKE_OID) + "notes: hi\n")
     with pytest.raises(CaseError, match="unknown keys: notes"):
         load_case(path)
 
 
 def test_unknown_mode_is_rejected(tmp_path):
-    text = MUTANT.format(oid="abc1234").replace("mode: diff", "mode: vibes")
+    text = MUTANT.format(oid=FAKE_OID).replace("mode: diff", "mode: vibes")
     with pytest.raises(CaseError, match="mode must be one of"):
         load_case(write_manifest(tmp_path, "m-001", text))
 
 
 def test_mutant_without_a_patch_is_rejected(tmp_path):
-    text = MUTANT.format(oid="abc1234").replace("diff: cases/m-001.patch\n", "")
+    text = MUTANT.format(oid=FAKE_OID).replace("diff: cases/m-001.patch\n", "")
     with pytest.raises(CaseError, match="mutant case needs `diff`"):
         load_case(write_manifest(tmp_path, "m-001", text))
 
 
 def test_merged_pr_with_a_patch_is_rejected(tmp_path):
-    text = MUTANT.format(oid="abc1234").replace("source: mutant", "source: merged-pr")
+    text = MUTANT.format(oid=FAKE_OID).replace("source: mutant", "source: merged-pr")
     with pytest.raises(CaseError, match="reviewed at repo_commit"):
         load_case(write_manifest(tmp_path, "m-001", text))
 
 
 def test_defect_span_must_be_an_ordered_pair(tmp_path):
-    text = MUTANT.format(oid="abc1234").replace("span: [3, 4]", "span: [9, 4]")
+    text = MUTANT.format(oid=FAKE_OID).replace("span: [3, 4]", "span: [9, 4]")
     with pytest.raises(CaseError, match="1 <= start <= end"):
         load_case(write_manifest(tmp_path, "m-001", text))
 
 
 def test_defect_span_must_be_two_integers(tmp_path):
-    text = MUTANT.format(oid="abc1234").replace("span: [3, 4]", 'span: "3-4"')
+    text = MUTANT.format(oid=FAKE_OID).replace("span: [3, 4]", 'span: "3-4"')
     with pytest.raises(CaseError, match="two-element"):
         load_case(write_manifest(tmp_path, "m-001", text))
 
 
 def test_unknown_defect_key_is_rejected(tmp_path):
-    text = MUTANT.format(oid="abc1234") + "  severity: high\n"
+    text = MUTANT.format(oid=FAKE_OID) + "  severity: high\n"
     with pytest.raises(CaseError, match="unknown defect keys: severity"):
         load_case(write_manifest(tmp_path, "m-001", text))
 
 
 def test_killed_by_is_parsed_as_node_ids(tmp_path):
-    text = MUTANT.format(oid="abc1234") + "killed_by:\n  - tests/test_x.py::test_y\n"
+    text = MUTANT.format(oid=FAKE_OID) + "killed_by:\n  - tests/test_x.py::test_y\n"
     case = load_case(write_manifest(tmp_path, "m-001", text))
     assert case.killed_by == ("tests/test_x.py::test_y",)
 
 
 def test_killed_by_defaults_to_empty_rather_than_none(tmp_path):
-    case = load_case(write_manifest(tmp_path, "m-001", MUTANT.format(oid="abc1234")))
+    case = load_case(write_manifest(tmp_path, "m-001", MUTANT.format(oid=FAKE_OID)))
     assert case.killed_by == ()
 
 
 def test_duplicate_killed_by_node_ids_are_rejected(tmp_path):
     node = "tests/test_x.py::test_y"
-    text = MUTANT.format(oid="abc1234") + f"killed_by:\n  - {node}\n  - {node}\n"
+    text = MUTANT.format(oid=FAKE_OID) + f"killed_by:\n  - {node}\n  - {node}\n"
     with pytest.raises(CaseError, match="duplicate node ids"):
         load_case(write_manifest(tmp_path, "m-001", text))
 
 
 def test_a_scalar_killed_by_is_rejected(tmp_path):
-    text = MUTANT.format(oid="abc1234") + "killed_by: tests/test_x.py::test_y\n"
+    text = MUTANT.format(oid=FAKE_OID) + "killed_by: tests/test_x.py::test_y\n"
     with pytest.raises(CaseError, match="must be a list"):
         load_case(write_manifest(tmp_path, "m-001", text))
 
 
 def test_killed_by_on_a_non_mutant_is_rejected(tmp_path):
     text = (
-        "id: c-001\nmode: diff\nsource: merged-pr\nrepo_commit: abc1234\n"
+        "id: c-001\nmode: diff\nsource: merged-pr\nrepo_commit: abc1234000000000000000000000000000000000\n"
         "killed_by:\n  - tests/test_x.py::test_y\n"
     )
     with pytest.raises(CaseError, match="no patch for a test to kill"):
@@ -329,14 +341,53 @@ def test_killed_by_on_a_non_mutant_is_rejected(tmp_path):
 
 
 def test_a_code_mode_mutant_without_a_defect_is_rejected(tmp_path):
-    text = MUTANT.format(oid="abc1234").replace("mode: diff", "mode: code")
+    text = MUTANT.format(oid=FAKE_OID).replace("mode: diff", "mode: code")
     text = text[:text.index("defect:")]
     with pytest.raises(CaseError, match="cannot omit `defect`"):
         load_case(write_manifest(tmp_path, "m-001", text))
 
 
+@pytest.mark.parametrize(
+    "value", ["abc1234", "HEAD", "main", "v1.0", "ABC1234000000000000000000000000000000000",
+              "abc1234000000000000000000000000000000000x"],
+)
+def test_repo_commit_must_be_a_full_lowercase_oid(tmp_path, value):
+    # A symbolic name resolves to something different on every checkout and every day, so
+    # a row's "snapshot" would stop being reproducible; an abbreviation can go ambiguous.
+    text = MUTANT.format(oid=FAKE_OID).replace(FAKE_OID, value)
+    with pytest.raises(CaseError, match="full 40-character lowercase commit id"):
+        load_case(write_manifest(tmp_path, "m-001", text))
+
+
+def test_repo_commits_are_checked_against_the_repository(tmp_path, git_repo, head_oid):
+    present = load_case(write_manifest(
+        tmp_path, "c-001",
+        f"id: c-001\nmode: diff\nsource: merged-pr\nrepo_commit: {head_oid}\n",
+    ))
+    verify_repo_commits([present], git_repo)  # does not raise
+
+    absent = load_case(write_manifest(
+        tmp_path, "c-002",
+        f"id: c-002\nmode: diff\nsource: merged-pr\nrepo_commit: {FAKE_OID}\n",
+    ))
+    with pytest.raises(CaseError, match=f"c-002 \\({FAKE_OID}\\)"):
+        verify_repo_commits([present, absent], git_repo)
+
+
+def test_a_commit_that_is_not_a_commit_is_rejected(tmp_path, git_repo, head_oid):
+    # A blob's oid is a valid 40-hex string that git resolves happily — but not to a
+    # snapshot anything can be checked out at.
+    blob = git(git_repo, "rev-parse", f"{head_oid}:sample.py").stdout.strip()
+    case = load_case(write_manifest(
+        tmp_path, "c-001",
+        f"id: c-001\nmode: diff\nsource: merged-pr\nrepo_commit: {blob}\n",
+    ))
+    with pytest.raises(CaseError, match="repo_commit not found"):
+        verify_repo_commits([case], git_repo)
+
+
 def test_unknown_case_id_filter_is_rejected(tmp_path):
-    write_manifest(tmp_path, "m-001", MUTANT.format(oid="abc1234"))
+    write_manifest(tmp_path, "m-001", MUTANT.format(oid=FAKE_OID))
     with pytest.raises(CaseError, match="unknown case id"):
         load_cases(tmp_path / "cases", {"m-002"})
 

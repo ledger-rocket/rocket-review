@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -292,7 +293,16 @@ def main(argv: list[str] | None = None) -> int:
         print("Error: --jobs must be at least 1.", file=sys.stderr)
         return 1
 
-    pytest_cmd = args.pytest.split()
+    # shlex, not split(): the command can carry quoted paths (a venv under a directory
+    # with a space), and naive splitting would hand pytest two broken fragments.
+    try:
+        pytest_cmd = shlex.split(args.pytest)
+    except ValueError as e:
+        print(f"Error: --pytest is not a valid command line: {e}", file=sys.stderr)
+        return 1
+    if not pytest_cmd:
+        print("Error: --pytest must name a command.", file=sys.stderr)
+        return 1
     only = {c.strip() for c in args.only.split(",")} if args.only else None
     try:
         cases = [c for c in load_cases(args.cases, only) if c.source == "mutant"]

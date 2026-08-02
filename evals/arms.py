@@ -89,6 +89,9 @@ def load_arm(name_or_path: str | Path) -> Arm:
         path = PROMPTS_DIR / str(name_or_path)
     if not path.is_dir():
         raise ArmError(f"arm {name_or_path!r} not found: {path} is not a directory")
+    # Absolute from here on. The arm's path is handed to a child process whose cwd is a
+    # case's worktree, so a relative one would be resolved somewhere this process never was.
+    path = path.resolve()
 
     texts: dict[str, str] = {}
     missing: list[str] = []
@@ -123,12 +126,23 @@ def apply_arm(arm: Arm) -> None:
     module globals on every call, so rebinding them here reaches every backend without any
     runtime code being aware an eval is happening.
     """
-    unknown = set(runtime_prompt_constants()) - set(PROMPT_CONSTANTS)
-    if unknown:
+    # Symmetric on purpose. An *extra* runtime constant would run live text for that prompt
+    # in both arms, so the comparison would quietly stop covering it. A *missing* one means
+    # this interpreter's rocket_review is not the version the arm was written for — likely
+    # a --python pointing at another environment — and setattr would happily create a
+    # constant nothing reads, so every run would look fine and measure the wrong prompts.
+    runtime = set(runtime_prompt_constants())
+    expected = set(PROMPT_CONSTANTS)
+    if runtime != expected:
+        problems = []
+        if missing := sorted(expected - runtime):
+            problems.append(f"missing from this rocket_review: {', '.join(missing)}")
+        if unknown := sorted(runtime - expected):
+            problems.append(f"present but carried by no arm: {', '.join(unknown)}")
         raise ArmError(
-            "rocket_review.prompts defines constants no arm carries: "
-            f"{', '.join(sorted(unknown))}. Add them to PROMPT_CONSTANTS and re-export "
-            "every arm, or the comparison silently runs live text for those prompts."
+            "rocket_review.prompts does not match the prompt surface arms are written "
+            f"against ({'; '.join(problems)}). Re-export every arm against this "
+            "rocket_review, or point --python at the one they were built for."
         )
     for name, text in arm.texts.items():
         setattr(rr_prompts, name, text)
@@ -159,12 +173,31 @@ def export_arm(directory: Path) -> Arm:
     return load_arm(directory)
 
 
+def arm_directory(name: str) -> Path:
+    """Turn an arm name into its directory under evals/prompts/, or refuse.
+
+    A single path component only. `export_arm` deletes files it considers stale, so a name
+    like `../..` or an absolute path would let a typo remove *.txt somewhere outside the
+    arm store entirely.
+    """
+    if name != Path(name).name or name in ("", ".", ".."):
+        raise ArmError(
+            f"arm name {name!r} must be a single directory name under {PROMPTS_DIR}, "
+            "not a path"
+        )
+    return PROMPTS_DIR / name
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if len(args) != 2 or args[0] != "export":
         print("usage: python evals/arms.py export <arm-name>", file=sys.stderr)
         return 1
-    arm = export_arm(PROMPTS_DIR / args[1])
+    try:
+        arm = export_arm(arm_directory(args[1]))
+    except ArmError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
     print(f"{arm.path}  {arm.content_hash}")
     return 0
 
