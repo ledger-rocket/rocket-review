@@ -9,12 +9,11 @@ import json
 import sys
 from pathlib import Path
 
+from eval_common import extract_backend_result, parse_backend_specs
 from m0_sweep import (
     BACKEND_ERROR,
     WRAPPED_COLUMN,
     RunRecord,
-    _extract_backend_result,
-    parse_backend_specs,
     print_summary,
     run_case,
 )
@@ -33,27 +32,27 @@ def test_extracts_the_requested_backend_entry():
         {"backend": "claude", "model": "sonnet", "raw": "claude output", "error": None},
         {"backend": "codex", "model": "gpt-5.6-sol", "raw": "codex output", "error": None},
     )
-    result, error = _extract_backend_result(stdout, "codex")
+    result, error = extract_backend_result(stdout, "codex")
     assert error is None
     assert result["raw"] == "codex output"
 
 
 def test_entry_with_error_is_returned_for_the_caller_to_classify():
     stdout = envelope({"backend": "codex", "raw": "", "error": "codex timed out"})
-    result, error = _extract_backend_result(stdout, "codex")
+    result, error = extract_backend_result(stdout, "codex")
     # The envelope itself is fine; the backend failure is the caller's to record.
     assert error is None
     assert result["error"] == "codex timed out"
 
 
 def test_non_json_stdout_is_an_envelope_error():
-    result, error = _extract_backend_result("Error: unknown commit deadbeef.", "codex")
+    result, error = extract_backend_result("Error: unknown commit deadbeef.", "codex")
     assert result is None
     assert error == "rr did not emit a JSON envelope"
 
 
 def test_missing_backend_entry_is_an_envelope_error():
-    result, error = _extract_backend_result(envelope(), "codex")
+    result, error = extract_backend_result(envelope(), "codex")
     assert result is None
     assert error == "no codex entry in rr envelope"
 
@@ -61,25 +60,25 @@ def test_missing_backend_entry_is_an_envelope_error():
 # Valid JSON of the wrong shape must degrade to a reason, never raise: an exception here
 # would take down the sweep and lose an expensive run's record.
 def test_json_null_envelope_is_reported_not_raised():
-    assert _extract_backend_result("null", "codex") == (None, "rr envelope is not a JSON object")
+    assert extract_backend_result("null", "codex") == (None, "rr envelope is not a JSON object")
 
 
 def test_json_array_envelope_is_reported_not_raised():
-    assert _extract_backend_result("[]", "codex") == (None, "rr envelope is not a JSON object")
+    assert extract_backend_result("[]", "codex") == (None, "rr envelope is not a JSON object")
 
 
 def test_scalar_envelope_is_reported_not_raised():
-    assert _extract_backend_result("42", "codex") == (None, "rr envelope is not a JSON object")
+    assert extract_backend_result("42", "codex") == (None, "rr envelope is not a JSON object")
 
 
 def test_null_results_is_reported_not_raised():
     stdout = json.dumps({"results": None})
-    assert _extract_backend_result(stdout, "codex") == (None, "rr envelope has no results list")
+    assert extract_backend_result(stdout, "codex") == (None, "rr envelope has no results list")
 
 
 def test_scalar_inside_results_is_skipped_not_raised():
     stdout = json.dumps({"results": ["nonsense", None, 7]})
-    assert _extract_backend_result(stdout, "codex") == (None, "no codex entry in rr envelope")
+    assert extract_backend_result(stdout, "codex") == (None, "no codex entry in rr envelope")
 
 
 # --- backend specs -------------------------------------------------------------------
