@@ -97,6 +97,10 @@ class PairedRecord:
     source: str
     #: The snapshot the case is defined against. tier1 resolves cited files at this commit.
     repo_commit: str
+    #: Which decision rule governs this row: the veto is written per clean-control
+    #: case. On the row, not only in the header, so a filtered or concatenated
+    #: results file stays readable.
+    case_is_control: bool
     arm: str
     arm_role: str
     #: sha256 of the arm's prompt text. The row's link back to exact prompt bytes.
@@ -208,7 +212,8 @@ def run_attempt(
 
     common = {
         "case_id": task.case.id, "mode": task.case.mode, "source": task.case.source,
-        "repo_commit": task.case.repo_commit, "arm": task.arm.name,
+        "repo_commit": task.case.repo_commit,
+        "case_is_control": task.case.is_control, "arm": task.arm.name,
         "arm_role": task.role, "arm_hash": task.arm.content_hash,
         "backend": task.backend, "requested_model": task.model,
         "backend_version": provenance.backend_versions.get(task.backend),
@@ -388,8 +393,12 @@ def main(argv: list[str] | None = None) -> int:
     staged: dict[str, Materialized] = {}
     try:
         # Materialized serially and up front: `git worktree add` mutates repo-level admin
-        # state, and one worktree per case is enough because every run of that case only
-        # reads it (rr runs `git diff HEAD`; the backends review under read-only sandboxes).
+        # state. One worktree per case then serves all of that case's runs, which is not
+        # quite read-only sharing — the backends review under read-only sandboxes, but
+        # `rr --diff` runs `git diff HEAD`, and git refreshes the index and takes
+        # index.lock to do it. Two concurrent runs of the same case can therefore collide
+        # on git's own writes with perfectly behaved backends. The retry absorbs it; a
+        # worktree per run would not be worth the churn of hundreds of checkouts.
         for case in cases:
             staged[case.id] = materialize(case, args.repo, workdir)
         tasks = build_tasks(cases, staged, specs, control, treatment, args.runs)

@@ -8,6 +8,7 @@ from conftest import git
 from strict_validator import BACKEND_ERROR, DECODE_FAILURE, SCHEMA_VIOLATION, VALID
 from tier1 import (
     DO_NOT_FLAG_PATTERNS,
+    SEVERITY_BUCKETS,
     GitLineCounter,
     classify_do_not_flag,
     compute,
@@ -37,7 +38,8 @@ def finding(title="Something is wrong", severity="high", file="sample.py", line=
 def row(**overrides) -> dict:
     base = {
         "case_id": "c-001", "mode": "diff", "source": "merged-pr",
-        "repo_commit": REPO_COMMIT, "arm": "control-arm", "arm_role": "control",
+        "repo_commit": REPO_COMMIT, "case_is_control": True,
+        "arm": "control-arm", "arm_role": "control",
         "arm_hash": "h", "backend": "codex", "requested_model": "m", "rep": 1,
         "order_index": 0, "attempt": 1, "command": ["rr"], "cwd": "/repo",
         "exit_code": 0, "duration_s": 1.0, "raw": review([]), "outcome": VALID,
@@ -52,8 +54,13 @@ def counting(lines_by_path: dict[str, int]):
     return lambda commit, path: lines_by_path.get(path)
 
 
-def only(rows, **kwargs):
+def group(rows, **kwargs):
     return compute(rows, counting(kwargs.pop("lines", {})), Path("/repo"))[0]
+
+
+def only(rows, **kwargs):
+    """The single group's pooled scores — what most metric assertions are about."""
+    return group(rows, **kwargs).scores
 
 
 # --- the DO-NOT-FLAG tripwire ----------------------------------------------------------
@@ -185,6 +192,29 @@ def test_findings_without_a_file_or_line_are_exempt_not_unresolved():
     assert (metrics.line_bearing, metrics.line_resolved) == (1, 1)
 
 
+def test_a_non_string_file_is_exempt_rather_than_a_crash():
+    # The runtime parser passes `file` through uncoerced, so a schema-violating review —
+    # the thing this harness exists to catch — can put an object there. Scoring a whole
+    # sweep must not die on one bad field.
+    rows = [row(raw=json.dumps({
+        "verdict": "needs_fixes", "summary": "s",
+        "findings": [
+            {"severity": "high", "title": "object in file", "file": {"path": "sample.py"},
+             "line": 3, "why": "w", "fix": "f"},
+            {"severity": "high", "title": "number in file", "file": 42, "line": 3,
+             "why": "w", "fix": "f"},
+            {"severity": "high", "title": "list in file", "file": ["sample.py"], "line": 3,
+             "why": "w", "fix": "f"},
+            {"severity": "high", "title": "a real citation", "file": "sample.py", "line": 3,
+             "why": "w", "fix": "f"},
+        ],
+    }), outcome=SCHEMA_VIOLATION)]
+    metrics = only(rows, lines={"sample.py": 5})
+    assert metrics.findings_total == 4
+    # Only the string citation made a locatable claim.
+    assert (metrics.line_bearing, metrics.line_resolved) == (1, 1)
+
+
 def test_line_zero_does_not_resolve():
     metrics = only(
         [row(raw=review([finding(file="sample.py", line=0)]))],
@@ -237,6 +267,108 @@ def test_findings_per_run_is_split_by_severity():
     assert by_severity["high"].maximum == 0
 
 
+def test_an_invented_severity_lands_in_the_other_bucket():
+    # Invented labels are one of the things this harness measures, so they cannot vanish
+    # from the per-severity view — counted in the total but in no bucket.
+    rows = [row(raw=review([
+        finding(severity="critical"), finding(severity="warning"), finding(severity="nit"),
+    ]))]
+    metrics = only(rows)
+    assert metrics.findings_per_run_by_severity["other"].mean == 2.0
+    assert metrics.findings_per_run_by_severity["critical"].mean == 1.0
+
+
+def test_the_severity_buckets_sum_to_the_overall_findings_per_run():
+    rows = [
+        row(rep=1, raw=review([finding(severity="high"), finding(severity="bogus")])),
+        row(rep=2, raw=review([finding(severity="low")])),
+    ]
+    metrics = only(rows)
+    buckets = metrics.findings_per_run_by_severity
+    assert sum(buckets[b].mean for b in SEVERITY_BUCKETS) == metrics.findings_per_run.mean
+
+
+def test_critical_and_high_are_reported_together_for_the_veto_rule():
+    rows = [
+        row(rep=1, raw=review([
+            finding(severity="critical"), finding(severity="high"), finding(severity="low"),
+        ])),
+        row(rep=2, raw=review([finding(severity="medium")])),
+    ]
+    metrics = only(rows)
+    assert metrics.critical_high_per_run.mean == 1.0
+    assert metrics.critical_high_per_run.maximum == 2
+    assert metrics.critical_high_per_run.minimum == 0
+
+
+def test_an_empty_distribution_reports_nothing_measured_rather_than_zero():
+    # Same rule as the rates: a 0 would read as "measured, and it was zero".
+    empty = only([row(outcome=BACKEND_ERROR, raw="", backend_error="boom")]).findings_per_run
+    assert empty.n == 0
+    assert (empty.mean, empty.median, empty.minimum, empty.maximum) == (None, None, None, None)
+
+
+# --- per-case breakdown ------------------------------------------------------------------
+
+
+def test_each_case_is_scored_separately_within_an_arm():
+    # The veto rule is per clean-control case, so a pooled mean is not enough: here the
+    # pooled critical+high mean is 1.0 on both arms while one control case carries all of
+    # the treatment's high-severity output.
+    rows = [
+        row(case_id="c-001", case_is_control=True, rep=1,
+            raw=review([finding(severity="critical")])),
+        row(case_id="c-002", case_is_control=True, rep=1,
+            raw=review([finding(severity="high")])),
+        row(case_id="c-001", case_is_control=True, rep=1, arm="treatment-arm",
+            arm_role="treatment", raw=review([
+                finding(severity="critical"), finding(severity="high"),
+            ])),
+        row(case_id="c-002", case_is_control=True, rep=1, arm="treatment-arm",
+            arm_role="treatment", raw=review([])),
+    ]
+    metrics = compute(rows, counting({"sample.py": 5}), Path("/repo"))
+    pooled = {m.arm: m.scores.critical_high_per_run.mean for m in metrics}
+    assert pooled == {"control-arm": 1.0, "treatment-arm": 1.0}
+
+    per_case = {
+        (m.arm, c.case_id): c.scores.critical_high_per_run.mean
+        for m in metrics for c in m.per_case
+    }
+    assert per_case == {
+        ("control-arm", "c-001"): 1.0, ("control-arm", "c-002"): 1.0,
+        ("treatment-arm", "c-001"): 2.0, ("treatment-arm", "c-002"): 0.0,
+    }
+
+
+def test_the_per_case_breakdown_carries_the_control_flag():
+    rows = [
+        row(case_id="b-001", case_is_control=False, raw=review([finding()])),
+        row(case_id="c-001", case_is_control=True, rep=2, raw=review([])),
+    ]
+    per_case = group(rows, lines={"sample.py": 5}).per_case
+    assert [(c.case_id, c.is_control) for c in per_case] == [
+        ("b-001", False), ("c-001", True),
+    ]
+
+
+def test_a_row_predating_the_control_flag_is_reported_as_unlabelled():
+    stale = row()
+    del stale["case_is_control"]
+    assert group([stale]).per_case[0].is_control is None
+
+
+def test_a_cases_failed_runs_are_visible_in_its_own_breakdown():
+    rows = [
+        row(case_id="b-001", case_is_control=False, rep=1, raw=review([finding()])),
+        row(case_id="c-001", case_is_control=True, rep=1, outcome=BACKEND_ERROR,
+            raw="", backend_error="codex timed out"),
+    ]
+    per_case = {c.case_id: c.scores for c in group(rows, lines={"sample.py": 5}).per_case}
+    assert (per_case["b-001"].runs_scored, per_case["b-001"].runs_failed) == (1, 0)
+    assert (per_case["c-001"].runs_scored, per_case["c-001"].runs_failed) == (0, 1)
+
+
 # --- grouping and IO -----------------------------------------------------------------------
 
 
@@ -247,7 +379,7 @@ def test_arms_and_backends_are_scored_separately():
             raw=review([finding(), finding()])),
     ]
     metrics = compute(rows, counting({"sample.py": 5}), Path("/repo"))
-    assert [(m.arm, m.arm_role, m.findings_total) for m in metrics] == [
+    assert [(m.arm, m.arm_role, m.scores.findings_total) for m in metrics] == [
         ("control-arm", "control", 1), ("treatment-arm", "treatment", 2),
     ]
 
@@ -264,7 +396,8 @@ def test_a_results_file_round_trips_through_load_and_compute(tmp_path, capsys):
     assert len(rows) == 1
     assert main([str(path), "--repo", str(tmp_path), "--json"]) == 0
     reported = json.loads(capsys.readouterr().out)
-    assert reported[0]["do_not_flag_by_class"] == {"import-ordering": 1}
+    assert reported[0]["scores"]["do_not_flag_by_class"] == {"import-ordering": 1}
+    assert reported[0]["per_case"][0]["case_id"] == "c-001"
 
 
 def test_a_corrupt_results_line_is_reported_with_its_line_number(tmp_path):
@@ -293,3 +426,16 @@ def test_the_text_report_names_every_group(tmp_path, capsys):
     assert "codex / alpha (control)" in out
     assert "codex / beta (treatment)" in out
     assert "DO-NOT-FLAG tripwire" in out
+    assert "critical+high/run" in out
+    assert "per case:" in out
+    assert "c-001 (control)" in out
+
+
+def test_the_text_report_survives_a_group_with_no_scorable_runs(tmp_path, capsys):
+    path = tmp_path / "paired.jsonl"
+    path.write_text(
+        json.dumps(row(outcome=BACKEND_ERROR, raw="", backend_error="boom")) + "\n",
+        encoding="utf-8",
+    )
+    assert main([str(path), "--repo", str(tmp_path)]) == 0
+    assert "no runs" in capsys.readouterr().out

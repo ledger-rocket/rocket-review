@@ -99,18 +99,31 @@ def classify_do_not_flag(title: str) -> str | None:
 LineCounter = Callable[[str, str], int | None]
 
 
+#: Severities the schema defines, plus a bucket for the ones a model invents. Inventing a
+#: label is one of the things this harness exists to notice, so those findings cannot be
+#: left out of the per-severity view — the buckets would stop summing to the total.
+SEVERITY_OTHER = "other"
+SEVERITY_BUCKETS = (*SEVERITIES, SEVERITY_OTHER)
+
+
+def severity_bucket(severity: str) -> str:
+    return severity if severity in SEVERITIES else SEVERITY_OTHER
+
+
 @dataclass(frozen=True)
 class Distribution:
     n: int
-    mean: float
-    median: float
-    minimum: int
-    maximum: int
+    #: None, never 0, when nothing was measured — same rule as _rate, for the same reason:
+    #: a zero would read as "measured, and it was zero".
+    mean: float | None
+    median: float | None
+    minimum: int | None
+    maximum: int | None
 
 
 def _distribution(values: list[int]) -> Distribution:
     if not values:
-        return Distribution(n=0, mean=0.0, median=0.0, minimum=0, maximum=0)
+        return Distribution(n=0, mean=None, median=None, minimum=None, maximum=None)
     return Distribution(
         n=len(values), mean=round(statistics.fmean(values), 3),
         median=statistics.median(values), minimum=min(values), maximum=max(values),
@@ -118,10 +131,14 @@ def _distribution(values: list[int]) -> Distribution:
 
 
 @dataclass
-class GroupMetrics:
-    backend: str
-    arm: str
-    arm_role: str
+class Scores:
+    """Every number computable from a set of scored runs.
+
+    The same shape describes one arm pooled across its cases and one case within that arm,
+    because the decision rules read both: the success criterion aggregates, the veto is
+    per clean-control case.
+    """
+
     #: Final attempts that produced judgeable output. Runs still failing after their retry
     #: are counted in runs_failed and kept out of every denominator below.
     runs_scored: int
@@ -135,10 +152,33 @@ class GroupMetrics:
     do_not_flag_hits: int
     do_not_flag_rate: float | None
     do_not_flag_by_class: dict[str, int] = field(default_factory=dict)
-    findings_per_run: Distribution = field(
-        default_factory=lambda: _distribution([])
-    )
+    findings_per_run: Distribution = field(default_factory=lambda: _distribution([]))
     findings_per_run_by_severity: dict[str, Distribution] = field(default_factory=dict)
+    #: CRITICAL+HIGH findings per run, which is the veto rule's input before a human has
+    #: adjudicated which of them are false positives. Kept as its own distribution because
+    #: the median and range of a sum cannot be recovered from the two severities separately.
+    critical_high_per_run: Distribution = field(default_factory=lambda: _distribution([]))
+
+
+@dataclass
+class CaseMetrics:
+    case_id: str
+    #: From the row, which carries it so a filtered or concatenated file stays readable.
+    #: None when the results predate the field.
+    is_control: bool | None
+    scores: Scores
+
+
+@dataclass
+class GroupMetrics:
+    backend: str
+    arm: str
+    arm_role: str
+    scores: Scores
+    #: Per case, ordered by case id. The veto rule is written per clean-control case, so
+    #: the breakdown ships with the metrics rather than being re-derived by hand at the
+    #: moment someone is deciding whether to ship a prompt.
+    per_case: list[CaseMetrics] = field(default_factory=list)
 
 
 class GitLineCounter:
@@ -224,62 +264,86 @@ def final_attempts(rows: list[dict]) -> list[dict]:
     return list(best.values())
 
 
+def score(rows: list[dict], line_counter: LineCounter, repo: Path) -> Scores:
+    """Score one set of final attempts — an arm, or one case within an arm."""
+    scored = [r for r in rows if r["outcome"] != BACKEND_ERROR]
+    counts_by_severity: dict[str, list[int]] = {s: [] for s in SEVERITY_BUCKETS}
+    counts_total: list[int] = []
+    counts_critical_high: list[int] = []
+    findings_total = line_bearing = line_resolved = 0
+    do_not_flag_by_class: dict[str, int] = {}
+
+    for row in scored:
+        parsed = parse_backend_output(row["raw"], row["backend"], row["requested_model"])
+        buckets = [severity_bucket(f.severity) for f in parsed.findings]
+        counts_total.append(len(parsed.findings))
+        counts_critical_high.append(sum(1 for b in buckets if b in ("critical", "high")))
+        for bucket in SEVERITY_BUCKETS:
+            counts_by_severity[bucket].append(sum(1 for b in buckets if b == bucket))
+        for finding in parsed.findings:
+            findings_total += 1
+            category = classify_do_not_flag(finding.title or "")
+            if category:
+                do_not_flag_by_class[category] = do_not_flag_by_class.get(category, 0) + 1
+            # A finding with no file, no line, or a `file` that is not even a string made
+            # no locatable claim, so it is exempt rather than counted as unresolved. The
+            # type check is not paranoia: the runtime parser passes `file` through
+            # uncoerced, so a schema-violating review — exactly what this harness is built
+            # to catch — can put an object there, and scoring a whole sweep must not die on
+            # one bad field.
+            if not isinstance(finding.file, str) or not finding.file or finding.line is None:
+                continue
+            line_bearing += 1
+            total_lines = line_counter(
+                row["repo_commit"], normalize_cited_path(finding.file, repo)
+            )
+            if total_lines is not None and 1 <= finding.line <= total_lines:
+                line_resolved += 1
+
+    strict_valid = sum(1 for r in scored if r["outcome"] == VALID)
+    do_not_flag_hits = sum(do_not_flag_by_class.values())
+    return Scores(
+        runs_scored=len(scored), runs_failed=len(rows) - len(scored),
+        strict_valid=strict_valid,
+        strict_valid_rate=_rate(strict_valid, len(scored)),
+        findings_total=findings_total,
+        line_bearing=line_bearing, line_resolved=line_resolved,
+        line_resolved_rate=_rate(line_resolved, line_bearing),
+        do_not_flag_hits=do_not_flag_hits,
+        do_not_flag_rate=_rate(do_not_flag_hits, findings_total),
+        do_not_flag_by_class=dict(sorted(do_not_flag_by_class.items())),
+        findings_per_run=_distribution(counts_total),
+        findings_per_run_by_severity={
+            bucket: _distribution(counts_by_severity[bucket]) for bucket in SEVERITY_BUCKETS
+        },
+        critical_high_per_run=_distribution(counts_critical_high),
+    )
+
+
 def compute(
     rows: list[dict], line_counter: LineCounter, repo: Path,
 ) -> list[GroupMetrics]:
-    """Group the final attempt of every unit by backend and arm, and score each group."""
+    """Score the final attempt of every unit, per backend and arm and per case within it."""
     groups: dict[tuple[str, str], list[dict]] = {}
     for row in final_attempts(rows):
         groups.setdefault((row["backend"], row["arm"]), []).append(row)
 
     metrics: list[GroupMetrics] = []
     for (backend, arm), group in sorted(groups.items()):
-        scored = [r for r in group if r["outcome"] != BACKEND_ERROR]
-        counts_by_severity: dict[str, list[int]] = {s: [] for s in SEVERITIES}
-        counts_total: list[int] = []
-        findings_total = line_bearing = line_resolved = 0
-        do_not_flag_by_class: dict[str, int] = {}
-
-        for row in scored:
-            parsed = parse_backend_output(row["raw"], row["backend"], row["requested_model"])
-            counts_total.append(len(parsed.findings))
-            for severity in SEVERITIES:
-                counts_by_severity[severity].append(
-                    sum(1 for f in parsed.findings if f.severity == severity)
-                )
-            for finding in parsed.findings:
-                findings_total += 1
-                category = classify_do_not_flag(finding.title or "")
-                if category:
-                    do_not_flag_by_class[category] = do_not_flag_by_class.get(category, 0) + 1
-                # Findings with a null file or line make no locatable claim, so they are
-                # exempt rather than counted as unresolved.
-                if not finding.file or finding.line is None:
-                    continue
-                line_bearing += 1
-                total_lines = line_counter(
-                    row["repo_commit"], normalize_cited_path(finding.file, repo)
-                )
-                if total_lines is not None and 1 <= finding.line <= total_lines:
-                    line_resolved += 1
-
-        strict_valid = sum(1 for r in scored if r["outcome"] == VALID)
-        do_not_flag_hits = sum(do_not_flag_by_class.values())
+        by_case: dict[str, list[dict]] = {}
+        for row in group:
+            by_case.setdefault(row["case_id"], []).append(row)
         metrics.append(GroupMetrics(
             backend=backend, arm=arm, arm_role=group[0]["arm_role"],
-            runs_scored=len(scored), runs_failed=len(group) - len(scored),
-            strict_valid=strict_valid,
-            strict_valid_rate=_rate(strict_valid, len(scored)),
-            findings_total=findings_total,
-            line_bearing=line_bearing, line_resolved=line_resolved,
-            line_resolved_rate=_rate(line_resolved, line_bearing),
-            do_not_flag_hits=do_not_flag_hits,
-            do_not_flag_rate=_rate(do_not_flag_hits, findings_total),
-            do_not_flag_by_class=dict(sorted(do_not_flag_by_class.items())),
-            findings_per_run=_distribution(counts_total),
-            findings_per_run_by_severity={
-                s: _distribution(counts_by_severity[s]) for s in SEVERITIES
-            },
+            scores=score(group, line_counter, repo),
+            per_case=[
+                CaseMetrics(
+                    case_id=case_id,
+                    is_control=case_rows[0].get("case_is_control"),
+                    scores=score(case_rows, line_counter, repo),
+                )
+                for case_id, case_rows in sorted(by_case.items())
+            ],
         ))
     return metrics
 
@@ -294,24 +358,45 @@ def _pct(rate: float | None) -> str:
     return "n/a" if rate is None else f"{rate * 100:.1f}%"
 
 
+def _spread(d: Distribution) -> str:
+    if d.n == 0:
+        return "no runs"
+    return f"mean {d.mean} median {d.median} range {d.minimum}-{d.maximum}"
+
+
+def _case_label(case: CaseMetrics) -> str:
+    kind = {True: "control", False: "defect", None: "unlabelled"}[case.is_control]
+    return f"{case.case_id} ({kind})"
+
+
 def print_report(metrics: list[GroupMetrics]) -> None:
     for m in metrics:
+        s = m.scores
         print(f"\n{m.backend} / {m.arm} ({m.arm_role})")
-        print(f"  runs scored           {m.runs_scored} (failed: {m.runs_failed})")
-        print(f"  strict-valid          {_pct(m.strict_valid_rate)} "
-              f"({m.strict_valid}/{m.runs_scored})")
-        print(f"  file:line resolves    {_pct(m.line_resolved_rate)} "
-              f"({m.line_resolved}/{m.line_bearing} line-bearing findings)")
-        print(f"  DO-NOT-FLAG tripwire  {_pct(m.do_not_flag_rate)} "
-              f"({m.do_not_flag_hits}/{m.findings_total} findings)"
-              + (f" {m.do_not_flag_by_class}" if m.do_not_flag_by_class else ""))
-        d = m.findings_per_run
-        print(f"  findings/run          mean {d.mean} median {d.median} "
-              f"range {d.minimum}-{d.maximum} over {d.n} run(s)")
-        for severity in SEVERITIES:
-            s = m.findings_per_run_by_severity[severity]
-            print(f"    {severity:<9}         mean {s.mean} median {s.median} "
-                  f"range {s.minimum}-{s.maximum}")
+        print(f"  runs scored           {s.runs_scored} (failed: {s.runs_failed})")
+        print(f"  strict-valid          {_pct(s.strict_valid_rate)} "
+              f"({s.strict_valid}/{s.runs_scored})")
+        print(f"  file:line resolves    {_pct(s.line_resolved_rate)} "
+              f"({s.line_resolved}/{s.line_bearing} line-bearing findings)")
+        print(f"  DO-NOT-FLAG tripwire  {_pct(s.do_not_flag_rate)} "
+              f"({s.do_not_flag_hits}/{s.findings_total} findings)"
+              + (f" {s.do_not_flag_by_class}" if s.do_not_flag_by_class else ""))
+        print(f"  findings/run          {_spread(s.findings_per_run)} "
+              f"over {s.findings_per_run.n} run(s)")
+        for bucket in SEVERITY_BUCKETS:
+            print(f"    {bucket:<9}         {_spread(s.findings_per_run_by_severity[bucket])}")
+        print(f"  critical+high/run     {_spread(s.critical_high_per_run)}")
+        # The veto rule is written per clean-control case, so the numbers it reads are
+        # printed per case rather than left to be re-derived at decision time.
+        print("  per case:")
+        width = max(len(_case_label(c)) for c in m.per_case) if m.per_case else 0
+        for case in m.per_case:
+            c = case.scores
+            print(f"    {_case_label(case):<{width}}  runs {c.runs_scored}"
+                  f" (failed: {c.runs_failed})"
+                  f"  strict-valid {_pct(c.strict_valid_rate)}"
+                  f"  findings/run {_spread(c.findings_per_run)}"
+                  f"  critical+high/run {_spread(c.critical_high_per_run)}")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

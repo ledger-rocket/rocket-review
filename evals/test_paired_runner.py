@@ -148,7 +148,7 @@ def test_the_launcher_refuses_a_malformed_arm(tmp_path, git_repo, stub_backend, 
 
 
 def test_arms_alternate_within_each_case(tmp_path, arms):
-    from cases import load_case, load_cases
+    from cases import load_cases
 
     control, treatment = (load_arm(p) for p in arms)
     directory = tmp_path / "corpus" / "cases"
@@ -167,7 +167,6 @@ def test_arms_alternate_within_each_case(tmp_path, arms):
     assert [t.rep for t in tasks] == [1, 1, 2, 2, 3, 3]
     # Both arms get exactly the same work on the same case.
     assert sum(t.role == CONTROL for t in tasks) == sum(t.role == TREATMENT for t in tasks)
-    assert load_case(directory / "c-001.yaml").id == "c-001"
 
 
 def test_order_index_restarts_per_case_and_backend(tmp_path, arms):
@@ -244,6 +243,8 @@ def test_a_paired_run_produces_a_complete_result_file(
         assert row["requested_model"] == "stub-model"
         assert row["backend_version"] == "stub-codex 0.0.1"
         assert row["harness_rr_version"] == header["harness_rr_version"]
+        # Which decision rule governs this row, on the row itself.
+        assert row["case_is_control"] == (row["case_id"] == "c-001")
         assert row["command"][1] == str(LAUNCHER)
         assert "--full" in row["command"]
         assert json.loads(row["raw"])["verdict"] == "approve"
@@ -371,6 +372,11 @@ def test_a_case_that_cannot_be_staged_stops_the_run(
     assert "case-m-001" not in git(git_repo, "worktree", "list").stdout
 
 
-def test_remove_worktree_is_idempotent(git_repo, tmp_path):
-    # Teardown runs in a finally block that must not raise over an already-gone worktree.
+def test_remove_worktree_reports_a_failure_without_raising(git_repo, tmp_path, capsys):
+    # Teardown runs in a finally block alongside other cleanups, so it must not raise —
+    # but a worktree that would not go away leaves admin state only `prune` clears, and
+    # saying nothing about that is how it gets discovered weeks later.
     remove_worktree(git_repo, tmp_path / "never-created")
+    stderr = capsys.readouterr().err
+    assert "could not remove worktree" in stderr
+    assert "worktree prune" in stderr
