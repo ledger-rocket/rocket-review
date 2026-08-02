@@ -441,7 +441,7 @@ def _execute(
         "repo": str(args.repo.resolve()),
         "cases": [
             {"id": c.id, "mode": c.mode, "source": c.source, "repo_commit": c.repo_commit,
-             "control_case": c.is_control}
+             "case_is_control": c.is_control}
             for c in cases
         ],
         "runs": args.runs,

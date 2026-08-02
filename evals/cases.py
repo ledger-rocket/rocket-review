@@ -20,7 +20,7 @@ CASES_DIR = Path(__file__).resolve().parent / "cases"
 MODES = ("diff", "code", "plan")
 SOURCES = ("mutant", "merged-pr", "seeded-plan")
 
-TOP_LEVEL_KEYS = {"id", "mode", "source", "repo_commit", "diff", "path", "defect"}
+TOP_LEVEL_KEYS = {"id", "mode", "source", "repo_commit", "diff", "path", "defect", "killed_by"}
 DEFECT_KEYS = {"class", "file", "span", "expected"}
 
 
@@ -50,6 +50,11 @@ class Case:
     path: str | None
     #: Absent on clean controls — that absence is what makes a case a control.
     defect: Defect | None
+    #: Test node ids that fail with `diff` applied and pass without it — the admission
+    #: proof for a defect mutant, written by `verify_cases.py` rather than by hand. An
+    #: empty tuple means unproven: a mutant no test distinguishes may be an equivalent
+    #: mutant, and scoring recall on one would measure nothing.
+    killed_by: tuple[str, ...]
     manifest_path: Path
 
     @property
@@ -110,6 +115,17 @@ def _parse_defect(raw: object, where: str) -> Defect:
     )
 
 
+def _parse_killed_by(raw: object, where: str) -> tuple[str, ...]:
+    _require(isinstance(raw, list), f"{where}: killed_by must be a list of test node ids")
+    assert isinstance(raw, list)
+    _require(
+        all(isinstance(n, str) and n.strip() != "" for n in raw),
+        f"{where}: killed_by entries must be non-empty strings",
+    )
+    _require(len(set(raw)) == len(raw), f"{where}: killed_by contains duplicate node ids")
+    return tuple(raw)
+
+
 def load_case(path: Path) -> Case:
     """Parse and validate one manifest. Every rejection names the file and the field."""
     try:
@@ -152,10 +168,24 @@ def load_case(path: Path) -> Case:
         )
 
     defect = _parse_defect(raw["defect"], str(path)) if raw.get("defect") is not None else None
+    _require(
+        not (raw["source"] == "mutant" and raw["mode"] == "code" and defect is None),
+        f"{path}: a code-mode mutant is reviewed as the file its defect names, so it "
+        "cannot omit `defect`",
+    )
+    killed_by = (
+        _parse_killed_by(raw["killed_by"], str(path)) if raw.get("killed_by") is not None
+        else ()
+    )
+    _require(
+        not (killed_by and raw["source"] != "mutant"),
+        f"{path}: killed_by is a mutant's admission proof; a {raw['source']} case has "
+        "no patch for a test to kill",
+    )
     return Case(
         id=raw["id"], mode=raw["mode"], source=raw["source"],
         repo_commit=raw["repo_commit"], diff=diff, path=case_path,
-        defect=defect, manifest_path=path,
+        defect=defect, killed_by=killed_by, manifest_path=path,
     )
 
 
@@ -185,11 +215,18 @@ def materialize(case: Case, repo: Path, workdir: Path) -> Materialized:
     """Stage a case so `rr` reviews it the way the developer who hit it would have.
 
     Mutant cases get a detached worktree at `repo_commit` with the patch applied to the
-    working tree, and are reviewed with `--diff`. That is the faithful shape: the agentic
-    backends are told to run `git diff HEAD` and can navigate the whole snapshot around the
-    change, exactly as on a real uncommitted edit. Feeding the patch on stdin instead would
-    hand every backend the same bytes but strip the repository context that `rr`'s primary
-    mode depends on, so a prompt change affecting repo navigation would not show up.
+    working tree. A `diff`-mode mutant is reviewed with `--diff`, which is the faithful
+    shape: the agentic backends are told to run `git diff HEAD` and can navigate the whole
+    snapshot around the change, exactly as on a real uncommitted edit. Feeding the patch on
+    stdin instead would hand every backend the same bytes but strip the repository context
+    that `rr`'s primary mode depends on, so a prompt change affecting repo navigation would
+    not show up.
+
+    A `code`-mode mutant is the same worktree reviewed as a whole file — `rr <defect.file>`
+    — which is what asks whether the defect is still found without a diff pointing at it.
+    The path is passed repo-relative so findings cite the same path the manifest and
+    `tier1`'s resolver use; an absolute path into a throwaway worktree would resolve
+    against nothing.
 
     Merged-PR cases need no worktree: a commit is immutable, so `--commit <oid>` in the
     repo itself is already reproducible, and it exercises rr's `git show` path.
@@ -216,6 +253,11 @@ def materialize(case: Case, repo: Path, workdir: Path) -> Materialized:
             raise CaseError(
                 f"{case.id}: patch {case.diff} does not apply at {case.repo_commit}: "
                 f"{applied.stderr.strip()}"
+            )
+        if case.mode == "code":
+            assert case.defect is not None  # load_case rejects a code mutant without one
+            return Materialized(
+                cwd=worktree, rr_args=[case.defect.file], worktree=worktree,
             )
         return Materialized(cwd=worktree, rr_args=["--diff"], worktree=worktree)
 

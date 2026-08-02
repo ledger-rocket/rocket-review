@@ -243,8 +243,12 @@ def test_a_paired_run_produces_a_complete_result_file(
         assert row["requested_model"] == "stub-model"
         assert row["backend_version"] == "stub-codex 0.0.1"
         assert row["harness_rr_version"] == header["harness_rr_version"]
-        # Which decision rule governs this row, on the row itself.
+        # Which decision rule governs this row, on the row itself — under the same key
+        # the header uses, so a filter that keeps only rows and one that keeps only the
+        # header are read the same way.
         assert row["case_is_control"] == (row["case_id"] == "c-001")
+        header_case = next(c for c in header["cases"] if c["id"] == row["case_id"])
+        assert header_case["case_is_control"] == row["case_is_control"]
         assert row["command"][1] == str(LAUNCHER)
         assert "--full" in row["command"]
         assert json.loads(row["raw"])["verdict"] == "approve"
