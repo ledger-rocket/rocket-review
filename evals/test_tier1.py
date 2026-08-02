@@ -21,6 +21,7 @@ from tier1 import (
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 REPO_COMMIT = "abc1234def5678"
+SWEEP = "sweep-a"
 
 
 def review(findings, verdict="needs_fixes", summary="s") -> str:
@@ -37,7 +38,7 @@ def finding(title="Something is wrong", severity="high", file="sample.py", line=
 
 def row(**overrides) -> dict:
     base = {
-        "case_id": "c-001", "mode": "diff", "source": "merged-pr",
+        "sweep_id": SWEEP, "case_id": "c-001", "mode": "diff", "source": "merged-pr",
         "repo_commit": REPO_COMMIT, "case_is_control": True,
         "arm": "control-arm", "arm_role": "control",
         "arm_hash": "h", "backend": "codex", "requested_model": "m", "rep": 1,
@@ -50,12 +51,30 @@ def row(**overrides) -> dict:
     return base
 
 
+def partner(control_row: dict, **overrides) -> dict:
+    """The treatment run of the same repetition.
+
+    Nothing scores unless a repetition has both arms, so a test about the control arm has
+    to supply the treatment run that makes its repetitions complete.
+    """
+    other = dict(control_row)
+    other.update({"arm": "treatment-arm", "arm_role": "treatment", "raw": review([])})
+    other.update(overrides)
+    return other
+
+
+def paired(rows: list[dict]) -> list[dict]:
+    return [r for control in rows for r in (control, partner(control))]
+
+
 def counting(lines_by_path: dict[str, int]):
     return lambda commit, path: lines_by_path.get(path)
 
 
 def group(rows, **kwargs):
-    return compute(rows, counting(kwargs.pop("lines", {})), Path("/repo"))[0]
+    """The control group's metrics, with each given row paired off automatically."""
+    metrics, _ = compute(paired(rows), counting(kwargs.pop("lines", {})), Path("/repo"))
+    return metrics[0]
 
 
 def only(rows, **kwargs):
@@ -124,10 +143,10 @@ def test_strict_valid_rate_excludes_failed_runs_from_the_denominator():
         row(rep=3, outcome=DECODE_FAILURE, raw="I refuse."),
         row(rep=4, outcome=BACKEND_ERROR, raw="", backend_error="codex timed out"),
     ]
-    metrics = only(rows)
-    assert metrics.runs_scored == 3
-    assert metrics.runs_failed == 1
-    assert metrics.strict_valid_rate == round(1 / 3, 4)
+    metrics = group(rows)
+    assert metrics.scores.runs_scored == 3
+    assert metrics.excluded_unpaired == 1
+    assert metrics.scores.strict_valid_rate == round(1 / 3, 4)
 
 
 def test_only_the_last_attempt_of_a_unit_is_scored():
@@ -136,10 +155,10 @@ def test_only_the_last_attempt_of_a_unit_is_scored():
         row(rep=1, attempt=2, outcome=VALID),
     ]
     assert [r["attempt"] for r in final_attempts(rows)] == [2]
-    metrics = only(rows)
-    assert metrics.runs_scored == 1
-    assert metrics.runs_failed == 0
-    assert metrics.strict_valid_rate == 1.0
+    metrics = group(rows)
+    assert metrics.scores.runs_scored == 1
+    assert metrics.excluded_unpaired == 0
+    assert metrics.scores.strict_valid_rate == 1.0
 
 
 def test_a_unit_failing_after_its_retry_is_counted_as_failed_not_dropped():
@@ -147,9 +166,121 @@ def test_a_unit_failing_after_its_retry_is_counted_as_failed_not_dropped():
         row(rep=1, attempt=1, outcome=BACKEND_ERROR, raw="", backend_error="boom"),
         row(rep=1, attempt=2, outcome=BACKEND_ERROR, raw="", backend_error="boom"),
     ]
-    metrics = only(rows)
-    assert (metrics.runs_scored, metrics.runs_failed) == (0, 1)
-    assert metrics.strict_valid_rate is None
+    metrics = group(rows)
+    assert (metrics.scores.runs_scored, metrics.excluded_unpaired) == (0, 1)
+    assert metrics.scores.strict_valid_rate is None
+
+
+# --- complete pairs ----------------------------------------------------------------------
+
+
+def test_one_arms_failure_removes_the_repetition_from_both_arms():
+    # Dropping a failed run arm-by-arm desynchronises the denominators: the surviving arm
+    # keeps a repetition its partner never completed, so the two are no longer compared on
+    # the same work — and the cases that fail are exactly the noisy ones.
+    control = row(rep=1, raw=review([finding(severity="critical")]))
+    failed = partner(control, outcome=BACKEND_ERROR, raw="", backend_error="codex timed out")
+    healthy = row(rep=2, raw=review([finding(severity="critical")]))
+    metrics, incomplete = compute(
+        [control, failed, healthy, partner(healthy)],
+        counting({"sample.py": 5}), Path("/repo"),
+    )
+    assert [(m.arm_role, m.scores.runs_scored, m.excluded_unpaired) for m in metrics] == [
+        ("control", 1, 1), ("treatment", 1, 1),
+    ]
+    # Both arms lost rep 1; neither kept a half-pair.
+    assert [(m.arm_role, m.scores.critical_high_per_run.n) for m in metrics] == [
+        ("control", 1), ("treatment", 1),
+    ]
+    assert len(incomplete) == 1
+    assert (incomplete[0].case_id, incomplete[0].rep) == ("c-001", 1)
+    assert "treatment failed" in incomplete[0].reason
+
+
+def test_a_repetition_missing_an_arm_entirely_is_incomplete():
+    metrics, incomplete = compute(
+        [row(rep=1)], counting({}), Path("/repo"),
+    )
+    assert metrics[0].scores.runs_scored == 0
+    assert metrics[0].excluded_unpaired == 1
+    assert incomplete[0].reason == "only the control run is present"
+
+
+def test_incomplete_repetitions_are_named_in_the_report(tmp_path, capsys):
+    path = tmp_path / "paired.jsonl"
+    control = row(rep=1)
+    path.write_text(
+        "\n".join([
+            json.dumps(control),
+            json.dumps(partner(control, outcome=BACKEND_ERROR, raw="",
+                               backend_error="codex timed out")),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    assert main([str(path), "--repo", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "1 repetition(s) excluded" in out
+    assert "c-001 / codex rep1: treatment failed after every attempt" in out
+
+
+# --- sweep sessions ------------------------------------------------------------------------
+
+
+def test_rows_from_two_sweeps_are_never_one_unit():
+    # Same case, backend, arm, role and repetition in two sessions: keying without the
+    # sweep would treat one as a retry of the other and discard a whole session's run.
+    first = row(sweep_id="sweep-a")
+    second = row(sweep_id="sweep-b")
+    assert len(final_attempts([first, second])) == 2
+    metrics, _ = compute(
+        [first, partner(first), second, partner(second)],
+        counting({"sample.py": 5}), Path("/repo"),
+    )
+    assert [(m.sweep_id, m.arm_role) for m in metrics] == [
+        ("sweep-a", "control"), ("sweep-a", "treatment"),
+        ("sweep-b", "control"), ("sweep-b", "treatment"),
+    ]
+
+
+def test_scoring_refuses_a_file_holding_more_than_one_sweep(tmp_path, capsys):
+    path = tmp_path / "paired.jsonl"
+    first, second = row(sweep_id="sweep-a"), row(sweep_id="sweep-b")
+    path.write_text(
+        "\n".join(json.dumps(r) for r in (
+            first, partner(first), second, partner(second),
+        )) + "\n",
+        encoding="utf-8",
+    )
+    assert main([str(path), "--repo", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "contains 2 sweeps" in err
+    assert "--allow-multiple-sweeps" in err
+
+
+def test_the_override_warns_loudly_and_still_scores_each_sweep_apart(tmp_path, capsys):
+    path = tmp_path / "paired.jsonl"
+    first, second = row(sweep_id="sweep-a"), row(sweep_id="sweep-b")
+    path.write_text(
+        "\n".join(json.dumps(r) for r in (
+            first, partner(first), second, partner(second),
+        )) + "\n",
+        encoding="utf-8",
+    )
+    assert main([str(path), "--repo", str(tmp_path), "--allow-multiple-sweeps"]) == 0
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "nothing is pooled" in captured.err
+    # Four groups, not two: the sweeps are reported side by side, never merged.
+    assert captured.out.count("codex / control") == 2
+    assert "[sweep-a]" in captured.out and "[sweep-b]" in captured.out
+
+
+def test_rows_without_a_sweep_id_still_score(tmp_path, capsys):
+    stale = row()
+    del stale["sweep_id"]
+    metrics, _ = compute([stale, partner(stale)], counting({}), Path("/repo"))
+    assert metrics[0].sweep_id == "unknown-sweep"
+    assert metrics[0].scores.runs_scored == 1
 
 
 # --- file:line resolution ----------------------------------------------------------------
@@ -376,7 +507,7 @@ def test_each_case_is_scored_separately_within_an_arm():
         row(case_id="c-002", case_is_control=True, rep=1, arm="treatment-arm",
             arm_role="treatment", raw=review([])),
     ]
-    metrics = compute(rows, counting({"sample.py": 5}), Path("/repo"))
+    metrics, _ = compute(rows, counting({"sample.py": 5}), Path("/repo"))
     pooled = {m.arm: m.scores.critical_high_per_run.mean for m in metrics}
     assert pooled == {"control-arm": 1.0, "treatment-arm": 1.0}
 
@@ -414,7 +545,7 @@ def test_an_a_a_run_scores_every_row_and_reports_two_groups():
     ]
     assert len(final_attempts(rows)) == len(rows) == 8
 
-    metrics = compute(rows, counting({"sample.py": 5}), Path("/repo"))
+    metrics, _ = compute(rows, counting({"sample.py": 5}), Path("/repo"))
     assert [(m.arm_role, m.arm, m.scores.runs_scored) for m in metrics] == [
         ("control", "current", 4), ("treatment", "current", 4),
     ]
@@ -427,7 +558,7 @@ def test_two_arms_sharing_a_directory_name_stay_separate():
         row(arm="current", arm_role="treatment", arm_hash="bbb",
             raw=review([finding(), finding()])),
     ]
-    metrics = compute(rows, counting({"sample.py": 5}), Path("/repo"))
+    metrics, _ = compute(rows, counting({"sample.py": 5}), Path("/repo"))
     assert [(m.arm_role, m.scores.findings_total) for m in metrics] == [
         ("control", 1), ("treatment", 2),
     ]
@@ -445,9 +576,9 @@ def test_a_cases_failed_runs_are_visible_in_its_own_breakdown():
         row(case_id="c-001", case_is_control=True, rep=1, outcome=BACKEND_ERROR,
             raw="", backend_error="codex timed out"),
     ]
-    per_case = {c.case_id: c.scores for c in group(rows, lines={"sample.py": 5}).per_case}
-    assert (per_case["b-001"].runs_scored, per_case["b-001"].runs_failed) == (1, 0)
-    assert (per_case["c-001"].runs_scored, per_case["c-001"].runs_failed) == (0, 1)
+    per_case = {c.case_id: c for c in group(rows, lines={"sample.py": 5}).per_case}
+    assert (per_case["b-001"].scores.runs_scored, per_case["b-001"].excluded_unpaired) == (1, 0)
+    assert (per_case["c-001"].scores.runs_scored, per_case["c-001"].excluded_unpaired) == (0, 1)
 
 
 # --- grouping and IO -----------------------------------------------------------------------
@@ -456,10 +587,10 @@ def test_a_cases_failed_runs_are_visible_in_its_own_breakdown():
 def test_arms_and_backends_are_scored_separately():
     rows = [
         row(arm="control-arm", arm_role="control", raw=review([finding()])),
-        row(arm="treatment-arm", arm_role="treatment", rep=2,
+        row(arm="treatment-arm", arm_role="treatment",
             raw=review([finding(), finding()])),
     ]
-    metrics = compute(rows, counting({"sample.py": 5}), Path("/repo"))
+    metrics, _ = compute(rows, counting({"sample.py": 5}), Path("/repo"))
     assert [(m.arm, m.arm_role, m.scores.findings_total) for m in metrics] == [
         ("control-arm", "control", 1), ("treatment-arm", "treatment", 2),
     ]
@@ -467,18 +598,22 @@ def test_arms_and_backends_are_scored_separately():
 
 def test_a_results_file_round_trips_through_load_and_compute(tmp_path, capsys):
     path = tmp_path / "paired.jsonl"
+    control = row(raw=review([finding(title="Imports are not sorted")]))
     path.write_text(
-        json.dumps({"type": "header", "runs": 1}) + "\n"
-        + json.dumps(row(raw=review([finding(title="Imports are not sorted")]))) + "\n",
+        "\n".join([
+            json.dumps({"type": "header", "runs": 1}),
+            json.dumps(control),
+            json.dumps(partner(control)),
+        ]) + "\n",
         encoding="utf-8",
     )
     header, rows = load_jsonl(path)
     assert header["runs"] == 1
-    assert len(rows) == 1
+    assert len(rows) == 2
     assert main([str(path), "--repo", str(tmp_path), "--json"]) == 0
     reported = json.loads(capsys.readouterr().out)
-    assert reported[0]["scores"]["do_not_flag_by_class"] == {"import-ordering": 1}
-    assert reported[0]["per_case"][0]["case_id"] == "c-001"
+    assert reported["groups"][0]["scores"]["do_not_flag_by_class"] == {"import-ordering": 1}
+    assert reported["groups"][0]["per_case"][0]["case_id"] == "c-001"
 
 
 def test_a_corrupt_results_line_is_reported_with_its_line_number(tmp_path):

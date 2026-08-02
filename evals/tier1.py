@@ -154,9 +154,11 @@ class Scores:
     do_not_flag_by_class: dict[str, int] = field(default_factory=dict)
     findings_per_run: Distribution = field(default_factory=lambda: _distribution([]))
     findings_per_run_by_severity: dict[str, Distribution] = field(default_factory=dict)
-    #: CRITICAL+HIGH findings per run, which is the veto rule's input before a human has
-    #: adjudicated which of them are false positives. Kept as its own distribution because
-    #: the median and range of a sum cannot be recovered from the two severities separately.
+    #: CRITICAL+HIGH findings per run. Kept as its own distribution because the median and
+    #: range of a sum cannot be recovered from the two severities separately. Only the
+    #: instance on `GroupMetrics.control_scores` is the veto rule's input — on any wider set
+    #: of cases this pools defect cases, where a CRITICAL finding is the right answer. Both
+    #: are pre-adjudication either way.
     critical_high_per_run: Distribution = field(default_factory=lambda: _distribution([]))
 
 
@@ -167,20 +169,27 @@ class CaseMetrics:
     #: None when the results predate the field.
     is_control: bool | None
     scores: Scores
+    #: Runs dropped because the other arm's run of the same repetition did not complete.
+    excluded_unpaired: int = 0
 
 
 @dataclass
 class GroupMetrics:
+    #: Which sweep produced these rows. Never merged across sweeps — see unit_key.
+    sweep_id: str
     backend: str
     #: Role first: it, not the arm name, is what identifies a group. An A/A run has two
     #: groups with the same arm name, and that is the point of an A/A run.
     arm_role: str
     arm: str
     scores: Scores
-    #: The same scores over clean-control cases only. `scores.critical_high_per_run` pools
-    #: defect cases too, where a CRITICAL finding is the correct answer rather than noise,
-    #: so it is not the number the veto rule asks about — this is.
+    #: The same scores over clean-control cases only. This is the veto rule's input:
+    #: `scores.critical_high_per_run` pools defect cases, where a CRITICAL finding is the
+    #: correct answer rather than the noise the veto bounds.
     control_scores: Scores | None = None
+    #: Runs dropped because their repetition's other arm did not complete. Reported, not
+    #: absorbed: a sweep that quietly lost a third of its work should look like one.
+    excluded_unpaired: int = 0
     #: Per case, ordered by case id. The veto rule is written per clean-control case, so
     #: the breakdown ships with the metrics rather than being re-derived by hand at the
     #: moment someone is deciding whether to ship a prompt.
@@ -260,16 +269,41 @@ def load_jsonl(path: Path) -> tuple[dict, list[dict]]:
     return header, rows
 
 
+#: Rows written before sweep ids existed. Kept distinguishable from a real id so such a
+#: file still scores, but never silently pooled with an identified sweep.
+UNKNOWN_SWEEP = "unknown-sweep"
+
+
+def sweep_of(row: dict) -> str:
+    return row.get("sweep_id") or UNKNOWN_SWEEP
+
+
+def sweep_ids(rows: list[dict]) -> list[str]:
+    return sorted({sweep_of(row) for row in rows})
+
+
+def pair_key(row: dict) -> tuple:
+    """The repetition a run belongs to: its control and its treatment are one pair."""
+    return (sweep_of(row), row["case_id"], row["backend"], row["rep"])
+
+
 def unit_key(row: dict) -> tuple:
-    """What makes a run unique. `arm_role` is part of it, not decoration.
+    """What makes a run unique. `arm_role` and `sweep_id` are part of it, not decoration.
 
     An A/A run — the same arm as both control and treatment, which is how the noise floor
     gets measured — puts the same arm *name* on two different runs of the same case and
     repetition. Keying on the name alone would collapse them into one unit and silently
     discard half the sweep. Two different arm directories that happen to share a basename
     would collapse the same way.
+
+    The sweep id is in the key for the same reason one level up: two sessions produce rows
+    with identical case/backend/arm/rep, and treating them as retries of one another would
+    silently drop one session's data or pool measurements taken hours apart.
     """
-    return (row["case_id"], row["backend"], row["arm"], row["arm_role"], row["rep"])
+    return (
+        sweep_of(row), row["case_id"], row["backend"],
+        row["arm"], row["arm_role"], row["rep"],
+    )
 
 
 def final_attempts(rows: list[dict]) -> list[dict]:
@@ -280,6 +314,49 @@ def final_attempts(rows: list[dict]) -> list[dict]:
         if key not in best or row["attempt"] > best[key]["attempt"]:
             best[key] = row
     return list(best.values())
+
+
+@dataclass(frozen=True)
+class IncompletePair:
+    sweep_id: str
+    case_id: str
+    backend: str
+    rep: int
+    reason: str
+
+
+def split_complete_pairs(rows: list[dict]) -> tuple[list[dict], list[IncompletePair]]:
+    """Keep only repetitions where both arms produced a judgeable review.
+
+    Excluding a failed run arm-by-arm quietly desynchronises the two denominators: a case
+    that times out on the treatment only would keep contributing its control runs, so the
+    arms would no longer be compared on the same work. Since a noisy case is exactly the
+    kind that fails, that bias points somewhere in particular. A repetition is therefore
+    all-or-nothing, and what got dropped is reported rather than absorbed.
+    """
+    pairs: dict[tuple, list[dict]] = {}
+    for row in rows:
+        pairs.setdefault(pair_key(row), []).append(row)
+
+    complete: list[dict] = []
+    incomplete: list[IncompletePair] = []
+    for key, members in sorted(pairs.items()):
+        sweep, case_id, backend, rep = key
+        roles = {m["arm_role"] for m in members}
+        failed = sorted(
+            {m["arm_role"] for m in members if m["outcome"] == BACKEND_ERROR}
+        )
+        if failed:
+            reason = f"{', '.join(failed)} failed after every attempt"
+        elif len(roles) < 2:
+            reason = f"only the {roles.pop()} run is present"
+        else:
+            complete.extend(members)
+            continue
+        incomplete.append(IncompletePair(
+            sweep_id=sweep, case_id=case_id, backend=backend, rep=rep, reason=reason,
+        ))
+    return complete, incomplete
 
 
 def score(rows: list[dict], line_counter: LineCounter, repo: Path) -> Scores:
@@ -349,34 +426,52 @@ def score(rows: list[dict], line_counter: LineCounter, repo: Path) -> Scores:
 def compute(
     rows: list[dict], line_counter: LineCounter, repo: Path,
 ) -> list[GroupMetrics]:
-    """Score the final attempt of every unit, per backend and arm role and per case."""
+    """Score complete repetitions, per sweep/backend/arm role, and per case within each."""
+    finals = final_attempts(rows)
+    complete, incomplete = split_complete_pairs(finals)
+    scored_keys = {unit_key(r) for r in complete}
+
     # Keyed on role as well as name, and sorted with role first so control precedes
     # treatment: an A/A run has two groups whose arm name is identical, and merging them
-    # would report the noise-floor measurement as a single arm.
-    groups: dict[tuple[str, str, str], list[dict]] = {}
-    for row in final_attempts(rows):
-        groups.setdefault((row["backend"], row["arm_role"], row["arm"]), []).append(row)
+    # would report the noise-floor measurement as a single arm. Sweep id leads, because two
+    # sessions are never one measurement.
+    #
+    # Group keys come from every final attempt, not only the complete ones, so an arm whose
+    # every repetition was dropped still appears — with nothing scored and a count saying
+    # why, rather than vanishing from the report.
+    groups: dict[tuple[str, str, str, str], list[dict]] = {}
+    for row in finals:
+        key = (sweep_of(row), row["backend"], row["arm_role"], row["arm"])
+        groups.setdefault(key, []).append(row)
 
     metrics: list[GroupMetrics] = []
-    for (backend, arm_role, arm), group in sorted(groups.items()):
+    for (sweep, backend, arm_role, arm), group in sorted(groups.items()):
+        paired = [r for r in group if unit_key(r) in scored_keys]
         by_case: dict[str, list[dict]] = {}
         for row in group:
             by_case.setdefault(row["case_id"], []).append(row)
-        controls = [r for r in group if r.get("case_is_control") is True]
+        controls = [r for r in paired if r.get("case_is_control") is True]
         metrics.append(GroupMetrics(
-            backend=backend, arm_role=arm_role, arm=arm,
-            scores=score(group, line_counter, repo),
+            sweep_id=sweep, backend=backend, arm_role=arm_role, arm=arm,
+            scores=score(paired, line_counter, repo),
             control_scores=score(controls, line_counter, repo) if controls else None,
+            excluded_unpaired=len(group) - len(paired),
             per_case=[
                 CaseMetrics(
                     case_id=case_id,
                     is_control=case_rows[0].get("case_is_control"),
-                    scores=score(case_rows, line_counter, repo),
+                    scores=score(
+                        [r for r in case_rows if unit_key(r) in scored_keys],
+                        line_counter, repo,
+                    ),
+                    excluded_unpaired=sum(
+                        1 for r in case_rows if unit_key(r) not in scored_keys
+                    ),
                 )
                 for case_id, case_rows in sorted(by_case.items())
             ],
         ))
-    return metrics
+    return metrics, incomplete
 
 
 def _rate(numerator: int, denominator: int) -> float | None:
@@ -400,13 +495,22 @@ def _case_label(case: CaseMetrics) -> str:
     return f"{case.case_id} ({kind})"
 
 
-def print_report(metrics: list[GroupMetrics]) -> None:
+def print_report(metrics: list[GroupMetrics], incomplete: list[IncompletePair]) -> None:
+    multi_sweep = len({m.sweep_id for m in metrics}) > 1
+    if incomplete:
+        print(f"\n{len(incomplete)} repetition(s) excluded — a repetition scores only when "
+              "both arms produced a review:")
+        for pair in incomplete:
+            prefix = f"{pair.sweep_id[:8]} " if multi_sweep else ""
+            print(f"  {prefix}{pair.case_id} / {pair.backend} rep{pair.rep}: {pair.reason}")
     for m in metrics:
         s = m.scores
         # Role first, name in parentheses: in an A/A run the name is the same on both
         # lines, and the role is the only thing telling them apart.
-        print(f"\n{m.backend} / {m.arm_role} ({m.arm})")
-        print(f"  runs scored           {s.runs_scored} (failed: {s.runs_failed})")
+        sweep = f"[{m.sweep_id[:8]}] " if multi_sweep else ""
+        print(f"\n{sweep}{m.backend} / {m.arm_role} ({m.arm})")
+        print(f"  runs scored           {s.runs_scored} "
+              f"(unpaired, excluded: {m.excluded_unpaired})")
         print(f"  strict-valid          {_pct(s.strict_valid_rate)} "
               f"({s.strict_valid}/{s.runs_scored})")
         print(f"  file:line resolves    {_pct(s.line_resolved_rate)} "
@@ -423,9 +527,11 @@ def print_report(metrics: list[GroupMetrics]) -> None:
         # The veto rule asks only about clean controls, so that number is printed rather
         # than left to be recombined by hand from the per-case rows below.
         controls = m.control_scores
-        print("    clean controls only "
-              + (_spread(controls.critical_high_per_run) if controls else "no control cases")
-              + (f" over {controls.critical_high_per_run.n} run(s)" if controls else ""))
+        if controls is None or controls.critical_high_per_run.n == 0:
+            print("    clean controls only no control runs scored")
+        else:
+            print(f"    clean controls only {_spread(controls.critical_high_per_run)} "
+                  f"over {controls.critical_high_per_run.n} run(s)")
         # The veto rule is written per clean-control case, so the numbers it reads are
         # printed per case rather than left to be re-derived at decision time.
         print("  per case:")
@@ -433,7 +539,7 @@ def print_report(metrics: list[GroupMetrics]) -> None:
         for case in m.per_case:
             c = case.scores
             print(f"    {_case_label(case):<{width}}  runs {c.runs_scored}"
-                  f" (failed: {c.runs_failed})"
+                  f" (excluded: {case.excluded_unpaired})"
                   f"  strict-valid {_pct(c.strict_valid_rate)}"
                   f"  findings/run {_spread(c.findings_per_run)}"
                   f"  critical+high/run {_spread(c.critical_high_per_run)}")
@@ -452,6 +558,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--json", action="store_true", help="Emit the metrics as JSON instead of a report",
     )
+    parser.add_argument(
+        "--allow-multiple-sweeps", action="store_true",
+        help="Score a file containing rows from more than one sweep. Refused by default: "
+             "the comparison only means anything within a session, so rows from two "
+             "sessions are two measurements, never one. Even with this flag they are never "
+             "pooled — each sweep is scored on its own.",
+    )
     return parser.parse_args(argv)
 
 
@@ -468,11 +581,34 @@ def main(argv: list[str] | None = None) -> int:
     if not rows:
         print(f"Error: {args.results} has no run rows.", file=sys.stderr)
         return 1
-    metrics = compute(rows, GitLineCounter(args.repo), args.repo)
+
+    found = sweep_ids(rows)
+    if len(found) > 1:
+        if not args.allow_multiple_sweeps:
+            print(
+                f"Error: {args.results} contains {len(found)} sweeps "
+                f"({', '.join(s[:8] for s in found)}). Both arms are only comparable "
+                "within the session that ran them, so scoring across sweeps compares a "
+                "prompt change against whatever else moved in between. Pass "
+                "--allow-multiple-sweeps to score each sweep separately anyway.",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            f"WARNING: scoring {len(found)} separate sweeps from one file. Each is scored "
+            "on its own and nothing is pooled across them, but numbers from different "
+            "sweeps are not comparable — they were measured against different conditions.",
+            file=sys.stderr,
+        )
+
+    metrics, incomplete = compute(rows, GitLineCounter(args.repo), args.repo)
     if args.json:
-        print(json.dumps([asdict(m) for m in metrics], indent=2))
+        print(json.dumps({
+            "groups": [asdict(m) for m in metrics],
+            "incomplete_pairs": [asdict(p) for p in incomplete],
+        }, indent=2))
     else:
-        print_report(metrics)
+        print_report(metrics, incomplete)
     return 0
 
 
