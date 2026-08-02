@@ -8,6 +8,11 @@ build/
 venv/
 .venv/
 
+# Written by any `uv run`, including the throwaway worktrees verify_cases.py creates.
+# The project ships no lockfile: rocket-review is a library-shaped CLI whose runtime
+# dependencies are empty, and CI pins its own tool versions.
+uv.lock
+
 # Sweep output: full review text for real commits, and a snapshot of one model
 # version at one moment. Measurements, not artefacts of the repo.
 evals/results/

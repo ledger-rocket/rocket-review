@@ -47,6 +47,11 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
+          # The eval corpus pins each case to a commit oid and its manifest-integrity
+          # tests read that commit out of the object database (`git show <oid>:<path>`,
+          # ancestry against main). The default depth-1 checkout has none of it. The
+          # repo is small, so full history is cheaper than teaching the tests to skip.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
       - name: Run test suite
         run: |
