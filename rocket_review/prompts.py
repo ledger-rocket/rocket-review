@@ -30,7 +30,8 @@ Severity levels:
 - MEDIUM: Improvement that would make the plan more robust
 - LOW: Minor suggestion or nice-to-have
 
-Every finding MUST carry a severity. A finding without one is not valid output.
+Label each finding with one of the severity levels above. An unlabelled finding is \
+malformed — do not emit one.
 
 End with:
 - **Verdict**: Ready / Needs revision / Major rework needed
@@ -87,7 +88,8 @@ SEVERITY LEVELS
 - MEDIUM: Maintainability concerns, code smells, test gaps
 - LOW: Style nits, minor improvements, clarification opportunities
 
-Every finding MUST carry a severity. A finding without one is not valid output.
+Label each finding with one of the severity levels above. An unlabelled finding is \
+malformed — do not emit one.
 
 EVALUATION AREAS (apply as relevant)
 - Security: auth flaws, input validation, crypto, secrets handling
@@ -149,7 +151,8 @@ SEVERITY LEVELS
 - MEDIUM: Missing tests, incomplete error handling, maintainability concerns
 - LOW: Minor improvements (but not style — leave that to linters)
 
-Every finding MUST carry a severity. A finding without one is not valid output.
+Label each finding with one of the severity levels above. An unlabelled finding is \
+malformed — do not emit one.
 
 OUTPUT FORMAT
 For each finding:

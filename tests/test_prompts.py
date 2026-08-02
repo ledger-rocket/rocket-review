@@ -62,7 +62,7 @@ def test_only_the_plan_prompt_asks_what_is_good():
 
 @pytest.mark.parametrize("mode", list(MODE_MARKERS))
 def test_every_mode_makes_severity_mandatory(mode):
-    assert "Every finding MUST carry a severity" in get_prompt(mode)
+    assert "Label each finding with one of the severity levels above" in get_prompt(mode)
 
 
 @pytest.mark.parametrize("mode", ["code", "diff"])

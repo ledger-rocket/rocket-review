@@ -7,9 +7,7 @@ name = "rocket-review"
 version = "0.1.1"
 description = "Second-opinion code and plan reviews from Codex, Claude Code, opencode, or the OpenAI API — one CLI"
 requires-python = ">=3.13"
-# Compound expression: the review prompts carry finding-classification wording derived
-# from GSD, which is MIT. THIRD_PARTY_NOTICES.md names the passage.
-license = "Apache-2.0 AND MIT"
+license = "Apache-2.0"
 # THIRD_PARTY_NOTICES.md rides along here because license-files is the only hook that
 # puts a top-level file into both the sdist and the wheel. Naming any file replaces the
 # default glob set, so LICENSE has to be listed explicitly too.
