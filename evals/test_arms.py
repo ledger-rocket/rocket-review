@@ -1,6 +1,5 @@
 """Arm loading, hashing, and the guards that keep an arm from silently going stale."""
 
-from difflib import unified_diff
 from pathlib import Path
 
 import pytest
@@ -82,30 +81,51 @@ def test_the_stance_arm_is_frozen():
     assert load_arm("stance").content_hash == STANCE_HASH
 
 
-def test_the_stance_arm_is_current_plus_insertions_only():
-    """Every stance file is `current/`'s file with lines added and none removed or edited.
+#: `current/`'s hash at 285ec3b — the text `stance/` was derived from. Pinned as a number
+#: rather than read from `current/`, because `current/` tracks HEAD: the next legitimate
+#: prompt edit moves it, and a purity check written against a moving base would fail on a
+#: change that has nothing to do with this arm.
+STANCE_BASE_HASH = (
+    "14e3dcae19cb2a5da07bfe4ffda2d578082145acf757a7ff51eda5f3a52ca12e"
+)
 
-    What the experiment rests on: the arm is meant to isolate two added blocks, so any
-    other edit — a reworded principle, a dropped bullet — would make a measured difference
-    unattributable to the thing under test.
+#: What `stance/` adds, by the heading of each inserted paragraph. Removing exactly these
+#: has to give back the base — so a paragraph added, moved between bodies, or left
+#: unregistered here is caught, and so is any edit to the text around them.
+STANCE_INSERTIONS = {
+    "CODE_REVIEW_PROMPT": ("STANCE", WEAK_PATTERNS_HEADING),
+    "DIFF_REVIEW_PROMPT": ("STANCE", WEAK_PATTERNS_HEADING),
+    "PLAN_REVIEW_PROMPT": (WEAK_PLAN_PATTERNS_HEADING,),
+}
+
+
+def without_paragraph(text: str, heading: str) -> str:
+    """Drop the one blank-line-delimited paragraph whose first line starts with `heading`."""
+    paragraphs = text.split("\n\n")
+    kept = [p for p in paragraphs if not p.split("\n", 1)[0].startswith(heading)]
+    assert len(kept) == len(paragraphs) - 1, (
+        f"{heading!r} heads {len(paragraphs) - len(kept)} paragraphs, expected exactly 1"
+    )
+    return "\n\n".join(kept)
+
+
+def test_the_stance_arm_inherits_its_base_text_unchanged():
+    """Strip the registered insertions and what is left must hash to `current/` at 285ec3b.
+
+    What the experiment rests on: the arm is meant to isolate two added blocks, so an edit
+    anywhere else — a reworded principle, a dropped bullet — would make a measured
+    difference unattributable to the thing under test. Reconstructing the base rather than
+    diffing against today's `current/` keeps that guarantee from expiring the next time the
+    live prompts legitimately change.
     """
-    current, stance = load_arm("current"), load_arm("stance")
-    changed = set()
-    for name in PROMPT_CONSTANTS:
-        before = current.texts[name].splitlines(keepends=True)
-        after = stance.texts[name].splitlines(keepends=True)
-        # An edited line shows up as a removal too, so this covers rewording as well as
-        # deletion; n=0 keeps context lines out of the removed/added counts.
-        diff = list(unified_diff(before, after, n=0))
-        removed = [
-            line for line in diff if line.startswith("-") and not line.startswith("---")
-        ]
-        added = [line for line in diff if line.startswith("+") and not line.startswith("+++")]
-        assert not removed, f"{name} is not a pure insertion: {removed}"
-        if added:
-            changed.add(name)
-    # And the insertions actually happened, in the three bodies and nowhere else.
-    assert changed == {"PLAN_REVIEW_PROMPT", "CODE_REVIEW_PROMPT", "DIFF_REVIEW_PROMPT"}
+    texts = dict(load_arm("stance").texts)
+    for name, headings in STANCE_INSERTIONS.items():
+        for heading in headings:
+            texts[name] = without_paragraph(texts[name], heading)
+    assert arm_hash(texts) == STANCE_BASE_HASH, (
+        "stance/ no longer reduces to current/ at 285ec3b: text outside the registered "
+        "insertions was edited, or an insertion is missing from STANCE_INSERTIONS"
+    )
 
 
 def test_the_stance_arm_carries_the_two_blocks_where_the_experiment_expects_them():

@@ -9,6 +9,7 @@ import json
 import subprocess
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from threading import Lock
 
@@ -516,10 +517,11 @@ def test_the_runner_leaves_no_worktree_behind(
 
 @pytest.fixture
 def stance_smoke_corpus(corpus, head_oid) -> Path:
-    """The two diff cases plus a plan case.
+    """The two diff cases plus a plan case and a code case — one per prompt body.
 
-    The stance arm inserts into the diff body and the plan body, and the blocks differ
-    between them, so a corpus of one mode would leave half the arm unproven end to end.
+    The arm inserts different text into each of the three bodies, so a single-mode corpus
+    would leave two of them unproven end to end, and could not tell a body delivered to the
+    right mode from one delivered to the wrong one.
     """
     plans = corpus.parent / "plans"
     plans.mkdir()
@@ -533,7 +535,27 @@ def stance_smoke_corpus(corpus, head_oid) -> Path:
         f"repo_commit: {head_oid}\n",
         encoding="utf-8",
     )
+    # m-001's mutant reviewed as a whole file instead of as a diff — the twin pattern the
+    # shipped corpus uses, and here the only way to reach the code body at all.
+    (corpus / "s-001.yaml").write_text(
+        f"id: s-001\nmode: code\nsource: mutant\ndiff: cases/m-001.patch\n"
+        f"repo_commit: {head_oid}\n"
+        "defect:\n  class: dropped-null-check\n  file: sample.py\n  span: [3, 4]\n"
+        "  expected: the empty-label guard is gone\n",
+        encoding="utf-8",
+    )
     return corpus
+
+
+#: How a captured prompt names the case it came from, and so which body it must carry. rr
+#: assembles both forms itself: a file argument is inlined under its mode's label, a diff is
+#: delegated to a git command.
+BODY_FOR_SOURCE_MARKER = {
+    "=== PLAN TO REVIEW ===": "PLAN_REVIEW_PROMPT",
+    "=== CODE TO REVIEW ===": "CODE_REVIEW_PROMPT",
+    "git diff HEAD": "DIFF_REVIEW_PROMPT",
+    "git show": "DIFF_REVIEW_PROMPT",
+}
 
 
 def test_a_paired_run_of_current_against_stance_delivers_each_arms_own_text(
@@ -559,22 +581,39 @@ def test_a_paired_run_of_current_against_stance_delivers_each_arms_own_text(
 
     current, stance = load_arm("current"), load_arm("stance")
     captured = stub_backend.captured_prompts()
-    assert len(captured) == 6  # 3 cases x 2 arms x 1 rep
+    assert len(captured) == 8  # 4 cases x 2 arms x 1 rep
 
-    modes = ("DIFF_REVIEW_PROMPT", "PLAN_REVIEW_PROMPT")
-    control_prompts, treatment_prompts = [], []
+    bodies = ("PLAN_REVIEW_PROMPT", "CODE_REVIEW_PROMPT", "DIFF_REVIEW_PROMPT")
+    delivered: Counter[tuple[str, str]] = Counter()
+    control_prompts = []
     for prompt in captured:
-        from_control = [n for n in modes if current.texts[n].strip() in prompt]
-        from_treatment = [n for n in modes if stance.texts[n].strip() in prompt]
-        # Substitution, not addition: a prompt carries one arm's body and not the other's.
-        assert len(from_control) + len(from_treatment) == 1, prompt
-        (control_prompts if from_control else treatment_prompts).append(prompt)
-    assert len(control_prompts) == len(treatment_prompts) == 3
+        markers = [m for m in BODY_FOR_SOURCE_MARKER if m in prompt]
+        assert len(markers) == 1, f"cannot tell which case this prompt is: {prompt[:300]}"
+        expected = BODY_FOR_SOURCE_MARKER[markers[0]]
+        present = {
+            (role, name)
+            for role, arm in ((CONTROL, current), (TREATMENT, stance))
+            for name in bodies
+            if arm.texts[name].strip() in prompt
+        }
+        # Substitution, not addition: one arm's body, not both, not neither.
+        assert len(present) == 1, (expected, sorted(present))
+        role, name = present.pop()
+        # And the body belonging to this case's own mode. Without this a swap — the code
+        # body sent to a plan review — would still look like a clean paired run.
+        assert name == expected, f"a {expected} case was handed {name}"
+        delivered[(role, name)] += 1
+        if role == CONTROL:
+            control_prompts.append(prompt)
 
-    # The treatment's markers, in the modes the arm puts them in and no others.
-    assert sum(STANCE_MARKER in p for p in treatment_prompts) == 2
-    assert sum(WEAK_PATTERNS_HEADING in p for p in treatment_prompts) == 2
-    assert sum(WEAK_PLAN_PATTERNS_HEADING in p for p in treatment_prompts) == 1
+    assert delivered == Counter({
+        (CONTROL, "DIFF_REVIEW_PROMPT"): 2, (TREATMENT, "DIFF_REVIEW_PROMPT"): 2,
+        (CONTROL, "PLAN_REVIEW_PROMPT"): 1, (TREATMENT, "PLAN_REVIEW_PROMPT"): 1,
+        (CONTROL, "CODE_REVIEW_PROMPT"): 1, (TREATMENT, "CODE_REVIEW_PROMPT"): 1,
+    })
+
+    # The other half of the claim: the treatment's text is absent from the control arm, so
+    # the difference the sweep measures is the arm and not something both arms carry.
     for prompt in control_prompts:
         assert STANCE_MARKER not in prompt
         assert WEAK_PATTERNS_HEADING not in prompt
