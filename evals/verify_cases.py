@@ -167,8 +167,14 @@ def verify_case(
     """Run the suite against one mutant and compare the result with its manifest."""
     # `git worktree add`/`remove` mutate repo-level admin state, so staging is serialized
     # even though the suite runs themselves are not.
-    with stage_lock:
-        staged = materialize(case, repo, workdir)
+    try:
+        with stage_lock:
+            staged = materialize(case, repo, workdir)
+    except CaseError as e:
+        # One unstageable case — a patch that no longer applies, most likely — is a fact
+        # about that case. Letting it out of here would abandon every other case in the
+        # run, which is the opposite of what a corpus-wide check is for.
+        return Verdict(case.id, ERROR, (), case.killed_by, str(e))
     assert staged.worktree is not None
     try:
         run = run_suite(staged.worktree, pytest_cmd)
@@ -203,6 +209,17 @@ def write_killed_by(case: Case, failing: tuple[str, ...]) -> None:
         (i for i, line in enumerate(lines) if line.startswith(_KILLED_BY_MARKER)), None
     )
     if marker is not None:
+        # Truncating from the marker is only safe while nothing follows the block. A key
+        # added after it would be silently deleted, so refuse rather than eat it.
+        trailing = [
+            line for line in lines[marker + 1:]
+            if line.strip() and not line.startswith((" ", "-", "#"))
+        ]
+        if trailing:
+            raise VerifyError(
+                f"{case.manifest_path}: killed_by must be the last key — "
+                f"{trailing[0].split(':')[0].strip()!r} follows it and would be lost"
+            )
         lines = lines[:marker]
         header_lines = _GENERATED_HEADER.splitlines(keepends=True)
         # Only this script's own header is dropped, so a comment a human wrote just above
@@ -258,10 +275,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--jobs", type=int, default=DEFAULT_JOBS, help="suite runs in parallel",
     )
     parser.add_argument(
-        "--skip-baseline", action="store_true",
-        help="do not re-verify that the unpatched snapshot is green (it always should be)",
-    )
-    parser.add_argument(
         "--pytest", default=" ".join(DEFAULT_PYTEST_CMD),
         help="the suite command, run in each worktree",
     )
@@ -295,10 +308,12 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="rr-verify-") as tmp:
         workdir = Path(tmp)
         try:
-            if not args.skip_baseline:
-                for commit in sorted({c.repo_commit for c in cases}):
-                    print(f"baseline: running the suite at {commit[:12]}", file=sys.stderr)
-                    check_baseline(repo, commit, workdir, pytest_cmd)
+            # Always, with no flag to turn it off: half the admission rule is "all pass
+            # without the patch", and an operator switch to skip it is a switch that
+            # certifies equivalent mutants.
+            for commit in sorted({c.repo_commit for c in cases}):
+                print(f"baseline: running the suite at {commit[:12]}", file=sys.stderr)
+                check_baseline(repo, commit, workdir, pytest_cmd)
             print(f"{len(cases)} mutant(s) to verify", file=sys.stderr)
             with ThreadPoolExecutor(max_workers=args.jobs) as pool:
                 verdicts = list(pool.map(
@@ -310,9 +325,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.write:
         by_id = {c.id: c for c in cases}
-        for v in verdicts:
-            if v.status in (KILLED, MISMATCH):
-                write_killed_by(by_id[v.case_id], v.observed)
+        try:
+            for v in verdicts:
+                if v.status in (KILLED, MISMATCH):
+                    write_killed_by(by_id[v.case_id], v.observed)
+        except VerifyError as e:
+            # The verdicts are still worth printing: the runs happened, and only the
+            # recording of them failed.
+            print_report(verdicts)
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
 
     print_report(verdicts)
     admitted = {KILLED} | ({MISMATCH} if args.write else set())

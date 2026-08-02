@@ -69,18 +69,50 @@ def blob(commit: str, path: str) -> str | None:
     return shown.stdout if shown.returncode == 0 else None
 
 
-def patch_line_delta(patch: str) -> int:
-    """How many lines the patch adds to the file, net of what it removes."""
-    added = sum(1 for line in patch.splitlines() if line.startswith("+") and line[:3] != "+++")
-    removed = sum(1 for line in patch.splitlines() if line.startswith("-") and line[:3] != "---")
-    return added - removed
+def patch_sections(patch: str) -> dict[str, list[str]]:
+    """Split a patch into each changed file's body, keyed by its new-side path.
+
+    Per file, not per patch: the line counts below describe one file, and summing them
+    across a multi-file patch would describe none of them.
+    """
+    sections: dict[str, list[str]] = {}
+    body: list[str] | None = None
+    for line in patch.splitlines():
+        if line.startswith("+++ b/"):
+            body = sections.setdefault(line[len("+++ b/"):], [])
+        elif line.startswith(("--- ", "diff --git ", "index ", "new file ", "deleted file ")):
+            body = None
+        elif body is not None:
+            body.append(line)
+    return sections
+
+
+def section_line_delta(body: list[str]) -> int:
+    """How many lines this file's hunks add, net of what they remove."""
+    return (
+        sum(1 for line in body if line.startswith("+"))
+        - sum(1 for line in body if line.startswith("-"))
+    )
+
+
+def section_hunk_ranges(body: list[str]) -> list[tuple[int, int]]:
+    """Each hunk's inclusive line range on the new side of this file."""
+    ranges = []
+    for line in body:
+        header = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+        if header:
+            start = int(header.group(1))
+            count = max(int(header.group(2)) if header.group(2) is not None else 1, 1)
+            ranges.append((start, start + count - 1))
+    return ranges
 
 
 def defect_file_length(case: Case) -> int:
     """Lines in the file the defect sits in, as the case materializes it.
 
-    A mutant's file is its `repo_commit` blob plus whatever the patch does to its length;
-    a plan is a standalone artifact on disk. Both are read without checking anything out.
+    A mutant's file is its `repo_commit` blob plus what the patch does to *that file's*
+    length; a plan is a standalone artifact on disk. Both are read without checking
+    anything out.
     """
     assert case.defect is not None
     if case.source == "mutant":
@@ -88,8 +120,30 @@ def defect_file_length(case: Case) -> int:
         original = blob(case.repo_commit, case.defect.file)
         assert original is not None
         patch = (case.root / case.diff).read_text(encoding="utf-8")
-        return len(original.splitlines()) + patch_line_delta(patch)
+        return len(original.splitlines()) + section_line_delta(
+            patch_sections(patch)[case.defect.file]
+        )
     return len((case.root / case.defect.file).read_text(encoding="utf-8").splitlines())
+
+
+def main_ref() -> str:
+    """The ref standing for the project's main line, wherever this is checked out.
+
+    A CI checkout is detached with only remote-tracking refs; a developer clone has both.
+    Neither resolving is itself the failure the reachability check exists to catch, so it
+    is reported as an unusable environment rather than as a bad manifest.
+    """
+    for ref in ("origin/main", "main"):
+        resolved = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            capture_output=True, text=True,
+        )
+        if resolved.returncode == 0:
+            return ref
+    raise AssertionError(
+        "neither origin/main nor main resolves here, so case commits cannot be checked "
+        "for reachability — a depth-1 checkout will do this (see ci.yml's fetch-depth)"
+    )
 
 
 @pytest.mark.parametrize("case", SHIPPED, ids=lambda c: c.id)
@@ -104,6 +158,21 @@ def test_every_shipped_manifest_is_internally_consistent(case: Case):
     )
     assert resolved.returncode == 0, f"{case.id}: repo_commit is not a commit in this repo"
     assert resolved.stdout.strip() == case.repo_commit, f"{case.id}: repo_commit is not a full oid"
+
+    # Reachable from main, not merely present locally. This repo squash-merges, so a
+    # commit that only exists on a feature branch is destroyed when that branch lands:
+    # afterwards no clone has the object, every check here fails, and no mutant can be
+    # materialized at all. Pinning main-reachable commits only is what makes a case
+    # survive its own branch.
+    reachable = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor",
+         case.repo_commit, main_ref()],
+        capture_output=True, text=True,
+    )
+    assert reachable.returncode == 0, (
+        f"{case.id}: repo_commit {case.repo_commit[:12]} is not reachable from "
+        f"{main_ref()}; a branch-local commit does not survive a squash merge"
+    )
 
     if case.path is not None:
         assert (case.root / case.path).is_file(), f"{case.id}: artifact {case.path} is missing"
@@ -123,23 +192,31 @@ def test_every_mutant_carries_a_well_formed_patch_and_its_kill_proof(case: Case)
     # Parsed, not applied: applying needs a worktree per case, which is verify_cases.py's
     # job. This catches a truncated or hand-mangled patch, which is the failure CI can see.
     assert patch.strip(), f"{case.id}: patch is empty"
-    touched = re.findall(r"^--- a/(.+)$", patch, re.MULTILINE)
-    assert touched, f"{case.id}: patch has no ---/+++ file headers"
-    assert re.search(r"^@@ -\d+(,\d+)? \+\d+(,\d+)? @@", patch, re.MULTILINE), (
-        f"{case.id}: patch has no hunk header"
-    )
-    assert any(
-        line[:1] in "+-" and line[:3] not in ("+++", "---") for line in patch.splitlines()
-    ), f"{case.id}: patch has headers but no changed lines"
+    sections = patch_sections(patch)
+    assert sections, f"{case.id}: patch has no ---/+++ file headers"
 
     assert case.defect is not None, f"{case.id}: a mutant with no defect is a mislabelled control"
     # The manifest's file is what recall is scored against, so it must be one the patch
     # actually mutates — otherwise every finding on this case is scored against the wrong file.
-    assert case.defect.file in touched, f"{case.id}: defect.file is not touched by the patch"
-    for path in touched:
+    assert case.defect.file in sections, f"{case.id}: defect.file is not touched by the patch"
+    for path, body in sections.items():
         assert blob(case.repo_commit, path) is not None, (
             f"{case.id}: {path} does not exist at repo_commit"
         )
+        assert section_hunk_ranges(body), f"{case.id}: {path} has no hunk header"
+        assert any(line[:1] in "+-" for line in body), (
+            f"{case.id}: {path} has headers but no changed lines"
+        )
+
+    # The span must land where the patch actually changed something. Ending inside the
+    # file is not enough: a span pointing at untouched code would score every finding
+    # against a line the case never mutated.
+    start, end = case.defect.span
+    hunks = section_hunk_ranges(sections[case.defect.file])
+    assert any(lo <= end and start <= hi for lo, hi in hunks), (
+        f"{case.id}: defect.span {list(case.defect.span)} overlaps no hunk of "
+        f"{case.defect.file} (hunks cover {hunks})"
+    )
 
     assert case.killed_by, (
         f"{case.id}: no killed_by — run `python evals/verify_cases.py --write`. An "
@@ -300,6 +377,11 @@ def test_a_code_mode_mutant_is_reviewed_as_its_patched_file(tmp_path, git_repo, 
         assert staged.rr_args == ["sample.py"]
         assert (staged.cwd / "sample.py").is_file()
         assert "if not label" not in (staged.cwd / "sample.py").read_text(encoding="utf-8")
+        # The mutation is committed, so the one thing a code-mode case must withhold —
+        # a diff pointing straight at it — is not there for a backend to go and read.
+        # codex's read-only sandbox permits `git diff HEAD`; this is what makes it empty.
+        assert git(staged.cwd, "diff", "HEAD", "--name-only").stdout == ""
+        assert git(staged.cwd, "status", "--porcelain").stdout == ""
     finally:
         remove_worktree(git_repo, staged.worktree)
 

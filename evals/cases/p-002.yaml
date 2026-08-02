@@ -6,7 +6,7 @@ id: p-002
 mode: plan
 source: seeded-plan
 # Provenance only. A plan is a standalone artifact, not a repository snapshot.
-repo_commit: 2456bb657528d61897ac21e18eabea8ae37a5d8f
+repo_commit: 88e691a8ef687535c14c374ec3f353c08ed01b7b
 path: cases/p-002-plan.md
 defect:
   class: plan-flaw

@@ -5,7 +5,7 @@ id: b-006
 mode: diff
 source: mutant
 diff: cases/b-006.patch
-repo_commit: 2456bb657528d61897ac21e18eabea8ae37a5d8f
+repo_commit: 88e691a8ef687535c14c374ec3f353c08ed01b7b
 defect:
   class: off-by-one-bound
   file: rocket_review/models.py
@@ -16,20 +16,6 @@ defect:
 # Admission proof: these tests pass at repo_commit and fail with `diff` applied.
 # Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
 killed_by:
-  - evals/test_paired_runner.py::test_the_arms_prompt_text_reaches_the_backend
-  - evals/test_tier1.py::test_tripwire_rate_counts_matching_findings_over_all_findings
-  - evals/test_tier1.py::test_a_line_inside_the_file_resolves
-  - evals/test_tier1.py::test_a_line_past_the_end_of_the_file_does_not_resolve
-  - evals/test_tier1.py::test_a_file_absent_at_the_commit_does_not_resolve
-  - evals/test_tier1.py::test_findings_without_a_file_or_line_are_exempt_not_unresolved
-  - evals/test_tier1.py::test_a_non_string_file_is_exempt_rather_than_a_crash
-  - evals/test_tier1.py::test_line_zero_does_not_resolve
-  - evals/test_tier1.py::test_findings_per_run_is_split_by_severity
-  - evals/test_tier1.py::test_an_invented_severity_lands_in_the_other_bucket
-  - evals/test_tier1.py::test_critical_and_high_are_reported_together_for_the_veto_rule
-  - evals/test_tier1.py::test_each_case_is_scored_separately_within_an_arm
-  - evals/test_tier1.py::test_arms_and_backends_are_scored_separately
-  - evals/test_tier1.py::test_a_results_file_round_trips_through_load_and_compute
   - tests/test_models.py::test_extract_json_plain
   - tests/test_models.py::test_extract_json_prose_wrapped
   - tests/test_models.py::test_parse_normalizes_severity_and_tags_backend

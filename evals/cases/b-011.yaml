@@ -5,9 +5,9 @@ id: b-011
 mode: diff
 source: mutant
 diff: cases/b-011.patch
-repo_commit: 2456bb657528d61897ac21e18eabea8ae37a5d8f
+repo_commit: 88e691a8ef687535c14c374ec3f353c08ed01b7b
 defect:
-  class: wrong-variable
+  class: wrong-reducer
   file: rocket_review/models.py
   span: [141, 141]
   expected: >-

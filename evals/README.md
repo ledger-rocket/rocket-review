@@ -277,8 +277,12 @@ How each source is materialized, and why:
   primary mode depends on, so a prompt change affecting repo navigation would not show up
   at all. In `code` mode the same worktree is reviewed as `rr <defect.file>` — the whole
   file, with nothing pointing at the change — which is what asks whether a defect is only
-  found when a diff frames it. The path is passed repo-relative so findings cite the path
-  the manifest and the file:line resolver use, not a throwaway worktree's absolute path.
+  found when a diff frames it. There the patch is **committed inside the worktree** before
+  the review: a backend under codex's read-only sandbox may still run `git diff HEAD`, and
+  an uncommitted mutation would hand it exactly the diff this mode exists to withhold.
+  Committing makes that diff empty, so the two modes differ in what the reviewer can see
+  and not merely in which prompt ran. The path is passed repo-relative so findings cite the
+  path the manifest and the file:line resolver use, not a throwaway worktree's absolute one.
 - **`merged-pr`** — `rr --commit <oid>` in the repo itself. A commit is immutable, so this
   is already reproducible without a worktree, and it exercises rr's `git show` path.
 - **`seeded-plan`** (and standalone `code` files) — reviewed as an ordinary file argument
@@ -304,14 +308,35 @@ Every case is sourced from **this repository only**. It is public, so nothing fr
 codebase can be committed here; that bounds how varied the corpus can be, and the caveats at
 the end of this file are written with that in mind.
 
+**A case may only pin a `repo_commit` reachable from `main`.** This repo squash-merges, so a
+commit that exists only on a feature branch is destroyed the moment that branch lands: after
+the merge no clone has the object, the manifest-integrity tests fail for every case pinned to
+it, and no mutant can be materialized at all. A case authored on a branch therefore pins the
+`main` commit its patch applies to, never the branch tip it happened to be written against.
+`test_cases.py` enforces this against `origin/main` (falling back to a local `main`), and
+`ci.yml` checks out with `fetch-depth: 0` so the ancestry is actually there to check.
+
 ### Corpus B — injected defect mutants (recall)
 
 14 cases over 11 distinct one-hunk mutations of `rocket_review/`; three of the eleven are
 expressed a second time as `code`-mode cases (same patch, different id) so the same defect
-can be scored with and without a diff framing it. Six class labels — `dropped-guard`,
-`flipped-comparison`, `off-by-one-bound`, `swallowed-error`, `wrong-variable`, two distinct
-mutants each, plus `b-001`'s singleton `inverted-fallback-rank` — across five runtime
-modules (`cli.py`, `models.py`, `backends/base.py`, `backends/api.py`, `backends/claude.py`).
+can be scored with and without a diff framing it. Across five runtime modules (`cli.py`,
+`models.py`, `backends/base.py`, `backends/api.py`, `backends/claude.py`), the class labels
+are:
+
+| class | distinct mutants | what it names |
+|-------|------------------|---------------|
+| `dropped-guard` | 2 | a check that still runs but no longer excludes what it was written to exclude |
+| `flipped-comparison` | 2 | a comparison or exit-status test read the wrong way round |
+| `off-by-one-bound` | 2 | a boundary shifted by one element or one line |
+| `swallowed-error` | 2 | a failure path that returns instead of raising |
+| `wrong-set-members` | 1 | a membership test naming the wrong members |
+| `wrong-reducer` | 1 | a reduction over an ordering that selects the opposite end |
+| `inverted-fallback-rank` | 1 | `b-001`, prior work |
+
+Labels describe what the mutation *is*, not how it was authored, because recall is
+aggregated by them: a label two mutants share only loosely would pool numbers about
+different things. That is why the last three are singletons rather than one tidier bucket.
 
 **A mutant is admitted only if the project's own test suite kills it**, and the proof is
 mechanical:
@@ -557,10 +582,12 @@ launches a real backend.
 - `test_cases.py` — manifest validation, materialization of all three source types against a
   throwaway git repository (including that a patch which does not apply fails loudly and
   leaves no worktree behind), and the integrity of the shipped corpus itself: every case's
-  `repo_commit` is a full oid naming a commit in this repo, every patch parses and touches
-  the file its manifest scores against, every referenced path exists at that commit, every
-  span ends inside its file, every mutant carries a `killed_by`, and no clean control has
-  grown a defect block. All of it reads the git object database; nothing is checked out.
+  `repo_commit` is a full oid naming a commit reachable from `main`, every patch parses and
+  touches the file its manifest scores against, every referenced path exists at that commit,
+  every span both ends inside its file and overlaps a hunk the patch actually changed, every
+  mutant carries a `killed_by` naming test files that exist there, and no clean control has
+  grown a defect block. All of it reads the git object database; nothing is checked out —
+  which is why `ci.yml`'s test job needs `fetch-depth: 0`.
 - `test_paired_runner.py` — the injection proof, arm alternation, and complete paired runs
   against a stub `codex` binary: result-file shape, per-row provenance, the retry path, CI
   refusal, and worktree teardown.

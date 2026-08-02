@@ -224,6 +224,10 @@ def materialize(case: Case, repo: Path, workdir: Path) -> Materialized:
 
     A `code`-mode mutant is the same worktree reviewed as a whole file — `rr <defect.file>`
     — which is what asks whether the defect is still found without a diff pointing at it.
+    There the patch is *committed* inside the worktree first: a backend under codex's
+    read-only sandbox may still run `git diff HEAD`, and an uncommitted mutation would
+    hand it the very diff this mode exists to withhold. Committing makes that diff empty,
+    so the two modes differ in what the reviewer can see and not only in which prompt ran.
     The path is passed repo-relative so findings cite the same path the manifest and
     `tier1`'s resolver use; an absolute path into a throwaway worktree would resolve
     against nothing.
@@ -256,6 +260,19 @@ def materialize(case: Case, repo: Path, workdir: Path) -> Materialized:
             )
         if case.mode == "code":
             assert case.defect is not None  # load_case rejects a code mutant without one
+            # Identity is supplied inline: the worktree is thrown away, and a machine
+            # running this may have no git user configured at all.
+            committed = _git(
+                worktree,
+                "-c", "user.email=evals@invalid", "-c", "user.name=rocket-review evals",
+                "commit", "--quiet", "--all", "--message", f"eval case {case.id}",
+            )
+            if committed.returncode != 0:
+                remove_worktree(repo, worktree)
+                raise CaseError(
+                    f"{case.id}: could not commit the patch in the worktree, so "
+                    f"`git diff HEAD` would still expose it: {committed.stderr.strip()}"
+                )
             return Materialized(
                 cwd=worktree, rr_args=[case.defect.file], worktree=worktree,
             )
