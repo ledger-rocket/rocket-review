@@ -16,3 +16,8 @@ uv.lock
 # Sweep output: full review text for real commits, and a snapshot of one model
 # version at one moment. Measurements, not artefacts of the repo.
 evals/results/
+
+# Adjudication artefacts quote the review text they are decisions about, so they carry
+# the same content `results/` does and are ignored by default for the same reason. A
+# sweep whose verdict is worth publishing can be committed with an explicit `git add -f`.
+evals/adjudications/
