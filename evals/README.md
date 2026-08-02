@@ -402,27 +402,48 @@ Run protocol:
 - **A model is mandatory.** Every `--backends` spec must be `name:model`, for the reason in
   *Model provenance* above: `rr` reports the model *argument*, and a backend on its own
   default reports `null`, which would leave rows describing nothing.
-- **Arms alternate within each case.** Odd repetitions run control then treatment, even
-  repetitions run treatment then control (C,T,T,C,C,T,…) per case and backend. Each row
-  records its `order_index` in that sequence, so the alternation can be checked after the
-  fact instead of taken on trust. Default `--concurrency 2` — one slot per arm — so a
-  repetition's two runs face the same backend conditions rather than starting minutes apart.
-  Above 2, interleaving relaxes to scheduling order; the pairing (same cases, same session,
-  equal repetitions) is what carries the design.
+- **Arms alternate within each case, and the schedule guarantees it.** Odd repetitions run
+  control then treatment, even repetitions run treatment then control (C,T,T,C,C,T,…) per
+  case and backend. Each row records its `order_index` in that sequence, so the alternation
+  can be checked after the fact instead of taken on trust.
+
+  Exactly what is guaranteed: **both runs of a repetition are submitted together, and the
+  next repetition of that case/backend starts only after both have finished.** Two runs of
+  the same arm on one case therefore never overlap, and a repetition's control and treatment
+  are always adjacent in time. Different cases (and different backends) still run
+  concurrently, bounded by `--concurrency`; since a repetition is two runs, up to
+  `concurrency // 2` repetitions are in flight, so `--concurrency 2` (the default) runs one
+  repetition at a time and `--concurrency 4` runs two cases in parallel. Nothing beyond a
+  repetition's own two runs is ever queued.
+- **An interrupt stops the spending.** Every queued unit is a billed review, so a Ctrl-C or
+  a worker failure cancels what has not started rather than letting the pool work through
+  the backlog. Runs already in flight are bounded by their own timeout, and `rr` tears its
+  backend down when interrupted.
 - **Failures are retried once and never dropped.** A timeout or backend error is recorded as
-  such and retried; both attempts are written. `tier1` scores the last attempt of each unit
-  and excludes a unit still failing after its retry from every metric denominator, reporting
-  it under `runs_failed`.
+  such and retried; both attempts are written. `tier1` scores the last attempt of each unit,
+  and drops the whole repetition — both arms — if either arm never completed. See
+  *Complete repetitions* below.
+- **Every manifest's `repo_commit` is checked before anything is staged or spent.** It must
+  be a full 40-character lowercase oid (never `HEAD`, a branch, or an abbreviation, none of
+  which name a fixed snapshot) and must resolve to a commit in `--repo`.
 - A run that outlives its timeout is torn down exactly as in Part 1 (SIGINT, ten-second
   grace, SIGKILL only as a last resort), using the same shared code.
 
 ### Output
 
 One JSONL file per run in `evals/results/`, named `paired-<timestamp>-<random>.jsonl` and
-created exclusively. The header line records the harness rocket-review version, the
-interpreter and launcher used, both arms with their paths and hashes, backend specs and CLI
-versions, the repo, every case with its mode/source/`repo_commit`/control flag, runs,
-timeout, concurrency, the alternation scheme in words, and the retry limit.
+created exclusively. The header line records a **`sweep_id`**, the harness rocket-review
+version and the harness checkout's HEAD commit, the rocket-review the *selected interpreter*
+would import and where it lives, the interpreter and launcher used, both arms with their
+paths and hashes, backend specs and CLI versions, the repo, every case with its
+mode/source/`repo_commit`/control flag, runs, timeout, concurrency, the alternation scheme
+in words, and the retry limit.
+
+Two rocket-review versions, because `--python` can select a different environment: one is
+the harness's own, the other is what actually ran the reviews. The harness commit is
+recorded because the released version string is constant across many source commits —
+including every change to the prompts under test — so on its own it cannot say what a result
+came from.
 
 Every subsequent line is one attempt: case id, mode, source, `repo_commit`, whether the case
 is a clean control, arm name, role and hash, backend, requested model, backend CLI version,
@@ -477,6 +498,30 @@ re-derived by hand at the moment someone is deciding whether to ship a prompt. E
 the results file carries `case_is_control`, so the breakdown labels which rule applies
 without needing the header.
 
+### Complete repetitions
+
+**A repetition scores only when both arms produced a review.** If either arm's run of a
+`(case, backend, repetition)` failed after its retry — or is simply absent — the whole
+repetition is dropped from *both* arms and reported separately, with the case, repetition
+and reason named.
+
+Excluding a failed run arm-by-arm instead would quietly desynchronise the two denominators:
+the surviving arm keeps a repetition its partner never completed, so the arms stop being
+compared on the same work. That is not a neutral loss — the cases that time out are the long,
+noisy ones, so the bias has a direction.
+
+### One sweep at a time
+
+Every row carries the `sweep_id` of the session that produced it, and it is part of the key
+that identifies both a run and a group. Two sessions produce rows with identical
+case/backend/arm/repetition, so without it one would be read as a retry of the other, or the
+two would pool across whatever changed in between — which is precisely the confound the
+paired design exists to remove.
+
+`tier1.py` therefore refuses a file containing more than one `sweep_id`.
+`--allow-multiple-sweeps` overrides that with a loud warning, and even then the sweeps are
+scored side by side and never merged.
+
 An empty distribution reports `None` for mean, median and range, never `0` — same rule as
 the rates. A zero would read as "measured, and it was zero".
 
@@ -514,6 +559,29 @@ after seeing which threshold the change happens to clear. Changing a rule is a c
 own, argued on its own merits, made before the sweep it governs — never in the same change
 as the results it would reinterpret.
 
+### What this release can and cannot decide
+
+> **This corpus is measurement-only. It cannot certify a prompt change.**
+>
+> The success criterion below needs a defect class with **≥5 independent cases**, and no
+> class in the shipped corpus has five. The corpus was built breadth-first on purpose —
+> covering many defect classes shallowly is what tells us which classes are worth deepening
+> — but the consequence is deliberate and absolute: **no treatment can pass the success
+> gate today**, whatever its numbers look like.
+>
+> What the harness *can* do now: establish the run-to-run noise floor (A/A), and apply the
+> veto — which needs only clean controls, of which there are enough. So a prompt change can
+> be **blocked** by these results; it cannot be **certified** by them.
+>
+> **Two cases of the same mutant in different modes are not independent.** A `diff`-mode and
+> a `code`-mode re-expression of one seeded defect is one case counted twice: the same bug,
+> the same lines, the same reason a reviewer would or would not see it. Counting them as two
+> toward the ≥5 threshold would let the gate be satisfied by re-encoding rather than by
+> evidence.
+>
+> Deepening at least one defect class to five genuinely independent cases is planned, and is
+> a prerequisite for any gated prompt change shipping on the strength of this harness.
+
 ### Veto — must hold
 
 For each **clean-control** case, compare the mean count of CRITICAL and HIGH
@@ -540,7 +608,10 @@ Defect recall improves on at least one defect class that has **≥5 independent 
 **≥20% relative AND ≥2 additional defects found**. Both conditions, not either.
 
 - Classes with fewer than 5 cases are reported but **cannot certify** a change. They are too
-  small to distinguish a real improvement from a run of luck.
+  small to distinguish a real improvement from a run of luck. **This is currently every
+  class in the corpus** — see *What this release can and cannot decide* above.
+- **Independent** means a separate defect, not a separate encoding of one. The same seeded
+  mutant reviewed in `diff` mode and again in `code` mode counts once.
 - A class whose control recall is zero uses the absolute condition alone (≥2 additional
   defects found), since a relative improvement on zero is undefined rather than infinite.
 
