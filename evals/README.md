@@ -339,50 +339,57 @@ are:
 | class | distinct mutants | what it names |
 |-------|------------------|---------------|
 | `dropped-guard` | 5 | a check removed outright, or left running but no longer excluding what it was written to exclude |
-| `swallowed-error` | 5 | a failure that stops producing a failing outcome — returned instead of raised, or recorded and then not acted on |
+| `swallowed-error` | 4 | a failure that stops producing a failing outcome — returned instead of raised, or recorded and then not acted on |
 | `flipped-comparison` | 2 | a comparison or exit-status test read the wrong way round |
 | `off-by-one-bound` | 2 | a boundary shifted by one element or one line |
+| `lost-diagnostic` | 1 | a failure still detected downstream, but reported with the wrong cause |
 | `wrong-set-members` | 1 | a membership test naming the wrong members |
 | `wrong-reducer` | 1 | a reduction over an ordering that selects the opposite end |
 | `inverted-fallback-rank` | 1 | `b-001`, prior work |
 
 Labels describe what the mutation *is*, not how it was authored, because recall is
 aggregated by them: a label two mutants share only loosely would pool numbers about
-different things. That is why the last three are singletons rather than one tidier bucket.
+different things. That is why the last four are singletons rather than one tidier bucket.
 
-`dropped-guard` and `swallowed-error` are adjacent enough that the boundary between them is
-worth stating, since both now carry the gate: a mutant is **`swallowed-error`** when the thing
-suppressed is a failure of the review pipeline itself — a backend that errored, timed out, or
-produced nothing — and **`dropped-guard`** when what gets through is invalid input, an invalid
-argument combination, or malformed model output. `b-021` is the case that most needs the rule:
-it mutates a boolean guard, but the arm it removes is the errored-backend arm, so it lands on
-the `swallowed-error` side.
+`dropped-guard`, `swallowed-error` and `lost-diagnostic` are adjacent enough that the
+boundaries are worth stating rather than left to the labels. A mutant is **`swallowed-error`**
+only when a failure of the review pipeline stops producing a failing outcome *end to end* —
+the run comes back as a review, or the gate stops tripping. It is **`lost-diagnostic`** when
+something downstream still catches the failure and the run still fails, but with the wrong
+cause. And it is **`dropped-guard`** when what gets through is invalid input, an invalid
+argument combination, or malformed model output.
 
-The two five-case classes are the ones the decision rules can certify on, so what makes
-their members *independent* is written out here rather than left to the label:
+Two cases decide those boundaries. `b-008` returns `""` on the timeout path, but `""` is a
+value every caller already rejects — claude and opencode re-detect it, codex never reads it —
+so the run still fails and only the cause is lost: `lost-diagnostic`, not `swallowed-error`.
+Its sibling `b-018` returns the child's real stdout on the exit-status path, which nothing
+downstream rejects, so a failed backend does come back as a review. `b-021` mutates a boolean
+guard, which looks like `dropped-guard`, but the arm it removes is the errored-backend arm and
+the outcome is a gate that exits 0 on a run that never completed — so it lands on the
+`swallowed-error` side.
 
-- **`dropped-guard`** — the doc-link containment check (`cli.read_doc_with_links`, `b-002`);
-  the exact-match git allow rule in the claude sandbox's tool allowlist (`b-003`); that same
-  sandbox's deny-by-default permission mode, the layer the allowlist depends on to mean
-  anything (`b-015`); the verdict-validity check in `models.parse_backend_output` (`b-016`);
-  and the `--fail-on` requires `--json` argument check, whose removal turns the CI gate into
-  a silent no-op (`b-017`). Three modules, five checks, five different things getting through.
-- **`swallowed-error`** — `base.run_command`'s timeout arm (`b-008`) and its non-zero-exit arm
-  (`b-018`), two different ways a subprocess fails and two different things returned in place
-  of the raise; `cli.run_one`'s `BackendError` handler (`b-009`), where the error is lost
-  before it is ever recorded; `api._output_text`'s unfinished-response check (`b-020`), where
-  the fragment of a truncated review is returned as the whole of it; and `models.should_fail`'s
-  errored-backend arm (`b-021`), where the error *is* recorded and then not acted on, so the
-  gate passes a run that never completed. Four modules, five failures, five ways of not
-  failing.
+`dropped-guard` is the one class at the ≥5 bar, so what makes its members *independent* is
+written out here rather than left to the label:
 
-Two of those pairs share a file, and one shares a function: `b-008`/`b-018` are both in
-`run_command`, and `b-003`/`b-015` are the claude sandbox's two layers. They are admitted as
-distinct because the *trigger* differs — a hung process vs. one that exited non-zero, a
-widened allow rule vs. an allowlist that stopped being consulted — and so does what the
-caller is then handed. Proximity is not the test; a second flavour of one bug would not be
-admitted however far apart it sat. Where that reading is arguable it is arguable in the
-direction of fewer independent cases, which is why it is written down here to be argued with.
+- the doc-link containment check (`cli.read_doc_with_links`, `b-002`); the exact-match git
+  allow rule in the claude sandbox's tool allowlist (`b-003`); the verdict-validity check in
+  `models.parse_backend_output` (`b-016`); the `--fail-on` requires `--json` argument check,
+  whose removal turns the CI gate into a silent no-op (`b-017`); and the repo-containment
+  check on model-referenced files (`api.extract_referenced_files`, `b-022`). Four modules,
+  five checks, five different things getting through.
+
+`b-002` and `b-022` are the same *flavour* — `is_relative_to` demoted to a string-prefix test
+— at different sites, in different modules, on different attack surfaces (a link the doc
+author wrote vs. a filename the model mentioned in its own review text). Independence is the
+rule and they pass it; flavour spread is a preference this pair does not satisfy, which is
+recorded here rather than smoothed over.
+
+`swallowed-error`'s four members are `cli.run_one`'s `BackendError` handler (`b-009`), where
+the error is lost before it is ever recorded; `base.run_command`'s non-zero-exit arm (`b-018`);
+`api._output_text`'s unfinished-response check (`b-020`), where the fragment of a truncated
+review is returned as the whole of it; and `models.should_fail`'s errored-backend arm
+(`b-021`). Three modules, four failures, four ways of not failing — one short of the bar, and
+left short rather than padded.
 
 Ids are never reused. A case retired during construction leaves its number behind rather than
 freeing it, because the id keys every result row and a reused one would make two different
@@ -403,6 +410,28 @@ baseline every "kill" could be the pre-existing failure. A mutant nothing fails 
 **equivalent mutant**: the code still behaves correctly, so it is not a defect and scoring a
 reviewer on finding it would measure nothing. Those candidates are dropped rather than
 weakened into cases.
+
+A kill is necessary but not sufficient, because a test can fail for a reason that is not a
+defect. Two further rules, both learned by admitting a mutant that broke them:
+
+- **The defect must be decided inside this repository at `repo_commit`.** A mutant whose
+  consequence lives in an external tool's contract — which permission-mode string a CLI
+  treats as deny-by-default, what an SDK does with a given argument — is not pinnable: the
+  contract can change under a fixed `repo_commit`, the two spellings may already be aliases,
+  and nothing in the corpus can settle it. Retired case `b-015` was exactly this, and its
+  claimed sandbox bypass turned out to rest on an alias.
+- **The kill must assert behaviour, not a spelling.** If the only failing assertion is
+  `argv[i] == "<literal>"`, then every other value of that argument kills the mutant too,
+  including values that behave identically — so the suite is not distinguishing a defect from
+  a rename, and the `killed_by` proof proves nothing about behaviour.
+
+The corpus is checked against both rules, not only new cases. `b-003`/`b-014` are the closest
+surviving call: the consequence (a `:*` allow rule lets an injected `--output=<path>` through)
+does lean on Claude Code's rule-matching semantics. They are kept because a prefix wildcard is
+strictly more permissive than an exact rule under any glob semantics — the mutant cannot be
+equivalent — and because the kill asserts the rule's *form* (exact present **and** wildcard
+absent), which an equivalent rewrite would not trip. That is a judgement, and it is the one to
+revisit first if this rule is ever tightened.
 
 The script is minutes of worktrees and full suite runs, so it is developer tooling, not a CI
 gate. What CI enforces is the cheap half: `test_cases.py` asserts every mutant manifest
@@ -433,9 +462,9 @@ is a pipeline smoke case rather than a scoring control; read it as such.
 
 Four cases cannot certify anything about plan-mode prompts, and the decision rules below say
 so: `plan-flaw` is two independent cases, well under the ≥5 the success criterion requires.
-The two classes that do reach five are mutant classes, every case of both scored in `diff`
-mode; of the two, only `dropped-guard` has `code`-mode twins, and neither has a plan case. So
-nothing that clears the gate says anything about the plan prompt.
+The one class that does reach five, `dropped-guard`, is a mutant class scored in `diff` and
+`code` mode with no plan case in it — so nothing that ever clears the gate on this corpus
+will say anything about the plan prompt.
 
 ## Running a paired sweep
 
@@ -609,33 +638,41 @@ as the results it would reinterpret.
 
 ### What this release can and cannot decide
 
-> **The success gate is usable on two defect classes. Everywhere else this corpus is still
-> measurement-only.**
+> **This corpus is measurement-only. It cannot certify a prompt change.**
 >
-> The success criterion below needs a defect class with **≥5 independent cases**.
-> `dropped-guard` and `swallowed-error` each have five (listed case by case under *Corpus B*),
-> so a prompt change can now be certified — on those two classes and on nothing else.
+> One prerequisite of the success criterion is now met and the other is not, so the gate
+> stays off:
 >
-> Every other class is below five and is **reported but cannot certify**: `flipped-comparison`
-> (2), `off-by-one-bound` (2), `plan-flaw` (2), `wrong-set-members` (1), `wrong-reducer` (1),
-> `inverted-fallback-rank` (1). A treatment whose only gain is there has not passed the gate,
-> whatever its numbers look like; those rows are descriptive.
+> - **Met — corpus depth.** The criterion needs a defect class with **≥5 independent cases**.
+>   `dropped-guard` has five (listed case by case under *Corpus B*). It is the only class
+>   that does: `swallowed-error` (4), `flipped-comparison` (2), `off-by-one-bound` (2),
+>   `plan-flaw` (2), `lost-diagnostic` (1), `wrong-set-members` (1), `wrong-reducer` (1),
+>   `inverted-fallback-rank` (1) are all below the bar and are **reported but cannot
+>   certify**, whatever their numbers look like.
+> - **Not met — a scorer.** Recall per class is not yet something this harness computes.
+>   Turning findings into class recall needs decisions that are themselves gameable if made
+>   after seeing results: the adjudication artifact's schema, how repetitions of one case
+>   aggregate, how a `diff`/`code` twin pair is deduplicated, and how per-case calls roll up
+>   into a class number. Until that scorer is **committed and pre-registered — before the
+>   decision sweep runs** — a "certified" change would mean a threshold applied to a number
+>   whose definition was chosen alongside it.
 >
-> Five is the floor the rule names, not a comfortable sample, and it is why the criterion is
-> conjunctive — a relative improvement AND ≥2 additional defects. On five cases one case
-> flipping is worth a large percentage and exactly one defect, so the absolute half of the
-> rule refuses it however good the ratio looks.
+> So the gate does not activate with this release. What the harness can do now is unchanged:
+> establish the run-to-run noise floor (A/A), and apply the veto, which is computed on clean
+> controls alone and is indifferent to how large any defect class is. A prompt change can be
+> **blocked** by these results; it cannot be **certified** by them.
 >
 > **Two cases of the same mutant in different modes are not independent.** A `diff`-mode and
 > a `code`-mode re-expression of one seeded defect is one case counted twice: the same bug,
 > the same lines, the same reason a reviewer would or would not see it. Counting them as two
 > toward the ≥5 threshold would let the gate be satisfied by re-encoding rather than by
-> evidence. The five-case counts above are of distinct mutants; the corpus's three `code`-mode
+> evidence. The class counts above are of distinct mutants; the corpus's three `code`-mode
 > re-expressions are not among them.
 >
-> Unchanged: the veto is computed on clean controls alone, so it is indifferent to how large
-> any defect class is. A prompt change can still be **blocked** by results that could never
-> have certified it.
+> Five is the floor the rule names, not a comfortable sample, which is why the criterion is
+> conjunctive — a relative improvement AND ≥2 additional defects. On five cases one case
+> flipping is worth a large percentage and exactly one defect, so the absolute half of the
+> rule refuses it however good the ratio looks.
 
 ### Veto — must hold
 
@@ -663,9 +700,9 @@ Defect recall improves on at least one defect class that has **≥5 independent 
 **≥20% relative AND ≥2 additional defects found**. Both conditions, not either.
 
 - Classes with fewer than 5 cases are reported but **cannot certify** a change. They are too
-  small to distinguish a real improvement from a run of luck. **`dropped-guard` and
-  `swallowed-error` are the only classes at or above the bar today** — see *What this release
-  can and cannot decide* above for the rest.
+  small to distinguish a real improvement from a run of luck. **`dropped-guard` is the only
+  class at the bar today**, and the criterion still cannot be applied to it until the
+  adjudication scorer is pre-registered — see *What this release can and cannot decide* above.
 - **Independent** means a separate defect, not a separate encoding of one. The same seeded
   mutant reviewed in `diff` mode and again in `code` mode counts once.
 - A class whose control recall is zero uses the absolute condition alone (≥2 additional
