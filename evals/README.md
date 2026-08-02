@@ -359,11 +359,15 @@ something downstream still catches the failure and the run still fails, but with
 cause. And it is **`dropped-guard`** when what gets through is invalid input, an invalid
 argument combination, or malformed model output.
 
-Two cases decide those boundaries. `b-008` returns `""` on the timeout path, but `""` is a
-value every caller already rejects — claude and opencode re-detect it, codex never reads it —
-so the run still fails and only the cause is lost: `lost-diagnostic`, not `swallowed-error`.
-Its sibling `b-018` returns the child's real stdout on the exit-status path, which nothing
-downstream rejects, so a failed backend does come back as a review. `b-021` mutates a boolean
+Two cases decide those boundaries. `b-008` returns `""` on the timeout path, and `""` is a
+value its callers already reject: claude and opencode re-detect it and fail, and codex — which
+never reads the return value — fails on an empty output file. On every path the run still
+fails and only the cause is lost, so it is labelled `lost-diagnostic`. The one path where that
+does not hold is codex's output file when the killed process had already written part of it,
+which surfaces a fragment as a complete review; the label is the conservative reading of a
+mutant that is mostly diagnostic loss, not a claim that nothing can survive. Its sibling
+`b-018` returns the child's real stdout on the exit-status path, which no caller rejects, so
+there a failed backend comes back as a review by the ordinary route. `b-021` mutates a boolean
 guard, which looks like `dropped-guard`, but the arm it removes is the errored-backend arm and
 the outcome is a gate that exits 0 on a run that never completed — so it lands on the
 `swallowed-error` side.
@@ -375,20 +379,23 @@ written out here rather than left to the label:
   allow rule in the claude sandbox's tool allowlist (`b-003`); the verdict-validity check in
   `models.parse_backend_output` (`b-016`); the `--fail-on` requires `--json` argument check,
   whose removal turns the CI gate into a silent no-op (`b-017`); and the repo-containment
-  check on model-referenced files (`api.extract_referenced_files`, `b-022`). Four modules,
-  five checks, five different things getting through.
+  check on the files named in the content under review (`api.extract_referenced_files`,
+  `b-022`). Four modules, five checks, five different things getting through.
 
 `b-002` and `b-022` are the same *flavour* — `is_relative_to` demoted to a string-prefix test
-— at different sites, in different modules, on different attack surfaces (a link the doc
-author wrote vs. a filename the model mentioned in its own review text). Independence is the
-rule and they pass it; flavour spread is a preference this pair does not satisfy, which is
-recorded here rather than smoothed over.
+— at different sites, in different modules, on different attack surfaces. `b-002` is a
+relative markdown link inside a doc passed to `--docs`/`--llms`. `b-022` runs on the content
+under review before the API call is made (`api.py:205`), so its surface is any file-shaped
+token in the diff, plan or piped input being reviewed — which is attacker-adjacent in a way
+the doc path is not, since a diff can come from a branch nobody on the team wrote.
+Independence is the rule and they pass it; flavour spread is a preference this pair does not
+satisfy, which is recorded here rather than smoothed over.
 
 `swallowed-error`'s four members are `cli.run_one`'s `BackendError` handler (`b-009`), where
 the error is lost before it is ever recorded; `base.run_command`'s non-zero-exit arm (`b-018`);
 `api._output_text`'s unfinished-response check (`b-020`), where the fragment of a truncated
 review is returned as the whole of it; and `models.should_fail`'s errored-backend arm
-(`b-021`). Three modules, four failures, four ways of not failing — one short of the bar, and
+(`b-021`). Four modules, four failures, four ways of not failing — one short of the bar, and
 left short rather than padded.
 
 Ids are never reused. A case retired during construction leaves its number behind rather than
@@ -427,11 +434,22 @@ defect. Two further rules, both learned by admitting a mutant that broke them:
 
 The corpus is checked against both rules, not only new cases. `b-003`/`b-014` are the closest
 surviving call: the consequence (a `:*` allow rule lets an injected `--output=<path>` through)
-does lean on Claude Code's rule-matching semantics. They are kept because a prefix wildcard is
-strictly more permissive than an exact rule under any glob semantics — the mutant cannot be
-equivalent — and because the kill asserts the rule's *form* (exact present **and** wildcard
-absent), which an equivalent rewrite would not trip. That is a judgement, and it is the one to
-revisit first if this rule is ever tightened.
+does lean on Claude Code's rule-matching semantics. Two things keep them:
+
+- **The kill is a containment check, not an argv literal.** The assertion that fires is
+  `"Bash(git diff HEAD)" in allow` — the exact rule must appear somewhere in the assembled
+  `--allowedTools` string. Reordering the allowlist, adding a tool, or any other spelling that
+  still carries the exact rule passes it, so it distinguishes a widened rule from a rewrite.
+  (The test's companion conjunct, `"Bash(git diff:*)" not in allow`, does *not* fire on this
+  mutant — the mutation produces `Bash(git diff HEAD:*)`, which that substring never matches.
+  It guards a different widening, and the kill does not rest on it.)
+- **The mutation appends a defined widening token**, so the mutated rule is a strict superset
+  of the exact one and the mutant cannot be equivalent — no reading of the syntax makes
+  `Bash(git diff HEAD:*)` narrower than or equal to `Bash(git diff HEAD)`.
+
+The residual premise is that a bare `Bash(cmd)` rule is an exact match — otherwise `:*` would
+be redundant everywhere in the permission syntax, not just here. That premise is external and
+unpinnable, and it is the first thing to re-examine if Claude Code's rule syntax changes.
 
 The script is minutes of worktrees and full suite runs, so it is developer tooling, not a CI
 gate. What CI enforces is the cheap half: `test_cases.py` asserts every mutant manifest

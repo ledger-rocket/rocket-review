@@ -1,10 +1,12 @@
 ---
 # The timeout path tears the process group down but returns an empty string instead of
-# raising. Every CLI backend re-detects the emptiness a layer down, so the run still fails —
-# it just fails with the wrong cause. That is what makes this `lost-diagnostic` rather than
-# `swallowed-error`: "" is a value every caller already rejects, so nothing survives it. Its
-# sibling b-018 returns the child's real stdout on the exit-status path, which no caller
-# rejects, and that one does turn a failure into a review.
+# raising. "" is a value the callers already reject, so on every path they take the run still
+# fails and only the cause is lost — which is what makes this `lost-diagnostic` rather than
+# `swallowed-error`. The one exception is codex's output file below: a partially written file
+# does surface as a complete review. The label is the conservative reading of a mutant that is
+# mostly diagnostic loss, not a claim that nothing can survive. Its sibling b-018 returns the
+# child's real stdout on the exit-status path, which no caller rejects, and that one turns a
+# failure into a review by the ordinary route.
 id: b-008
 mode: diff
 source: mutant

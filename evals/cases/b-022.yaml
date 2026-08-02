@@ -1,9 +1,11 @@
 ---
 # The same flavour as b-002 — is_relative_to demoted to a string-prefix test — at a
 # different site, in a different module, on a different attack surface: b-002 escapes via a
-# link the doc author wrote, this one via a filename the model mentioned in its own review
-# text. Admitted on independence (distinct defect, distinct code site), not on novelty; the
-# flavour spread the corpus prefers is a nicety and this case does not have it.
+# relative link the doc author wrote, this one via any file-shaped token in the content under
+# review. extract_referenced_files runs on that content before the API call, so the escape
+# rides in on the diff, plan or piped input being reviewed — not on anything the model says.
+# Admitted on independence (distinct defect, distinct code site), not on novelty; the flavour
+# spread the corpus prefers is a nicety and this case does not have it.
 #
 # The containment rule is pathlib's, not an external tool's, so the defect is decided
 # entirely inside this repository at repo_commit, and the kill asserts that a sibling
@@ -18,9 +20,10 @@ defect:
   file: rocket_review/backends/api.py
   span: [81, 81]
   expected: >-
-    The repo-containment check on model-referenced files is a string-prefix test instead of
-    is_relative_to, so a sibling directory whose name extends the repo root (/repo-secret
-    beside /repo) passes as inside it and its files are read into the API prompt.
+    The repo-containment check on files named in the content under review is a string-prefix
+    test instead of is_relative_to, so a sibling directory whose name extends the repo root
+    (/repo-secret beside /repo) passes as inside it and its files are read into the prompt
+    the API backend sends.
 # Admission proof: these tests pass at repo_commit and fail with `diff` applied.
 # Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
 killed_by:
