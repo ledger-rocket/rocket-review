@@ -144,6 +144,15 @@ def test_mutant_is_staged_as_a_patched_worktree(tmp_path, git_repo, head_oid):
         remove_worktree(git_repo, staged.worktree)
 
 
+def test_a_successful_teardown_says_nothing(tmp_path, git_repo, head_oid, capsys):
+    write_mutant_patch(tmp_path, git_repo, head_oid)
+    case = load_case(write_manifest(tmp_path, "m-001", MUTANT.format(oid=head_oid)))
+    staged = materialize(case, git_repo, tmp_path / "work")
+    capsys.readouterr()
+    remove_worktree(git_repo, staged.worktree)
+    assert capsys.readouterr().err == ""
+
+
 def test_a_patch_that_does_not_apply_fails_loudly_and_leaves_no_worktree(
     tmp_path, git_repo, head_oid,
 ):

@@ -148,3 +148,29 @@ def test_export_round_trips_the_live_prompts(tmp_path):
     exported = export_arm(tmp_path / "exported")
     assert exported.texts == live_prompt_texts()
     assert exported.content_hash == load_arm("current").content_hash
+
+
+def test_a_freshly_exported_arm_satisfies_the_provenance_requirement(tmp_path):
+    # Otherwise `python evals/arms.py export <new-arm>` produces something that fails CI.
+    readme = export_arm(tmp_path / "exported").path / "README.md"
+    assert readme.is_file()
+    assert "TODO" in readme.read_text(encoding="utf-8")
+
+
+def test_export_does_not_overwrite_an_arms_recorded_provenance(tmp_path):
+    directory = tmp_path / "exported"
+    export_arm(directory)
+    (directory / "README.md").write_text("Taken from commit abc1234.\n", encoding="utf-8")
+    export_arm(directory)
+    assert (directory / "README.md").read_text(encoding="utf-8") == "Taken from commit abc1234.\n"
+
+
+def test_export_clears_a_prompt_file_the_runtime_no_longer_has(tmp_path):
+    # A renamed or removed constant would otherwise leave a file behind that load_arm
+    # rejects, so the export would produce an arm that cannot be loaded.
+    directory = tmp_path / "exported"
+    export_arm(directory)
+    (directory / "RETIRED_PROMPT.txt").write_text("old", encoding="utf-8")
+    exported = export_arm(directory)
+    assert not (directory / "RETIRED_PROMPT.txt").exists()
+    assert exported.texts == live_prompt_texts()

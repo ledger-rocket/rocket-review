@@ -134,12 +134,28 @@ def apply_arm(arm: Arm) -> None:
         setattr(rr_prompts, name, text)
 
 
+PROVENANCE_STUB = """\
+TODO: replace this line with where this arm came from — the commit its prompts were taken
+from, or what change it represents. Every shipped arm is required to document that.
+"""
+
+
 def export_arm(directory: Path) -> Arm:
-    """Write the live prompt constants out as an arm directory."""
+    """Write the live prompt constants out as a complete, loadable arm directory."""
     directory.mkdir(parents=True, exist_ok=True)
     texts = live_prompt_texts()
     for name, text in texts.items():
         (directory / f"{name}{SUFFIX}").write_text(text, encoding="utf-8")
+    # A renamed or removed prompt constant leaves its old file behind, and load_arm rejects
+    # an arm carrying a file it has no constant for — so the export would produce an arm
+    # that cannot be loaded.
+    for stale in directory.glob(f"*{SUFFIX}"):
+        if stale.stem not in PROMPT_CONSTANTS:
+            stale.unlink()
+    # Never overwritten: re-exporting an arm must not silently discard its provenance.
+    readme = directory / "README.md"
+    if not readme.exists():
+        readme.write_text(PROVENANCE_STUB, encoding="utf-8")
     return load_arm(directory)
 
 

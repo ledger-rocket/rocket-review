@@ -9,6 +9,7 @@ handled differently.
 from __future__ import annotations
 
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -229,5 +230,17 @@ def materialize(case: Case, repo: Path, workdir: Path) -> Materialized:
 
 
 def remove_worktree(repo: Path, worktree: Path) -> None:
+    """Tear down a staged worktree, saying so when it could not be torn down.
+
+    Never raises: this runs in a `finally` alongside other cleanups, and one stuck
+    worktree must not stop the rest. But it must not be silent either — a failed removal
+    leaves admin state behind that only a manual `git worktree prune` clears.
+    """
     # --force because the mutant patch leaves the worktree dirty by construction.
-    _git(repo, "worktree", "remove", "--force", str(worktree))
+    removed = _git(repo, "worktree", "remove", "--force", str(worktree))
+    if removed.returncode != 0:
+        print(
+            f"Warning: could not remove worktree {worktree}: {removed.stderr.strip()}\n"
+            f"         once it is gone, run `git -C {repo} worktree prune`.",
+            file=sys.stderr,
+        )
