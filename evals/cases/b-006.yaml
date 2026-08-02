@@ -1,6 +1,11 @@
 ---
 # The brace-scan slice loses its closing brace, so every review that is not markdown-fenced
 # stops decoding. Broad blast radius, single character.
+#
+# Caveat: likely too easy to discriminate arms. Fifteen tests in tests/test_models.py fail
+# on it, so any reviewer that reads the diff at all should catch it, and both arms are
+# expected to score recall 1.0 here. Kept for pipeline coverage of this defect class; it
+# carries no weight in a prompt comparison until a subtler mutant of the same class exists.
 id: b-006
 mode: diff
 source: mutant

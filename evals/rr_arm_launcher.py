@@ -49,8 +49,10 @@ def main() -> int:
     # constants are read per call, so import order is not what makes this work.
     from rocket_review.cli import main as rr_main
 
-    rr_main()
-    return 0
+    # `or 0` rather than a bare call: rr's main currently signals failure by raising
+    # SystemExit and returns None on success, but if it ever returns a status instead,
+    # discarding it here would report every failed review as a clean exit.
+    return rr_main() or 0
 
 
 if __name__ == "__main__":
