@@ -150,7 +150,7 @@ Every finding MUST carry a severity. A finding without one is not valid output.
 
 OUTPUT FORMAT
 For each finding:
-[SEVERITY] File — Issue description
+[SEVERITY] File:Line — Issue description
 > Why it matters
 > **Suggested fix:** provide the corrected code snippet or specific change. \
 Make fixes copy-pasteable when possible.

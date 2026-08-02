@@ -3,10 +3,13 @@ import pytest
 from rocket_review.backends.base import ReviewJob
 from rocket_review.prompts import build_agent_prompt, get_prompt
 
-# Characterization tests: they pin how prompts are assembled today, ahead of a planned
-# refactor of prompt assembly. They assert what IS, not what should be — including the
-# quirks below. Assertions are substring/ordering only, so internals can be restructured
-# and these break only when the externally visible assembly changes.
+# Two kinds of pin live here. Most are characterization tests: they pin how prompts are
+# assembled today, ahead of a planned refactor of prompt assembly, and assert what IS, not
+# what should be — including the quirks below. The rest pin deliberate content decisions
+# (which modes ask for praise, that severity is mandatory, that a format promising a line
+# citation offers a slot for one), so a later edit cannot quietly reverse them. Assertions
+# are substring/ordering only, so internals can be restructured and these break only when
+# the externally visible prompt changes.
 
 # Distinctive opening phrase of each mode body; cheaper to keep in sync than the whole body.
 MODE_MARKERS = {
@@ -60,6 +63,14 @@ def test_only_the_plan_prompt_asks_what_is_good():
 @pytest.mark.parametrize("mode", list(MODE_MARKERS))
 def test_every_mode_makes_severity_mandatory(mode):
     assert "Every finding MUST carry a severity" in get_prompt(mode)
+
+
+@pytest.mark.parametrize("mode", ["code", "diff"])
+def test_finding_format_has_a_line_slot_where_a_line_is_asked_for(mode):
+    # These two modes tell the reviewer to cite a file and line; a finding format with no
+    # slot for the line would contradict that. Plan findings cite neither, so it is exempt.
+    assert "cite a file and line" in get_prompt(mode)
+    assert "[SEVERITY] File:Line — Issue description" in get_prompt(mode)
 
 
 def test_unknown_mode_raises_key_error():
