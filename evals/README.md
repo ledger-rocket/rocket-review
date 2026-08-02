@@ -677,9 +677,10 @@ as the results it would reinterpret.
 >
 > Two conditions on using it, both part of the pre-registration:
 >
-> - **The decision sweep runs at `--runs 5` or more.** The majority rule needs an odd
->   protocol depth to mean what it says, and five is the depth every threshold below was
->   argued at. A sweep run shallower may be read, but it does not decide anything.
+> - **The decision sweep runs at `--runs 5` or more.** The majority rule needs depth to mean
+>   what it says, and five is the depth every threshold below was argued at. A sweep run
+>   shallower may be read, but it does not certify anything — `adjudicate.py` enforces that
+>   rather than trusting it (*Protocol depth*). It can still be **vetoed** at any depth.
 > - **`adjudicate.py`'s verdict is binding.** CERTIFIED, NOT CERTIFIED or VETOED is the
 >   answer, not an input to a judgement made afterwards. A rule that turns out to be wrong
 >   is changed in a commit of its own, argued on its own merits, before the next sweep —
@@ -869,13 +870,33 @@ cleared by re-encoding one mutant instead of by evidence.
 
 Which case represents a mutation is decided from the **manifests** — `diff` mode wins, lowest
 case id breaks a tie — and never from the results, so it cannot become a choice made after
-seeing which expression scored better.
+seeing which expression scored better. Nor can an adjudication call move it: see *Case
+invalidation*, which removes whole mutations for exactly that reason.
 
 ### Class eligibility
 
 A class is verdict-grade only when it has **≥5 independent cases actually scored in the
-sweep**, after twin dedup and after case invalidation. Every other class is computed and
-printed with its numbers, and cannot produce a CERTIFIED verdict however good they look.
+sweep**, after twin dedup and after case invalidation, **and** every one of them was scored
+at protocol depth (below). Every other class is computed and printed with its numbers, and
+cannot produce a CERTIFIED verdict however good they look.
+
+### Protocol depth
+
+Certification requires **≥5 complete repetitions on every case it reads** — each case of the
+certifying class, and each clean-control case the veto is computed over.
+
+The majority rule is only the majority rule at depth. At n=1 a strict majority is one run,
+so "found in a majority of repetitions" collapses into exactly the any-run rule that
+*Repetition aggregation* rejects; at n=2 it takes both. The thresholds above were argued at
+five, and a scorer that would apply them to a two-run sweep is a scorer whose depth is
+chosen after the fact. So it is checked rather than assumed, and a shallow sweep is reported
+with its numbers and refused a certification.
+
+The check is deliberately **one-sided**: depth gates certifying, never blocking. A sweep
+that trips the veto over two repetitions has still shown harm, and refusing to act on it
+because the sample is thin would be failing in the wrong direction — the whole asymmetry of
+*What this release can and cannot decide* is that this harness may block on less evidence
+than it may certify on.
 
 ### Veto arithmetic
 
@@ -890,6 +911,16 @@ Means are compared as exact rationals, not floats: a bound of exactly +0.5 is on
 side of "by no more than 0.5", and it should not depend on binary rounding whether it lands
 there.
 
+A run whose review did not parse contributes a **zero** to its arm's mean rather than
+dropping out of the denominator: the runtime parser returns no findings for a schema
+violation or a decode failure, so there are no findings to adjudicate and none are counted.
+That dilutes the false-positive mean downward for whichever arm produced the unparsable
+output. It is deliberate — tier 1's raw `critical+high/run` treats those runs identically,
+and the two reports must not disagree about which runs happened — but it means an arm that
+degrades into unparsable output looks quieter here, not noisier. `tier1.py`'s strict-valid
+rate is where that shows up, and it is the number to read alongside a veto that passed
+narrowly.
+
 **An unmeasured veto is a failed veto.** A sweep with no clean-control repetition left is
 VETOED, not certified — treating silence as a pass would let a change be certified by running
 a sweep with the controls filtered out.
@@ -900,6 +931,21 @@ One `case-invalidated` decision removes the case from every number in both arms:
 veto if it is a control, out of its class's recall *denominator* if it is a defect case. The
 class shrinks with it, and a class that drops below five independent cases stops being
 verdict-grade — which is the honest consequence, not an edge case to smooth over.
+
+**Invalidation lands on the mutation, not on one encoding of it.** A `diff`-mode case and its
+`code`-mode twin are one seeded defect, so invalidating either removes both. That is the
+honest reading of the rule — if the mutant's validity is disputed, every expression of it
+falls — and it is also the only safe one. Removing just the named case would usually remove
+the `diff`-mode representative, leaving the twin alone in its mutation group where the
+representative rule elects it: the class would keep its case count and silently substitute
+the numbers of the very encoding *Twin dedup* exists to hold out. One adjudication call
+could then turn a NOT CERTIFIED sweep into a CERTIFIED one without a single finding
+changing.
+
+Because the removal is that consequential, an invalidation on a defect case has to be
+recorded against a finding that satisfies scoring rules 1 and 2 — a finding about the seeded
+defect. The claim is that the defect is not a defect, so it is made where the evidence for
+it is.
 
 ### Zero baselines and the criterion itself
 
@@ -939,10 +985,27 @@ function of the three input files. The report prints the veto with its per-case 
 recall per arm with each case's hit count, the mode-sensitivity twins, the success criterion,
 and one final line: **CERTIFIED**, **NOT CERTIFIED** or **VETOED**, with the reasons.
 
-Exit status is that verdict — `0` certified, `1` not certified, `2` vetoed, `3` no verdict
-could be computed. A sweep that could not be scored and a sweep that was refused are
-different outcomes, and a caller that could not tell them apart would read a broken run as a
-decision.
+Exit status carries the outcome, and **nothing that is not a computed verdict is allowed to
+land on a verdict code**:
+
+- `0` CERTIFIED, `1` NOT CERTIFIED, `2` VETOED — the three verdicts, and only those;
+- `3` no verdict could be computed: unreadable input, an incomplete adjudication, a sweep
+  where no repetition survived;
+- `4` `--pending` drafted a work list. Drafting decides nothing, so it must not exit 0;
+- `64` a usage error. argparse exits 2 by default, which is VETOED here, so the parser is
+  overridden — a caller gating a prompt change on exit status must not read a mistyped flag
+  as a blocked change.
+
+A sweep that could not be scored, a sweep that was refused, and a command that was never
+run are three different outcomes, and a caller that could not tell them apart would read one
+as another.
+
+The report also prints a non-blocking **warning** when identical finding text — same title,
+same `why` — was adjudicated differently depending on which arm produced it. That is not
+necessarily wrong: the same sentence can be right about one diff and wrong about another.
+But the arm role is on screen while the call is made, and an adjudicator reading the
+control's finding as noise and the treatment's word-for-word identical finding as real is
+the shape a thumb on the scale makes. Printed, so it is at least seen.
 
 A file holding more than one `sweep_id` is refused outright, with no override. `tier1.py` has
 one because it only *describes* sweeps and can print two side by side; a certification is one
@@ -988,7 +1051,9 @@ launches a real backend.
 - `test_tier1.py` — every tier-1 metric on fixed rows, plus the hand-labelled DO-NOT-FLAG
   fixture.
 - `test_adjudicate.py` — the certification arithmetic on synthetic sweeps: the majority rule
-  including the even-*n* split a lost repetition produces, twin exclusion, every artifact
-  validation and rule refusal, the completeness gate, case invalidation flowing into both the
-  veto and a class denominator, and two full end-to-end sweeps through the CLI — one that
-  certifies and one whose identical recall is vetoed by the noise it was bought with.
+  including the even-*n* split a lost repetition produces, twin exclusion, mutation-level
+  invalidation (including that invalidating a representative cannot promote its twin into
+  the class), the protocol-depth gate in both directions, per-backend combination, every
+  artifact validation and rule refusal, the completeness gate, the exit-status separation,
+  and two full end-to-end sweeps through the CLI — one that certifies and one whose
+  identical recall is vetoed by the noise it was bought with.

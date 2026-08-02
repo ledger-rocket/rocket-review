@@ -14,9 +14,12 @@ from adjudicate import (
     CASE_INVALIDATED,
     CERTIFIED,
     CERTIFYING_CLASS_MIN_CASES,
+    EXIT_DRAFTED,
+    EXIT_USAGE,
     FALSE_POSITIVE,
     MATCHES_DEFECT,
     NOT_CERTIFIED,
+    PROTOCOL_MIN_REPS,
     REAL_UNRELATED,
     VETOED,
     AdjudicationError,
@@ -26,6 +29,8 @@ from adjudicate import (
     load_adjudications,
     main,
     mutation_of,
+    print_report,
+    removed_cases,
 )
 from cases import CASES_DIR, load_cases
 from strict_validator import BACKEND_ERROR, VALID
@@ -33,6 +38,7 @@ from strict_validator import BACKEND_ERROR, VALID
 SWEEP = "0123456789abcdef0123456789abcdef"
 COMMIT = "a" * 40
 ARMS = {"control": "before", "treatment": "after"}
+BACKEND = "codex"
 DEFECT_FILE = "rocket_review/models.py"
 SPAN = (10, 20)
 
@@ -90,7 +96,7 @@ def row(case_id: str, arm_role: str, rep: int, findings: list[dict] | None = Non
         "sweep_id": SWEEP, "case_id": case_id, "mode": "diff",
         "source": "merged-pr" if is_control else "mutant", "repo_commit": COMMIT,
         "case_is_control": is_control, "arm": ARMS[arm_role], "arm_role": arm_role,
-        "arm_hash": "h", "backend": "codex", "requested_model": "m", "rep": rep,
+        "arm_hash": "h", "backend": BACKEND, "requested_model": "m", "rep": rep,
         "order_index": 0, "attempt": 1, "command": ["rr"], "cwd": "/repo",
         "exit_code": 0, "duration_s": 1.0, "raw": review(findings or []),
         "outcome": VALID, "errors": [], "excerpt": "", "bare_json": True,
@@ -101,14 +107,15 @@ def row(case_id: str, arm_role: str, rep: int, findings: list[dict] | None = Non
 
 
 def pair(case_id: str, rep: int, control: list[dict], treatment: list[dict],
-         is_control: bool = False) -> list[dict]:
+         is_control: bool = False, backend: str = BACKEND) -> list[dict]:
     return [
-        row(case_id, "control", rep, control, is_control=is_control),
-        row(case_id, "treatment", rep, treatment, is_control=is_control),
+        row(case_id, "control", rep, control, is_control=is_control, backend=backend),
+        row(case_id, "treatment", rep, treatment, is_control=is_control, backend=backend),
     ]
 
 
-def defect_rows(case_id: str, reps: int, control_hits: int, treatment_hits: int) -> list[dict]:
+def defect_rows(case_id: str, reps: int, control_hits: int, treatment_hits: int,
+                backend: str = BACKEND) -> list[dict]:
     """One repetition per rep; the first `hits` of each arm land a finding on the defect."""
     return [
         r
@@ -117,11 +124,13 @@ def defect_rows(case_id: str, reps: int, control_hits: int, treatment_hits: int)
             case_id, rep,
             [on_defect()] if rep <= control_hits else [],
             [on_defect()] if rep <= treatment_hits else [],
+            backend=backend,
         )
     ]
 
 
-def control_rows(case_id: str, reps: int, control_noise: int, treatment_noise: int) -> list[dict]:
+def control_rows(case_id: str, reps: int, control_noise: int, treatment_noise: int,
+                 backend: str = BACKEND) -> list[dict]:
     """A clean control whose arms each raise a fixed number of HIGH findings per run."""
     return [
         r
@@ -130,27 +139,34 @@ def control_rows(case_id: str, reps: int, control_noise: int, treatment_noise: i
             case_id, rep,
             [finding(title=f"noise {i}") for i in range(control_noise)],
             [finding(title=f"noise {i}") for i in range(treatment_noise)],
-            is_control=True,
+            is_control=True, backend=backend,
         )
     ]
 
 
 def call(case_id: str, arm_role: str, rep: int, decision: str, index: int = 0,
-         rationale: str = "recorded call", backend: str = "codex") -> dict:
+         rationale: str = "recorded call", backend: str = BACKEND) -> dict:
     return {
         "case_id": case_id, "backend": backend, "arm": ARMS[arm_role], "arm_role": arm_role,
         "rep": rep, "finding_index": index, "decision": decision, "rationale": rationale,
     }
 
 
-def adjudicate_all(rows: list[dict], decision: str, index_count=None) -> list[dict]:
+def adjudicate_all(rows: list[dict], decision: str) -> list[dict]:
     """One call per finding of every row, which is what the completeness gate demands."""
-    calls = []
-    for r in rows:
-        findings = json.loads(r["raw"])["findings"]
-        for index in range(len(findings) if index_count is None else index_count):
-            calls.append(call(r["case_id"], r["arm_role"], r["rep"], decision, index))
-    return calls
+    return [
+        call(r["case_id"], r["arm_role"], r["rep"], decision, index, backend=r["backend"])
+        for r in rows
+        for index in range(len(json.loads(r["raw"])["findings"]))
+    ]
+
+
+def adjudicate_split(rows: list[dict]) -> list[dict]:
+    """The ordinary shape of a sweep's calls: rule 3 on defect cases, noise on controls."""
+    return (
+        adjudicate_all([r for r in rows if not r["case_is_control"]], MATCHES_DEFECT)
+        + adjudicate_all([r for r in rows if r["case_is_control"]], FALSE_POSITIVE)
+    )
 
 
 def write_results(tmp_path: Path, rows: list[dict], sweep_id: str = SWEEP) -> Path:
@@ -278,6 +294,63 @@ def test_the_shipped_corpus_dedups_to_the_class_counts_the_gate_is_argued_from()
         "dropped-guard",
     ]
     assert counts["dropped-guard"] == 5
+
+
+def twin_promotion_corpus(directory: Path) -> None:
+    """Five dropped-guard mutants, one of which is also expressed as a code-mode twin."""
+    one_defect_class(directory, 5)
+    write_case(
+        directory, "b-201", mode="code", source="mutant", diff="cases/b-101.patch",
+        defect={"class": "dropped-guard", "file": DEFECT_FILE, "span": list(SPAN),
+                "expected": "the guard is gone"},
+    )
+    write_case(directory, "c-101")
+
+
+def twin_promotion_sweep() -> list[dict]:
+    rows = defect_rows("b-101", 5, control_hits=0, treatment_hits=1)
+    rows += defect_rows("b-102", 5, 0, 0)
+    rows += defect_rows("b-103", 5, 0, 5)
+    rows += defect_rows("b-104", 5, 5, 5)
+    rows += defect_rows("b-105", 5, 5, 5)
+    rows += defect_rows("b-201", 5, 0, 5)
+    return rows + control_rows("c-101", 5, control_noise=0, treatment_noise=0)
+
+
+def test_invalidating_a_representative_does_not_promote_its_twin(tmp_path):
+    # The exploit this rule closes: with invalidation applied case-by-case, removing the
+    # diff-mode representative leaves its code-mode twin alone in the mutation group, where
+    # it is elected representative. The class keeps its five-case count and quietly gains
+    # the twin's numbers — enough here to turn NOT CERTIFIED into CERTIFIED on one call.
+    rows = twin_promotion_sweep()
+    baseline = adjudicate_all(rows, MATCHES_DEFECT)
+    before = score(tmp_path, twin_promotion_corpus, rows, baseline)
+    entry = class_of(before, "dropped-guard")
+    assert (entry.cases, entry.control_found, entry.treatment_found) == (5, 2, 3)
+    assert (entry.criterion_met, before.verdict) == (False, NOT_CERTIFIED)
+    assert [t.case_id for t in before.backends[0].twins] == ["b-201"]
+
+    invalidating = [
+        call("b-101", "treatment", 1, CASE_INVALIDATED) if d["case_id"] == "b-101"
+        else d
+        for d in baseline
+    ]
+    after = score(tmp_path, twin_promotion_corpus, rows, invalidating)
+    entry = class_of(after, "dropped-guard")
+    assert [c.case_id for c in entry.per_case] == ["b-102", "b-103", "b-104", "b-105"]
+    assert (entry.cases, entry.certifying) == (4, False)
+    assert after.verdict == NOT_CERTIFIED
+    # The twin goes with its mutation rather than surviving as mode-sensitivity data.
+    assert after.removed_cases == ["b-101", "b-201"]
+    assert after.invalidated_cases == ["b-101"]
+    assert after.backends[0].twins == []
+
+
+def test_invalidation_closes_over_the_mutation_not_the_case(tmp_path):
+    cases = {c.id: c for c in load_cases(corpus(tmp_path, twinned))}
+    assert removed_cases(cases, frozenset({"b-101"})) == {"b-101", "b-201"}
+    assert removed_cases(cases, frozenset({"b-201"})) == {"b-101", "b-201"}
+    assert removed_cases(cases, frozenset()) == frozenset()
 
 
 def test_a_code_mode_twin_is_reported_but_never_counted_toward_a_class(tmp_path):
@@ -471,18 +544,14 @@ def test_both_conditions_must_hold(tmp_path):
 def test_a_two_defect_gain_on_a_wide_class_still_needs_twenty_percent(tmp_path):
     # +2 defects out of 13 cases, off a baseline of 11: 18.2% relative, so the ratio half
     # refuses what the absolute half would have allowed.
-    cert, entry = criterion(
-        tmp_path, cases=13, control_found=11, treatment_found=13, reps=1,
-    )
+    cert, entry = criterion(tmp_path, cases=13, control_found=11, treatment_found=13)
     assert entry.absolute_gain == 2
     assert round(float(entry.relative_gain), 4) == 0.1818
     assert (entry.criterion_met, cert.verdict) == (False, NOT_CERTIFIED)
 
 
 def test_exactly_twenty_percent_with_two_defects_clears_the_bar(tmp_path):
-    cert, entry = criterion(
-        tmp_path, cases=13, control_found=10, treatment_found=12, reps=1,
-    )
+    cert, entry = criterion(tmp_path, cases=13, control_found=10, treatment_found=12)
     assert (entry.absolute_gain, float(entry.relative_gain)) == (2, 0.2)
     assert (entry.criterion_met, cert.verdict) == (True, CERTIFIED)
 
@@ -497,6 +566,54 @@ def test_a_zero_baseline_still_needs_two_defects(tmp_path):
     cert, entry = criterion(tmp_path, cases=5, control_found=0, treatment_found=1)
     assert (entry.absolute_gain, entry.relative_gain) == (1, None)
     assert (entry.criterion_met, cert.verdict) == (False, NOT_CERTIFIED)
+
+
+def test_a_sweep_below_protocol_depth_cannot_certify_however_good_the_ratio(tmp_path):
+    # At n=1 a strict majority is one run, so the majority rule degenerates into exactly
+    # the any-run rule it exists to reject. The recall arithmetic still clears both halves
+    # of the criterion; the depth gate is what refuses it.
+    cert, entry = criterion(
+        tmp_path, cases=13, control_found=10, treatment_found=12, reps=1,
+    )
+    assert (entry.absolute_gain, float(entry.relative_gain)) == (2, 0.2)
+    assert (entry.criterion_met, entry.min_reps) == (True, 1)
+    assert (entry.certifying, cert.verdict) == (False, NOT_CERTIFIED)
+    assert f"below the protocol n>={PROTOCOL_MIN_REPS}" in " ".join(cert.reasons)
+
+
+def test_one_shallow_case_takes_its_whole_class_out_of_the_verdict(tmp_path):
+    rows = [r for n in range(1, 5) for r in defect_rows(f"b-{100 + n}", 5, 0, 5)]
+    rows += defect_rows("b-105", 4, 0, 4)
+    rows += control_rows("c-101", 5, control_noise=0, treatment_noise=0)
+    cert = score(
+        tmp_path, class_corpus(5), rows, adjudicate_all(rows, MATCHES_DEFECT),
+    )
+    entry = class_of(cert, "dropped-guard")
+    assert (entry.cases, entry.treatment_found, entry.criterion_met) == (5, 5, True)
+    assert (entry.min_reps, entry.certifying) == (4, False)
+    assert cert.verdict == NOT_CERTIFIED
+
+
+def test_shallow_clean_controls_cannot_certify_but_still_block(tmp_path):
+    def build(directory):
+        one_defect_class(directory, 5)
+        write_case(directory, "c-101")
+
+    defects = [r for n in range(1, 6) for r in defect_rows(f"b-{100 + n}", 5, 0, 5)]
+
+    quiet = defects + control_rows("c-101", 2, control_noise=0, treatment_noise=0)
+    cert = score(tmp_path, build, quiet, adjudicate_all(quiet, MATCHES_DEFECT))
+    assert class_of(cert, "dropped-guard").criterion_met is True
+    assert cert.backends[0].veto.holds is True
+    assert cert.backends[0].veto.at_protocol_depth is False
+    assert cert.verdict == NOT_CERTIFIED
+    assert "measured too thinly to certify against" in " ".join(cert.reasons)
+
+    # Blocking is not gated on depth: two repetitions are enough to show harm, and
+    # refusing to act on that would be the wrong direction to fail in.
+    noisy = defects + control_rows("c-101", 2, control_noise=0, treatment_noise=3)
+    cert = score(tmp_path, build, noisy, adjudicate_split(noisy))
+    assert cert.verdict == VETOED
 
 
 def test_a_class_below_five_cases_is_reported_and_cannot_certify(tmp_path):
@@ -668,6 +785,17 @@ def test_a_false_positive_on_a_defect_case_is_refused(tmp_path):
         )
 
 
+def test_invalidating_a_defect_case_needs_a_finding_about_the_defect(tmp_path):
+    # Removing a case is the largest thing one call can do to the arithmetic, so the claim
+    # that the seeded defect is not a defect has to be made on a finding about it.
+    rows = pair("b-101", 1, [], [finding(file="rocket_review/cli.py", line=3)])
+    with pytest.raises(AdjudicationError, match="case-invalidated but the finding fails"):
+        score(
+            tmp_path, lambda d: defect_case(d, "b-101"), rows,
+            [call("b-101", "treatment", 1, CASE_INVALIDATED)],
+        )
+
+
 def test_matching_a_defect_on_a_clean_control_is_refused(tmp_path):
     rows = control_rows("c-101", 1, control_noise=0, treatment_noise=1)
     rows += control_rows("c-102", 1, control_noise=0, treatment_noise=0)
@@ -705,6 +833,43 @@ def test_an_artifact_for_another_sweep_is_refused(tmp_path, capsys):
     assert "is for sweep" in capsys.readouterr().err
 
 
+# --- the cross-arm consistency warning ------------------------------------------------------
+
+
+def test_identical_finding_text_called_differently_across_arms_is_flagged(tmp_path, capsys):
+    rows = pair("b-101", 1, [on_defect()], [on_defect()])
+    rows += control_rows("c-101", 1, control_noise=0, treatment_noise=0)
+
+    def build(directory):
+        defect_case(directory, "b-101")
+        write_case(directory, "c-101")
+
+    decisions = [call("b-101", "control", 1, REAL_UNRELATED),
+                 call("b-101", "treatment", 1, MATCHES_DEFECT)]
+    cert = score(tmp_path, build, rows, decisions)
+    assert [(c.title, c.by_role) for c in cert.cross_arm] == [
+        ("The guard no longer excludes anything",
+         {"control": [REAL_UNRELATED], "treatment": [MATCHES_DEFECT]}),
+    ]
+    # Flagged, never blocking: the same words can be right about one diff and wrong about
+    # another, so this is a prompt to go and read them.
+    assert cert.verdict == NOT_CERTIFIED
+    print_report(cert)
+    assert "adjudicated differently across arms" in capsys.readouterr().out
+
+
+def test_the_same_call_in_both_arms_is_not_flagged(tmp_path):
+    rows = pair("b-101", 1, [on_defect()], [on_defect()])
+    rows += control_rows("c-101", 1, control_noise=0, treatment_noise=0)
+
+    def build(directory):
+        defect_case(directory, "b-101")
+        write_case(directory, "c-101")
+
+    cert = score(tmp_path, build, rows, adjudicate_split(rows))
+    assert cert.cross_arm == []
+
+
 # --- end to end through the CLI ---------------------------------------------------------
 
 
@@ -735,18 +900,12 @@ def certification_corpus(directory: Path) -> None:
     write_case(directory, "c-102")
 
 
-def certification_calls(rows: list[dict]) -> list[dict]:
-    defects = [r for r in rows if r["case_id"].startswith("b-")]
-    controls = [r for r in rows if r["case_id"].startswith("c-")]
-    return adjudicate_all(defects, MATCHES_DEFECT) + adjudicate_all(controls, FALSE_POSITIVE)
-
-
 def test_a_clean_improvement_certifies(tmp_path, capsys):
     rows = certification_sweep(treatment_noise=1)
-    assert run_cli(tmp_path, rows, certification_calls(rows), certification_corpus) == 0
+    assert run_cli(tmp_path, rows, adjudicate_split(rows), certification_corpus) == 0
     out = capsys.readouterr().out
     assert final_verdict(out) == CERTIFIED
-    assert "dropped-guard [certifying, 5 independent cases]" in out
+    assert "dropped-guard [certifying, 5 independent cases at n>=5]" in out
     assert "control 2/5  treatment 4/5  +2 (+100.0%)  criterion met" in out
     assert "veto holds" in out
 
@@ -755,7 +914,7 @@ def test_the_same_improvement_bought_with_noise_is_vetoed(tmp_path, capsys):
     # Identical recall; the treatment now invents four extra high-severity findings per
     # run on one clean control, which is exactly the trade the veto refuses.
     rows = certification_sweep(treatment_noise=5)
-    assert run_cli(tmp_path, rows, certification_calls(rows), certification_corpus) == 2
+    assert run_cli(tmp_path, rows, adjudicate_split(rows), certification_corpus) == 2
     out = capsys.readouterr().out
     assert final_verdict(out) == VETOED
     # The success criterion is still met, which is the point: a veto is not a tie-break.
@@ -764,10 +923,59 @@ def test_the_same_improvement_bought_with_noise_is_vetoed(tmp_path, capsys):
     assert "exceeds control 1.000 by more than 0.500" in out
 
 
+# --- more than one backend ----------------------------------------------------------------
+
+
+def second_backend(certifies: bool, noisy: bool) -> list[dict]:
+    """The same five-case class under a second backend, tuned to certify or not."""
+    rows = []
+    for n in range(1, 6):
+        rows += defect_rows(
+            f"b-{100 + n}", 5, control_hits=5 if n <= 2 else 0,
+            treatment_hits=5 if n <= (4 if certifies else 3) else 0, backend="claude",
+        )
+    rows += control_rows("c-101", 5, 1, 5 if noisy else 1, backend="claude")
+    return rows + control_rows("c-102", 5, 1, 1, backend="claude")
+
+
+def test_a_veto_on_one_backend_vetoes_the_whole_sweep(tmp_path):
+    rows = certification_sweep(treatment_noise=1) + second_backend(
+        certifies=True, noisy=True,
+    )
+    cert = score(tmp_path, certification_corpus, rows, adjudicate_split(rows))
+    assert [(b.backend, b.verdict) for b in cert.backends] == [
+        ("claude", VETOED), ("codex", CERTIFIED),
+    ]
+    assert cert.verdict == VETOED
+    assert all(r.startswith("claude: ") for r in cert.reasons)
+
+
+def test_certification_needs_every_backend_to_certify(tmp_path):
+    rows = certification_sweep(treatment_noise=1) + second_backend(
+        certifies=False, noisy=False,
+    )
+    cert = score(tmp_path, certification_corpus, rows, adjudicate_split(rows))
+    assert [(b.backend, b.verdict) for b in cert.backends] == [
+        ("claude", NOT_CERTIFIED), ("codex", CERTIFIED),
+    ]
+    # A prompt ships to both at once, so one backend getting sharper while the other does
+    # not is not an improvement to rr.
+    assert cert.verdict == NOT_CERTIFIED
+    assert all(r.startswith("claude: ") for r in cert.reasons)
+
+
+def test_two_arms_in_one_role_for_one_backend_are_refused(tmp_path):
+    rows = control_rows("c-101", 1, control_noise=0, treatment_noise=0)
+    rows += [row("c-101", "control", 2, is_control=True, arm="another-control"),
+             row("c-101", "treatment", 2, is_control=True)]
+    with pytest.raises(AdjudicationError, match="exactly one control arm"):
+        score(tmp_path, controls_only, rows, [])
+
+
 def test_the_json_report_carries_the_same_verdict(tmp_path, capsys):
     rows = certification_sweep(treatment_noise=1)
     assert run_cli(
-        tmp_path, rows, certification_calls(rows), certification_corpus, "--json",
+        tmp_path, rows, adjudicate_split(rows), certification_corpus, "--json",
     ) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["verdict"] == CERTIFIED
@@ -783,10 +991,10 @@ def test_pending_drafts_every_call_the_rules_need_and_nothing_else(tmp_path, cap
     results = write_results(tmp_path, rows)
     cases_dir = corpus(tmp_path, certification_corpus)
     assert main([str(results), "--pending", "--cases", str(cases_dir),
-                 "--repo", str(tmp_path)]) == 0
+                 "--repo", str(tmp_path)]) == EXIT_DRAFTED
     draft = yaml.safe_load(capsys.readouterr().out)
     assert draft["sweep_id"] == SWEEP
-    assert len(draft["decisions"]) == len(certification_calls(rows))
+    assert len(draft["decisions"]) == len(adjudicate_split(rows))
     assert {d["decision"] for d in draft["decisions"]} == {"TODO"}
 
     # A filled-in draft scores; the TODO placeholder does not, so the skeleton can never
@@ -810,7 +1018,7 @@ def test_pending_skips_what_is_already_recorded(tmp_path, capsys):
     )
     cases_dir = corpus(tmp_path, controls_only)
     assert main([str(results), "--pending", "--adjudications", str(recorded),
-                 "--cases", str(cases_dir), "--repo", str(tmp_path)]) == 0
+                 "--cases", str(cases_dir), "--repo", str(tmp_path)]) == EXIT_DRAFTED
     draft = yaml.safe_load(capsys.readouterr().out)
     assert [(d["case_id"], d["arm_role"], d["rep"]) for d in draft["decisions"]] == [
         ("c-101", "control", 2), ("c-101", "treatment", 1), ("c-101", "treatment", 2),
@@ -839,3 +1047,23 @@ def test_adjudications_are_required_unless_drafting(tmp_path, capsys):
     results = write_results(tmp_path, control_rows("c-101", 1, 0, 0))
     assert main([str(results)]) == 3
     assert "--adjudications is required" in capsys.readouterr().err
+
+
+def test_a_usage_error_never_lands_on_a_verdict_code(tmp_path):
+    # argparse exits 2 by default, and 2 is VETOED. A caller gating on status would read a
+    # mistyped flag as a blocked prompt change.
+    with pytest.raises(SystemExit) as excinfo:
+        main([str(tmp_path / "paired.jsonl"), "--not-a-flag"])
+    assert excinfo.value.code == EXIT_USAGE
+    assert excinfo.value.code not in (0, 1, 2, 3)
+
+
+def test_drafting_does_not_exit_on_a_verdict_code(tmp_path, capsys):
+    rows = control_rows("c-101", 1, control_noise=1, treatment_noise=0)
+    results = write_results(tmp_path, rows)
+    cases_dir = corpus(tmp_path, controls_only)
+    status = main([str(results), "--pending", "--cases", str(cases_dir),
+                   "--repo", str(tmp_path)])
+    assert (status, EXIT_DRAFTED) == (4, 4)
+    assert status not in (0, 1, 2)
+    assert yaml.safe_load(capsys.readouterr().out)["decisions"]

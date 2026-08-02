@@ -26,6 +26,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from fractions import Fraction
 from pathlib import Path
+from typing import NoReturn
 
 import yaml
 
@@ -57,9 +58,9 @@ MATCHES_DEFECT = "matches-defect"
 REAL_UNRELATED = "real-unrelated"
 #: A clean-control finding confirmed as noise. The veto's numerator.
 FALSE_POSITIVE = "false-positive"
-#: The case does not measure what it claims to: a "clean" control carrying a real bug, or
-#: a defect case whose defect turned out not to be one. Removes the case from every
-#: certification number, for both arms, per the README rule.
+#: The seeded defect does not measure what it claims to: a "clean" control carrying a real
+#: bug, or a defect case whose defect turned out not to be one. Removes the whole mutation
+#: — every encoding of it — from every certification number, for both arms.
 CASE_INVALIDATED = "case-invalidated"
 
 DECISIONS = (MATCHES_DEFECT, REAL_UNRELATED, FALSE_POSITIVE, CASE_INVALIDATED)
@@ -78,6 +79,22 @@ VETO_PER_CASE_SLACK = Fraction(1, 2)
 CRITERION_RELATIVE_GAIN = Fraction(1, 5)
 CRITERION_ABSOLUTE_GAIN = 2
 CERTIFYING_CLASS_MIN_CASES = 5
+#: Complete repetitions a case needs before anything it contributes can certify. At n=1 a
+#: strict majority is satisfied by a single run, which is the any-run rule the majority
+#: rule exists to reject — so the depth the thresholds were argued at is enforced, not
+#: assumed. Blocking is deliberately not gated on it: a shallow sweep still vetoes.
+PROTOCOL_MIN_REPS = 5
+
+#: Exit status. 0/1/2 are the three verdicts; nothing that is not a computed verdict may
+#: land on one of them.
+EXIT_STATUS = {CERTIFIED: 0, NOT_CERTIFIED: 1, VETOED: 2}
+#: The inputs could not support a verdict at all — unreadable, incomplete, nothing scored.
+EXIT_NO_VERDICT = 3
+#: `--pending` drafted a work list. Nothing was decided, so it cannot exit 0.
+EXIT_DRAFTED = 4
+#: A usage error, kept well clear of the verdicts. argparse exits 2 by default, which is
+#: VETOED here: a caller gating on status would read a mistyped flag as a blocked change.
+EXIT_USAGE = 64
 
 TOP_LEVEL_KEYS = {"sweep_id", "results_file", "adjudicator", "decisions"}
 DECISION_KEYS = {
@@ -379,11 +396,17 @@ def _rule_problems(
                 f"{where}: {FALSE_POSITIVE} on a defect case. Unrelated-but-real findings "
                 f"there are ignored, not debited — record {REAL_UNRELATED}"
             )
-        if adj.decision == MATCHES_DEFECT and not matches_location(finding, case, repo):
+        # Invalidating a defect case is a claim about the seeded defect, so it is made on a
+        # finding about the seeded defect. Without the check the removal floats free of any
+        # evidence, and removing a case is the single largest thing one call can do to the
+        # arithmetic.
+        if adj.decision in (MATCHES_DEFECT, CASE_INVALIDATED) and not matches_location(
+            finding, case, repo,
+        ):
             assert case.defect is not None
             cited = finding.file if isinstance(finding.file, str) else repr(finding.file)
             problems.append(
-                f"{where}: {MATCHES_DEFECT} but the finding fails rule 1 or 2 — it cites "
+                f"{where}: {adj.decision} but the finding fails rule 1 or 2 — it cites "
                 f"{cited}:{finding.line}, and the defect is {case.defect.file} lines "
                 f"{case.defect.span[0]}-{case.defect.span[1]}"
             )
@@ -417,7 +440,11 @@ class ClassRecall:
     cases: int
     control_found: int
     treatment_found: int
-    #: A class below the bar is reported and cannot certify, whatever its numbers say.
+    #: Complete repetitions on the class's shallowest scored case and arm. The majority
+    #: rule is only the majority rule at depth: at n=1 one run carries a case.
+    min_reps: int
+    #: A class below either bar — case count or protocol depth — is reported and cannot
+    #: certify, whatever its numbers say.
     certifying: bool
     absolute_gain: int
     #: None when control recall is zero: a relative improvement on zero is undefined
@@ -450,6 +477,12 @@ class VetoResult:
     #: and it was zero", which is the one thing an empty veto must not say.
     control_mean: Fraction | None
     treatment_mean: Fraction | None
+    #: Complete repetitions on the shallowest clean-control case, and whether that reaches
+    #: the protocol depth. It gates certifying, never blocking: a shallow sweep that trips
+    #: the veto has still shown harm, and refusing to act on that would be the wrong
+    #: direction to fail in.
+    min_case_reps: int
+    at_protocol_depth: bool
     per_case_ok: bool
     aggregate_ok: bool
     holds: bool
@@ -468,6 +501,43 @@ class BackendCertification:
     reasons: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class CrossArmInconsistency:
+    title: str
+    #: Arm role -> the distinct decisions recorded against this exact finding text there.
+    by_role: dict[str, list[str]]
+
+
+def cross_arm_inconsistencies(
+    adjudications: tuple[Adjudication, ...], rows: list[dict],
+    parsed: dict[tuple, list[Finding]], sweep_id: str,
+) -> list[CrossArmInconsistency]:
+    """Identical finding text called one thing in one arm and another in the other.
+
+    Never blocking, and not necessarily wrong: the same sentence can be right about one
+    diff and wrong about another, and a twenty-case corpus produces honest near-duplicates.
+    But an adjudicator reading the control's finding as noise and the treatment's
+    word-for-word identical finding as real is the shape a thumb on the scale makes, and
+    the arm role is on screen while the call is made. Printed, so it is at least seen.
+    """
+    by_unit = {unit_key(row): row for row in rows}
+    by_text: dict[tuple[str, str], dict[str, set[str]]] = {}
+    for adj in adjudications:
+        key = (sweep_id, adj.case_id, adj.backend, adj.arm, adj.arm_role, adj.rep)
+        if key not in by_unit:
+            continue
+        finding = parsed[key][adj.finding_index]
+        text = ((finding.title or "").strip(), (finding.why or "").strip())
+        by_text.setdefault(text, {}).setdefault(adj.arm_role, set()).add(adj.decision)
+    return [
+        CrossArmInconsistency(
+            title=title, by_role={role: sorted(d) for role, d in sorted(roles.items())},
+        )
+        for (title, _why), roles in sorted(by_text.items())
+        if len(roles) > 1 and len({frozenset(d) for d in roles.values()}) > 1
+    ]
+
+
 @dataclass
 class Certification:
     sweep_id: str
@@ -478,7 +548,12 @@ class Certification:
     #: Decisions on repetitions that did not survive the complete-pair rule. Recorded work
     #: that no number reads; reported so a shrinking corpus is visible.
     decisions_unused: int
+    #: The cases an adjudicator called invalid...
     invalidated_cases: list[str]
+    #: ...and everything that went with them: an invalidation removes a whole mutation, so
+    #: a `code`-mode twin of an invalidated representative is here but not above.
+    removed_cases: list[str]
+    cross_arm: list[CrossArmInconsistency]
     incomplete_pairs: list[IncompletePair]
     backends: list[BackendCertification]
     verdict: str
@@ -508,6 +583,35 @@ def certifying_representative(group: list[Case]) -> Case:
     return diff_mode[0] if diff_mode else sorted(group, key=lambda c: c.id)[0]
 
 
+def _grouped(cases: dict[str, Case]) -> dict[str, list[Case]]:
+    """Every case of the corpus, bucketed by the mutation it is an expression of."""
+    groups: dict[str, list[Case]] = {}
+    for case in cases.values():
+        groups.setdefault(mutation_of(case), []).append(case)
+    return groups
+
+
+def removed_cases(cases: dict[str, Case], invalidated: frozenset[str]) -> frozenset[str]:
+    """Every case an invalidation takes out: the ones named, and their twins with them.
+
+    Invalidation lands on a **mutation**, not on one encoding of it. A `diff`-mode case and
+    its `code`-mode twin are one seeded defect, so if that defect's validity is disputed,
+    both expressions of it go.
+
+    Removing only the named case would be worse than incomplete — it would be exploitable.
+    The named case is usually the `diff`-mode representative; dropping it alone leaves the
+    twin as the sole member of its mutation group, where `certifying_representative` elects
+    it. The class keeps its case count, and the numbers of the very encoding twin dedup
+    exists to hold out are swapped into certification arithmetic by an adjudication call.
+    """
+    return frozenset(
+        case.id
+        for group in _grouped(cases).values()
+        if any(case.id in invalidated for case in group)
+        for case in group
+    )
+
+
 def _found(hits: int, reps: int) -> bool:
     """Majority rule: a defect is FOUND by an arm iff it was matched in more than half of
     that arm's scored repetitions for the case.
@@ -525,12 +629,16 @@ def _mean(total: int, count: int) -> Fraction | None:
 
 def compute_recall(
     rows: list[dict], cases: dict[str, Case], parsed: dict[tuple, list[Finding]],
-    matched: set[tuple], invalidated: frozenset[str],
+    matched: set[tuple], removed: frozenset[str],
 ) -> tuple[list[ClassRecall], list[CaseRecall]]:
-    """Per-class recall for one backend, plus the twins held out of it."""
+    """Per-class recall for one backend, plus the twins held out of it.
+
+    `removed` is already closed over mutations (see `removed_cases`), so a mutation is
+    either wholly present or wholly gone here. Electing the representative from a group an
+    invalidation had partly emptied is what would let a twin be promoted into the class.
+    """
     defect_cases = [
-        c for c in cases.values()
-        if c.defect is not None and c.id not in invalidated
+        c for c in cases.values() if c.defect is not None and c.id not in removed
     ]
     by_mutation: dict[str, list[Case]] = {}
     for case in defect_cases:
@@ -591,20 +699,25 @@ def _class_recall(
     # A relative improvement on a zero baseline is undefined, not infinite, so the class
     # is judged on the absolute condition alone there.
     relative = Fraction(absolute, control_found) if control_found else None
-    certifying = len(entries) >= CERTIFYING_CLASS_MIN_CASES
+    min_reps = min(
+        (min(c.control_reps, c.treatment_reps) for c in entries), default=0,
+    )
+    certifying = (
+        len(entries) >= CERTIFYING_CLASS_MIN_CASES and min_reps >= PROTOCOL_MIN_REPS
+    )
     met = absolute >= CRITERION_ABSOLUTE_GAIN and (
         relative is None or relative >= CRITERION_RELATIVE_GAIN
     )
     return ClassRecall(
         defect_class=defect_class, cases=len(entries), control_found=control_found,
-        treatment_found=treatment_found, certifying=certifying, absolute_gain=absolute,
-        relative_gain=relative, criterion_met=met, per_case=entries,
+        treatment_found=treatment_found, min_reps=min_reps, certifying=certifying,
+        absolute_gain=absolute, relative_gain=relative, criterion_met=met, per_case=entries,
     )
 
 
 def compute_veto(
     rows: list[dict], cases: dict[str, Case], parsed: dict[tuple, list[Finding]],
-    false_positives: set[tuple], invalidated: frozenset[str],
+    false_positives: set[tuple], removed: frozenset[str],
 ) -> VetoResult:
     """The veto for one backend, from adjudicated false positives rather than raw counts.
 
@@ -616,7 +729,7 @@ def compute_veto(
     by_case: dict[str, dict[str, list[int]]] = {}
     for row in rows:
         case = cases[row["case_id"]]
-        if not case.is_control or case.id in invalidated or row["arm_role"] not in totals:
+        if not case.is_control or case.id in removed or row["arm_role"] not in totals:
             continue
         count = sum(
             1 for i, finding in enumerate(parsed[unit_key(row)])
@@ -673,10 +786,13 @@ def compute_veto(
             f"in aggregate over clean controls, treatment {_num(treatment_mean)} exceeds "
             f"control {_num(control_mean)} adjudicated false-positive critical+high per run"
         )
+    min_case_reps = min((c.reps for c in per_case), default=0)
     return VetoResult(
         per_case=per_case, control_runs=control_runs, treatment_runs=treatment_runs,
         control_total=control_total, treatment_total=treatment_total,
         control_mean=control_mean, treatment_mean=treatment_mean,
+        min_case_reps=min_case_reps,
+        at_protocol_depth=bool(per_case) and min_case_reps >= PROTOCOL_MIN_REPS,
         per_case_ok=per_case_ok, aggregate_ok=aggregate_ok,
         holds=per_case_ok and aggregate_ok, reasons=reasons,
     )
@@ -707,9 +823,10 @@ def compute(
     invalidated = frozenset(
         adj.case_id for adj in adjudications.decisions if adj.decision == CASE_INVALIDATED
     )
+    removed = removed_cases(cases, invalidated)
     recorded = {adj.key for adj in adjudications.decisions}
     missing = [
-        item for item in pending_findings(complete, cases, parsed, repo, skip_cases=invalidated)
+        item for item in pending_findings(complete, cases, parsed, repo, skip_cases=removed)
         if item.key not in recorded
     ]
     if missing:
@@ -732,8 +849,8 @@ def compute(
 
     backends: list[BackendCertification] = []
     for backend, backend_rows in sorted(by_backend.items()):
-        veto = compute_veto(backend_rows, cases, parsed, false_positives, invalidated)
-        classes, twins = compute_recall(backend_rows, cases, parsed, matched, invalidated)
+        veto = compute_veto(backend_rows, cases, parsed, false_positives, removed)
+        classes, twins = compute_recall(backend_rows, cases, parsed, matched, removed)
         backends.append(_backend_verdict(
             backend=backend,
             control_arm=_arm_of(backend_rows, CONTROL),
@@ -753,6 +870,10 @@ def compute(
         results_path=str(results_path), adjudications_path=str(adjudications.path),
         decisions_total=len(adjudications.decisions), decisions_by_type=by_type,
         decisions_unused=unused, invalidated_cases=sorted(invalidated),
+        removed_cases=sorted(removed),
+        cross_arm=cross_arm_inconsistencies(
+            adjudications.decisions, finals, parsed, adjudications.sweep_id,
+        ),
         incomplete_pairs=incomplete, backends=backends,
         verdict=verdict, reasons=reasons,
     )
@@ -766,7 +887,7 @@ def _backend_verdict(
     winners = [c for c in certifying if c.criterion_met]
     if not veto.holds:
         verdict, reasons = VETOED, list(veto.reasons)
-    elif winners:
+    elif winners and veto.at_protocol_depth:
         verdict = CERTIFIED
         reasons = [
             f"{c.defect_class}: {c.control_found} -> {c.treatment_found} of {c.cases} cases "
@@ -775,22 +896,37 @@ def _backend_verdict(
         ]
     else:
         verdict = NOT_CERTIFIED
-        if not certifying:
-            reasons = [
-                f"no defect class reaches {CERTIFYING_CLASS_MIN_CASES} independent scored "
-                "cases, so no class can certify"
-            ]
-        else:
-            reasons = [
-                f"{c.defect_class}: +{c.absolute_gain} defect(s) ({_pct(c.relative_gain)}) "
-                f"misses >={CRITERION_ABSOLUTE_GAIN} absolute and "
-                f">={_pct(CRITERION_RELATIVE_GAIN)} relative"
-                for c in certifying
-            ]
+        reasons = _not_certified_reasons(classes, certifying, winners, veto)
     return BackendCertification(
         backend=backend, control_arm=control_arm, treatment_arm=treatment_arm,
         veto=veto, classes=classes, twins=twins, verdict=verdict, reasons=reasons,
     )
+
+
+def _not_certified_reasons(
+    classes: list[ClassRecall], certifying: list[ClassRecall], winners: list[ClassRecall],
+    veto: VetoResult,
+) -> list[str]:
+    """Name what actually stood between this sweep and a certification."""
+    if winners and not veto.at_protocol_depth:
+        met = ", ".join(c.defect_class for c in winners)
+        depth = (
+            f"the shallowest clean control scored {veto.min_case_reps} complete "
+            f"repetition(s)" if veto.per_case else "no clean-control case scored"
+        )
+        return [
+            f"the success criterion is met on {met}, but {depth} and certification needs "
+            f"{PROTOCOL_MIN_REPS} — the veto is measured too thinly to certify against"
+        ]
+    if not certifying:
+        if not classes:
+            return ["no defect case scored, so no class can certify"]
+        return [f"{c.defect_class}: {_grade_text(c)}" for c in classes]
+    return [
+        f"{c.defect_class}: +{c.absolute_gain} defect(s) ({_pct(c.relative_gain)}) misses "
+        f">={CRITERION_ABSOLUTE_GAIN} absolute and >={_pct(CRITERION_RELATIVE_GAIN)} relative"
+        for c in certifying
+    ]
 
 
 def _sweep_verdict(backends: list[BackendCertification]) -> tuple[str, list[str]]:
@@ -833,9 +969,16 @@ def print_report(cert: Certification) -> None:
     print(f"  decisions      {cert.decisions_total} ({counts})")
     if cert.decisions_unused:
         print(f"                 {cert.decisions_unused} on repetitions that did not score")
-    if cert.invalidated_cases:
-        print("  cases removed  " + ", ".join(cert.invalidated_cases)
-              + " (invalidated: removed from both arms, every metric)")
+    if cert.removed_cases:
+        print("  cases removed  " + ", ".join(cert.removed_cases)
+              + " (from both arms, every metric)")
+        with_them = [c for c in cert.removed_cases if c not in cert.invalidated_cases]
+        print("                 invalidated: " + ", ".join(cert.invalidated_cases)
+              + (f"; same mutation: {', '.join(with_them)}" if with_them else ""))
+    for item in cert.cross_arm:
+        detail = "; ".join(f"{role} {', '.join(d)}" for role, d in item.by_role.items())
+        print(f"  WARNING        identical finding text adjudicated differently across arms "
+              f"({detail}): {item.title!r}")
     if cert.incomplete_pairs:
         print(f"  incomplete     {len(cert.incomplete_pairs)} repetition(s) lost an arm:")
         for pair in cert.incomplete_pairs:
@@ -869,7 +1012,22 @@ def _print_veto(veto: VetoResult) -> None:
           f"treatment {_num(veto.treatment_mean)} "
           f"({veto.treatment_total} fp over {veto.treatment_runs} runs)  "
           f"{'ok' if veto.aggregate_ok else 'OVER'}")
-    print(f"    veto {'holds' if veto.holds else 'TRIPPED'}")
+    print(f"    veto {'holds' if veto.holds else 'TRIPPED'}"
+          + ("" if veto.at_protocol_depth else
+             f" — measured at n={veto.min_case_reps}, below the protocol "
+             f"n>={PROTOCOL_MIN_REPS}, so it can block but cannot certify"))
+
+
+def _grade_text(entry: ClassRecall) -> str:
+    """Whether a class is verdict-grade, and if not, which bar it missed."""
+    if entry.certifying:
+        return f"certifying, {entry.cases} independent cases at n>={entry.min_reps}"
+    if entry.cases < CERTIFYING_CLASS_MIN_CASES:
+        return (f"reported only, {entry.cases} independent case(s) — below the "
+                f"{CERTIFYING_CLASS_MIN_CASES}-case bar")
+    return (f"reported only, {entry.cases} independent cases but its shallowest scored "
+            f"{entry.min_reps} complete repetition(s) — below the protocol "
+            f"n>={PROTOCOL_MIN_REPS}")
 
 
 def _print_classes(classes: list[ClassRecall]) -> None:
@@ -878,12 +1036,7 @@ def _print_classes(classes: list[ClassRecall]) -> None:
     if not classes:
         print("    no defect case scored")
     for entry in classes:
-        grade = (
-            f"certifying, {entry.cases} independent cases" if entry.certifying
-            else f"reported only, {entry.cases} independent case(s) — below the "
-                 f"{CERTIFYING_CLASS_MIN_CASES} bar"
-        )
-        print(f"    {entry.defect_class} [{grade}]")
+        print(f"    {entry.defect_class} [{_grade_text(entry)}]")
         print(f"      control {entry.control_found}/{entry.cases}  "
               f"treatment {entry.treatment_found}/{entry.cases}  "
               f"{entry.absolute_gain:+d} ({_pct(entry.relative_gain)})  "
@@ -920,6 +1073,8 @@ def report_json(cert: Certification) -> dict:
         "decisions_by_type": cert.decisions_by_type,
         "decisions_unused": cert.decisions_unused,
         "invalidated_cases": cert.invalidated_cases,
+        "removed_cases": cert.removed_cases,
+        "cross_arm_inconsistencies": [asdict(c) for c in cert.cross_arm],
         "incomplete_pairs": [asdict(p) for p in cert.incomplete_pairs],
         "backends": [
             {
@@ -944,6 +1099,8 @@ def report_json(cert: Certification) -> dict:
                     "treatment_total": b.veto.treatment_total,
                     "control_mean": _float(b.veto.control_mean),
                     "treatment_mean": _float(b.veto.treatment_mean),
+                    "min_case_reps": b.veto.min_case_reps,
+                    "at_protocol_depth": b.veto.at_protocol_depth,
                     "per_case_ok": b.veto.per_case_ok,
                     "aggregate_ok": b.veto.aggregate_ok,
                     "holds": b.veto.holds,
@@ -954,6 +1111,7 @@ def report_json(cert: Certification) -> dict:
                         "defect_class": c.defect_class, "cases": c.cases,
                         "control_found": c.control_found,
                         "treatment_found": c.treatment_found,
+                        "min_reps": c.min_reps,
                         "certifying": c.certifying, "absolute_gain": c.absolute_gain,
                         "relative_gain": _float(c.relative_gain),
                         "criterion_met": c.criterion_met,
@@ -1005,8 +1163,21 @@ def render_pending(sweep_id: str, results: Path, pending: list[PendingFinding]) 
 # --- CLI -----------------------------------------------------------------------------------
 
 
+class _Parser(argparse.ArgumentParser):
+    """An argument parser whose usage errors cannot be mistaken for a verdict.
+
+    argparse exits 2 on a bad argument, and 2 is VETOED here. A caller gating a prompt
+    change on exit status would read a mistyped flag as a blocked change — quietly, and in
+    the direction that looks responsible.
+    """
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="adjudicate",
         description="Turn recorded human finding-decisions into the certification verdict. "
                     "Reads stored output only; calls no backend.",
@@ -1037,27 +1208,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Exit status is the verdict: 0 certified, 1 not certified, 2 vetoed, 3 not computed.
+    """Score a sweep, or draft the calls it still needs.
 
-    A verdict and a failure to reach one are different outcomes, and a caller that cannot
-    tell them apart would read a broken sweep as a decision.
+    Exit status carries the outcome, and nothing that is not a computed verdict may land on
+    a verdict code: 0 CERTIFIED, 1 NOT CERTIFIED, 2 VETOED, 3 no verdict computable, 4 a
+    `--pending` draft, 64 a usage error. A verdict, a sweep that could not be scored and a
+    mistyped flag are three different outcomes; a drafted work list exiting 0 would read as
+    a certification.
     """
     args = parse_args(argv)
     if not args.results.is_file():
         print(f"Error: {args.results} not found.", file=sys.stderr)
-        return 3
+        return EXIT_NO_VERDICT
     if args.adjudications is None and not args.pending:
         print("Error: --adjudications is required (or --pending to draft one).",
               file=sys.stderr)
-        return 3
+        return EXIT_NO_VERDICT
     try:
         _, rows = load_jsonl(args.results)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
-        return 3
+        return EXIT_NO_VERDICT
     if not rows:
         print(f"Error: {args.results} has no run rows.", file=sys.stderr)
-        return 3
+        return EXIT_NO_VERDICT
     found = sweep_ids(rows)
     if len(found) > 1:
         # No override here, unlike tier1's --allow-multiple-sweeps: tier 1 can report two
@@ -1070,13 +1244,13 @@ def main(argv: list[str] | None = None) -> int:
             "one paired session; rows from two sessions cannot make one.",
             file=sys.stderr,
         )
-        return 3
+        return EXIT_NO_VERDICT
 
     try:
         cases = _load_corpus(args.cases, rows)
         if args.pending:
             print(_pending_document(args, rows, cases), end="")
-            return 0
+            return EXIT_DRAFTED
         adjudications = load_adjudications(args.adjudications)
         if adjudications.sweep_id != found[0]:
             raise AdjudicationError(
@@ -1091,16 +1265,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {item.case_id} {item.backend} {item.arm_role}({item.arm}) "
                   f"rep{item.rep} #{item.finding_index} [{item.severity}] {item.title}"
                   f" — {item.reason}", file=sys.stderr)
-        return 3
+        return EXIT_NO_VERDICT
     except (AdjudicationError, CaseError) as e:
         print(f"Error: {e}", file=sys.stderr)
-        return 3
+        return EXIT_NO_VERDICT
 
     if args.json:
         print(json.dumps(report_json(cert), indent=2))
     else:
         print_report(cert)
-    return {CERTIFIED: 0, NOT_CERTIFIED: 1, VETOED: 2}[cert.verdict]
+    return EXIT_STATUS[cert.verdict]
 
 
 def _load_corpus(directory: Path, rows: list[dict]) -> dict[str, Case]:
