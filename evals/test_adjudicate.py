@@ -190,8 +190,10 @@ UNBOUND = "0" * 64
 
 
 def digests(cases: dict, rows: list[dict], results: Path) -> dict:
+    # The whole loaded corpus, not the cases these rows reference: a manifest no row
+    # mentions still decides which scored case represents its mutation.
     return {
-        "corpus_digest": corpus_digest(cases, {r["case_id"] for r in rows}),
+        "corpus_digest": corpus_digest(cases, set(cases)),
         "results_digest": results_digest(results),
     }
 
@@ -800,7 +802,12 @@ def test_a_manifest_edited_after_the_calls_were_made_is_refused(tmp_path, capsys
     # were adjudicable at all.
     defect_case(cases_dir, "b-101", span_override=[1, 400])
     assert cli(results, adjudications, cases_dir, tmp_path) == 3
-    assert "drafted against a different corpus" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "drafted against a different corpus" in err
+    # The refusal has to name a way out that is not itself refused: --pending verifies the
+    # same digests against the same artifact.
+    assert "move the stale artifact aside" in err
+    assert "re-draft with --pending" not in err
 
 
 def test_a_patch_edited_after_the_calls_were_made_is_refused(tmp_path, capsys):
@@ -808,6 +815,69 @@ def test_a_patch_edited_after_the_calls_were_made_is_refused(tmp_path, capsys):
     (cases_dir / "b-101.patch").write_text("a different mutation\n", encoding="utf-8")
     assert cli(results, adjudications, cases_dir, tmp_path) == 3
     assert "drafted against a different corpus" in capsys.readouterr().err
+
+
+def test_an_unreferenced_manifest_that_shadows_a_scored_case_is_refused(tmp_path, capsys):
+    # The attack a results-scoped digest missed. b-001 sorts below b-101 and shares its
+    # patch, so the representative rule elects b-001 and demotes the scored case to a twin,
+    # dropping it out of its class entirely. No result row mentions b-001, so a digest over
+    # only the referenced cases does not move — and the flipped verdict scores.
+    _, cases_dir, results, adjudications = bound_sweep(tmp_path, defect_and_control)
+    shadowing_manifest(cases_dir)
+    assert cli(results, adjudications, cases_dir, tmp_path) == 3
+    assert "drafted against a different corpus" in capsys.readouterr().err
+
+
+def shadowing_manifest(directory: Path, case_id: str = "b-001") -> None:
+    """A manifest no result row mentions, sharing b-101's patch under a lower id.
+
+    It is never scored, but it is loaded — so it takes part in electing its mutation's
+    representative, and elects itself.
+    """
+    write_case(
+        directory, case_id, source="mutant", diff="cases/b-101.patch",
+        defect={"class": "dropped-guard", "file": DEFECT_FILE, "span": list(SPAN),
+                "expected": "the guard is gone"},
+    )
+
+
+def shadowed_corpus(directory: Path) -> None:
+    defect_and_control(directory)
+    shadowing_manifest(directory)
+
+
+def test_pending_also_refuses_a_corpus_that_gained_a_shadowing_manifest(tmp_path, capsys):
+    # Drafting reads the artifact to subtract recorded calls, so it has to hold the corpus
+    # to the same scope scoring does — otherwise a stale artifact is accepted here and the
+    # draft is built on a corpus that has already moved.
+    _, cases_dir, results, adjudications = bound_sweep(tmp_path, defect_and_control)
+    shadowing_manifest(cases_dir)
+    assert main([str(results), "--pending", "--adjudications", str(adjudications),
+                 "--cases", str(cases_dir), "--repo", str(tmp_path)]) == 3
+    assert "drafted against a different corpus" in capsys.readouterr().err
+
+
+def test_a_draft_binds_the_same_corpus_scope_that_scoring_verifies(tmp_path, capsys):
+    # Round trip with an unreferenced manifest present the whole time: if --pending wrote a
+    # digest over a narrower scope than scoring checks, a freshly drafted artifact would be
+    # refused the moment it was filled in.
+    rows = pair("b-101", 1, [], [on_defect()])
+    rows += control_rows("c-101", 1, control_noise=0, treatment_noise=0)
+    cases_dir = corpus(tmp_path, shadowed_corpus)
+    results = write_results(tmp_path, rows)
+    assert main([str(results), "--pending", "--cases", str(cases_dir),
+                 "--repo", str(tmp_path)]) == EXIT_DRAFTED
+    draft = yaml.safe_load(capsys.readouterr().out)
+    for entry in draft["decisions"]:
+        entry.update(decision=MATCHES_DEFECT, rationale="read against defect.expected")
+    filled = write_adjudications(
+        tmp_path, draft["decisions"], name="filled.yaml",
+        corpus_digest=draft["corpus_digest"], results_digest=draft["results_digest"],
+    )
+    # Scored, not refused — and NOT CERTIFIED because the shadow demoted the only scored
+    # case of the class to a twin, which is the demotion the digest exists to make visible.
+    assert cli(results, filled, cases_dir, tmp_path) == 1
+    assert "drafted against a different corpus" not in capsys.readouterr().err
 
 
 def test_a_results_file_edited_after_the_calls_were_made_is_refused(tmp_path, capsys):

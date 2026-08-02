@@ -369,8 +369,15 @@ def corpus_digest(cases: dict[str, Case], case_ids: set[str]) -> str:
     calls were made under and cannot be re-made for: which class a case counts toward,
     which lines rule 2 accepts, which encoding of a mutation represents it, what
     `defect.expected` a human read the finding against. That is the same post-hoc move as
-    the twin exploit — made with an editor rather than a decision — so the inputs are
-    pinned rather than trusted.
+    the twin exploit, made with an editor rather than a decision.
+
+    **`case_ids` must be the whole loaded corpus, never just the cases the results
+    reference.** Narrowing it looks harmless and is not: `compute_recall` elects each
+    mutation's representative over every manifest it loaded, so a manifest no result row
+    mentions still decides which scored case represents its mutation. Adding one that
+    shares a scored case's patch under a lower id demotes that case to a twin and drops it
+    out of its class — under a results-scoped digest, without moving the digest at all.
+    The scope of the fingerprint has to match the scope of what reads the corpus.
 
     Length-prefixed so no concatenation of two fields can collide with another.
     """
@@ -402,6 +409,17 @@ def corpus_digest(cases: dict[str, Case], case_ids: set[str]) -> str:
     return digest.hexdigest()
 
 
+#: What to do about a digest mismatch. Not "re-draft with --pending": drafting verifies the
+#: same digests against the same artifact and refuses identically, so naming it alone sends
+#: the reader in a circle.
+_REBIND = (
+    "Either put the input back the way it was, or — if the change is the one you want — "
+    "move the stale artifact aside and re-draft from scratch with --pending. Re-drafting "
+    "does not carry recorded calls forward, so the moved file (and git) is the only copy "
+    "of them."
+)
+
+
 def verify_digests(
     adjudications: AdjudicationFile, cases: dict[str, Case], case_ids: set[str],
     results_path: Path,
@@ -414,7 +432,7 @@ def verify_digests(
         f"{adjudications.results_digest[:12]}, {results_path} hashes to {actual[:12]}. "
         "Every decision is keyed by a finding's position in a run's findings array, so a "
         "results file that was edited or re-ordered rebinds all of them to different "
-        "findings. Re-draft with --pending.",
+        "findings. " + _REBIND,
     )
     actual = corpus_digest(cases, case_ids)
     _require(
@@ -423,8 +441,8 @@ def verify_digests(
         f"{adjudications.corpus_digest[:12]}, the manifests in {CASES_DIR.name}/ hash to "
         f"{actual[:12]}. A manifest edited after the calls were made re-decides which class "
         "a case counts toward, which lines rule 2 accepts and which encoding of a mutation "
-        "represents it — the same post-hoc move as any other, made with an editor. Score "
-        "against the corpus the sweep ran, or re-draft with --pending.",
+        "represents it — the same post-hoc move as any other, made with an editor. "
+        + _REBIND,
     )
 
 
@@ -1019,9 +1037,7 @@ def compute(
     """Score a sweep. Raises rather than reporting when the inputs cannot support a verdict."""
     finals = final_attempts(rows)
     check_header(header, finals)
-    verify_digests(
-        adjudications, cases, {row["case_id"] for row in finals}, results_path,
-    )
+    verify_digests(adjudications, cases, set(cases), results_path)
     parsed = findings_by_unit(finals)
     validate_against_results(
         adjudications.decisions, finals, cases, parsed, adjudications.sweep_id, repo,
@@ -1571,9 +1587,7 @@ def _pending_document(
             f"{args.adjudications} is for sweep {existing.sweep_id[:8]}, but "
             f"{args.results} holds sweep {sweep_id[:8]}",
         )
-        verify_digests(
-            existing, cases, {row["case_id"] for row in finals}, args.results,
-        )
+        verify_digests(existing, cases, set(cases), args.results)
         validate_against_results(
             existing.decisions, finals, cases, parsed, sweep_id, args.repo,
         )
@@ -1592,7 +1606,7 @@ def _pending_document(
     ]
     return render_pending(
         sweep_id, args.results, pending,
-        corpus_digest(cases, {row["case_id"] for row in finals}),
+        corpus_digest(cases, set(cases)),
         results_digest(args.results),
     )
 

@@ -777,6 +777,9 @@ JSONL and the case manifests, so a verdict can be recomputed and disputed line b
 ```yaml
 sweep_id: 9f3c1a2b4d5e6f708192a3b4c5d6e7f8   # must match the results file's sweep
 results_file: paired-20260802T162519.864653Z-312692e3.jsonl   # provenance only
+# Written by --pending, checked before anything scores. Do not edit.
+corpus_digest: 4d0f2b8e9c1a7f36d5b0e8c24a91f7de3b60c5a8192e4f7d0a3b6c9e2f5081d4a
+results_digest: 7c1e4a90b2d8f635e0a7c94b1f8d26e30594a7c1b8e2f0d635a9c47e10b8d2f96
 adjudicator: your-name
 decisions:
   - case_id: b-002
@@ -803,10 +806,28 @@ findings array, so a results file that was edited or re-ordered rebinds every ca
 file to a different finding, and a manifest edited afterwards re-decides which class a case
 counts toward, which lines rule 2 accepts, which encoding of a mutation represents it and
 what `defect.expected` the human read the finding against. Both are the same post-hoc move
-as any other, made with an editor instead of a decision, so the inputs are pinned rather
-than trusted. The corpus digest covers every scoring-relevant manifest field of every
-referenced case plus its patch bytes; the results digest covers the JSONL byte for byte. A
-mismatch is a refusal naming which input moved.
+as any other, made with an editor instead of a decision. The results digest covers the JSONL
+byte for byte. The corpus digest covers every scoring-relevant manifest field plus the patch
+bytes of **every manifest the scorer loaded** — not only the cases the results reference,
+because a manifest no result row mentions still takes part in electing its mutation's
+representative, and one added under a lower id sharing a scored case's patch would demote
+that case to a twin and drop it out of its class.
+
+**What the digests do and do not protect against.** They catch *drift* between the artifact
+and its inputs — a stale file, a corpus edited mid-adjudication, the wrong results file, a
+rebase that moved a manifest — and they turn a deliberate rebinding into an explicit edit of
+a line the file itself marks `Do not edit`. They do **not** stop someone who edits the corpus
+and then re-drafts against it: that produces a consistent artifact with new digests, and no
+hash can tell an honest re-draft from a motivated one. What answers that is the corpus being
+committed: `cases/` is in git, so a manifest edited around a sweep is a diff someone can be
+asked about, and *Decision rules* already requires a rule change to be its own commit, argued
+before the sweep it governs. The digests make drift loud; the git history is the tamper trail.
+
+A mismatch is a refusal naming which input moved. It is not recoverable in place — `--pending`
+verifies the same digests against the same artifact and refuses identically — so the way out
+is to put the input back, or to move the stale artifact aside and re-draft from scratch.
+Re-drafting does not carry recorded calls forward, which is one more reason an adjudication
+session should not overlap corpus work.
 
 The key is `tier1.py`'s `unit_key` minus the sweep id (which the file carries once) plus the
 finding's index, so a decision joins to exactly one finding of exactly one run. `arm_role` is
