@@ -1,7 +1,10 @@
+import types
+
 import pytest
 
 from rocket_review.backends import BACKENDS, api, base, claude, codex, opencode
 from rocket_review.backends.base import BackendError, ReviewJob
+from rocket_review.models import REVIEW_SCHEMA
 
 
 def job(**kw):
@@ -120,6 +123,7 @@ class _FakeOpenAI:
     last_init_kwargs = None
     last_create_kwargs = None
     listed = False
+    next_response = None
 
     def __init__(self, **kwargs):
         _FakeOpenAI.last_init_kwargs = kwargs
@@ -134,16 +138,24 @@ class _FakeOpenAI:
         @staticmethod
         def create(**kwargs):
             _FakeOpenAI.last_create_kwargs = kwargs
+            if _FakeOpenAI.next_response is not None:
+                return _FakeOpenAI.next_response
             return type("R", (), {"output_text": "ok"})()
 
 
-def _install_fake_openai(monkeypatch):
-    import types as _types
+def _response(**fields):
+    """A stand-in Response carrying only the fields the backend reads off one."""
+    return types.SimpleNamespace(
+        **{"status": "completed", "output": [], "output_text": "", **fields}
+    )
 
+
+def _install_fake_openai(monkeypatch):
     _FakeOpenAI.last_init_kwargs = None
     _FakeOpenAI.last_create_kwargs = None
     _FakeOpenAI.listed = False
-    fake_module = _types.SimpleNamespace(OpenAI=_FakeOpenAI)
+    monkeypatch.setattr(_FakeOpenAI, "next_response", None)
+    fake_module = types.SimpleNamespace(OpenAI=_FakeOpenAI)
     monkeypatch.setitem(__import__("sys").modules, "openai", fake_module)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr(api, "_load_env_file", lambda: None)
@@ -290,7 +302,8 @@ def test_codex_empty_output_raises(monkeypatch):
 def test_api_review_prepends_docs_and_passes_model_extra(monkeypatch):
     captured = {}
 
-    def fake_call(content, system_prompt, model, extra, effort=None, timeout=None):
+    def fake_call(content, system_prompt, model, extra, effort=None, timeout=None,
+                  json_output=False):
         captured.update(content=content, system_prompt=system_prompt, model=model, extra=extra)
         return "ok"
 
@@ -331,13 +344,93 @@ def test_codex_json_mode_passes_output_schema(monkeypatch):
 def test_api_json_mode_puts_the_json_format_in_the_system_prompt(monkeypatch):
     captured = {}
 
-    def fake_call(content, system_prompt, model, extra, effort=None, timeout=None):
+    def fake_call(content, system_prompt, model, extra, effort=None, timeout=None,
+                  json_output=False):
         captured["system_prompt"] = system_prompt
+        captured["json_output"] = json_output
         return "ok"
 
     monkeypatch.setattr(api, "_call_openai", fake_call)
     api.review(job(json_output=True))
     assert "JSON RESPONSE FORMAT" in captured["system_prompt"]
+    assert captured["json_output"] is True
+
+
+def test_api_json_mode_requests_structured_output_against_review_schema(monkeypatch):
+    _install_fake_openai(monkeypatch)
+    api._call_openai("content", "instructions", "gpt-5.6-terra", None, json_output=True)
+    fmt = _FakeOpenAI.last_create_kwargs["text"]["format"]
+    assert fmt["type"] == "json_schema"
+    assert fmt["strict"] is True
+    # Identity, not equality: a copy could drift from the schema the envelope parser and
+    # the other backends validate against.
+    assert fmt["schema"] is REVIEW_SCHEMA
+
+
+def test_api_prose_mode_requests_no_response_format(monkeypatch):
+    _install_fake_openai(monkeypatch)
+    api._call_openai("content", "instructions", "gpt-5.6-terra", None)
+    assert "text" not in _FakeOpenAI.last_create_kwargs
+
+
+def test_api_json_mode_reaches_the_request_from_a_job(monkeypatch):
+    _install_fake_openai(monkeypatch)
+    api.review(job(json_output=True))
+    assert _FakeOpenAI.last_create_kwargs["text"]["format"]["schema"] is REVIEW_SCHEMA
+
+
+def test_api_refusal_raises_instead_of_returning_empty_text(monkeypatch):
+    _install_fake_openai(monkeypatch)
+    _FakeOpenAI.next_response = _response(output=[
+        types.SimpleNamespace(type="reasoning"),  # no content parts at all
+        types.SimpleNamespace(content=[
+            types.SimpleNamespace(type="refusal", refusal="cannot review this"),
+        ]),
+    ])
+    with pytest.raises(BackendError, match="refused the request: cannot review this"):
+        api._call_openai("content", "instructions", "gpt-5.6-terra", None, json_output=True)
+
+
+@pytest.mark.parametrize(
+    "response, fragments",
+    [
+        (_response(status="incomplete", output_text="half a review",
+                   incomplete_details=types.SimpleNamespace(reason="max_output_tokens")),
+         ("unfinished", "incomplete", "max_output_tokens")),
+        (_response(status="failed",
+                   error=types.SimpleNamespace(message="server had a bad day")),
+         ("unfinished", "failed", "server had a bad day")),
+        (_response(status="incomplete"), ("unfinished", "incomplete")),
+    ],
+)
+def test_api_unfinished_response_raises_naming_the_cause(monkeypatch, response, fragments):
+    # A truncated or failed response must not reach the caller as a review: its partial
+    # text would be reported as the model's answer.
+    _install_fake_openai(monkeypatch)
+    _FakeOpenAI.next_response = response
+    with pytest.raises(BackendError) as exc:
+        api._call_openai("content", "instructions", "gpt-5.6-terra", None, json_output=True)
+    for fragment in fragments:
+        assert fragment in str(exc.value)
+    assert "half a review" not in str(exc.value)
+
+
+def test_api_empty_output_raises(monkeypatch):
+    _install_fake_openai(monkeypatch)
+    _FakeOpenAI.next_response = _response(output_text="   ")
+    with pytest.raises(BackendError, match="empty response"):
+        api._call_openai("content", "instructions", "gpt-5.6-terra", None)
+
+
+def test_api_call_failure_becomes_a_backend_error(monkeypatch):
+    _install_fake_openai(monkeypatch)
+
+    def boom(**kwargs):
+        raise RuntimeError("upstream exploded")
+
+    monkeypatch.setattr(_FakeOpenAI.responses, "create", boom)
+    with pytest.raises(BackendError, match="OpenAI API call failed: upstream exploded"):
+        api._call_openai("content", "instructions", "gpt-5.6-terra", None)
 
 
 def test_claude_uses_readonly_allowlist_and_stdin(monkeypatch):

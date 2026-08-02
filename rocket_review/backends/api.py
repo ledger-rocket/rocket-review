@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from rocket_review.backends.base import BackendError, ReviewJob, format_duration
+from rocket_review.models import REVIEW_SCHEMA
 from rocket_review.prompts import get_prompt
 
 NAME = "api"
@@ -24,7 +25,8 @@ def review(job: ReviewJob) -> str:
                    f"=== END PROJECT STANDARDS ===\n\n{content}")
     system_prompt = get_prompt(job.mode, job.docs_content, job.json_output)
     return _call_openai(
-        content, system_prompt, job.model or DEFAULT_MODEL, job.extra, job.effort, job.timeout
+        content, system_prompt, job.model or DEFAULT_MODEL, job.extra, job.effort,
+        job.timeout, job.json_output,
     )
 
 
@@ -116,6 +118,48 @@ def _resolve_model(client, model: str) -> str:
     return candidates[-1] if candidates else model
 
 
+def _refusal(response) -> str | None:
+    """The model's stated reason for declining, if the response is a refusal."""
+    for item in getattr(response, "output", None) or []:
+        for part in getattr(item, "content", None) or []:
+            if getattr(part, "type", None) == "refusal":
+                return getattr(part, "refusal", None) or "no reason given"
+    return None
+
+
+def _status_detail(response) -> str:
+    """Whatever the API said about why a response is not a finished answer."""
+    for holder, field in (
+        (getattr(response, "incomplete_details", None), "reason"),
+        (getattr(response, "error", None), "message"),
+    ):
+        value = getattr(holder, field, None)
+        if value:
+            return f": {value}"
+    return ""
+
+
+def _output_text(response) -> str:
+    """The review text, or a BackendError naming why there is none.
+
+    A refused or truncated response still carries an `output_text` of "" — returning it
+    would present a non-answer as a clean review, and under --json the parser would blame
+    the model for unparsable output rather than surfacing the refusal.
+    """
+    status = getattr(response, "status", None)
+    if status is not None and status != "completed":
+        raise BackendError(
+            f"OpenAI API returned an unfinished response "
+            f"(status {status}){_status_detail(response)}"
+        )
+    if refusal := _refusal(response):
+        raise BackendError(f"OpenAI API refused the request: {refusal}")
+    text = response.output_text or ""
+    if not text.strip():
+        raise BackendError("OpenAI API returned an empty response")
+    return text
+
+
 def _call_openai(
     content: str,
     system_prompt: str,
@@ -123,6 +167,7 @@ def _call_openai(
     extra: str | None,
     effort: str | None = None,
     timeout: int | None = None,
+    json_output: bool = False,
 ) -> str:
     _load_env_file()
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -166,6 +211,18 @@ def _call_openai(
     kwargs: dict[str, Any] = {}
     if effort:
         kwargs["reasoning"] = {"effort": effort}
+    if json_output:
+        # The schema is enforced by the API rather than merely described in the prompt, and
+        # it is REVIEW_SCHEMA itself — the same object the envelope parser expects, so the
+        # two can never describe different shapes.
+        kwargs["text"] = {
+            "format": {
+                "type": "json_schema",
+                "name": "review",
+                "strict": True,
+                "schema": REVIEW_SCHEMA,
+            }
+        }
     if timeout is not None:
         # Give the response call only the budget left after resolution, so the two together
         # stay within --timeout. Omitted entirely (not None) when no deadline was requested,
@@ -184,4 +241,4 @@ def _call_openai(
     except Exception as exc:
         raise BackendError(f"OpenAI API call failed: {exc}")
 
-    return response.output_text
+    return _output_text(response)
