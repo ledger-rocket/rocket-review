@@ -1,14 +1,17 @@
+import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
 import types
 from concurrent.futures import ThreadPoolExecutor
+from importlib.metadata import PackageNotFoundError
 
 import pytest
 
-from rocket_review.backends import base
+from rocket_review.backends import _openai_sdk_installed, available, base
 from rocket_review.backends.base import BackendError
 from rocket_review.cli import (
     RAW_TRUNCATE_LIMIT,
@@ -19,6 +22,7 @@ from rocket_review.cli import (
     main,
     parse_backend_arg,
     resolve_commit,
+    rr_version,
     run_capture,
     stdin_has_input,
     truncate_raw,
@@ -86,7 +90,7 @@ def test_detect_mode_mixed_is_code():
     assert detect_mode(["plan.md", "src/auth.py"]) == "code"
 
 
-def test_backend_arg_single_default():
+def test_backend_arg_single_without_model():
     assert parse_backend_arg("codex", None) == [("codex", None)]
 
 
@@ -113,6 +117,304 @@ def test_backend_arg_unknown_errors():
 def test_backend_arg_duplicate_errors():
     with pytest.raises(SystemExit):
         parse_backend_arg("codex,codex", None)
+
+
+# --- per-mode default backends -------------------------------------------------------
+
+# The exact line users see; asserted verbatim so a silent reword can't hide the fallback.
+FALLBACK_NOTICE = (
+    "Note: default backend '{default}' for {mode} review is unavailable; using "
+    "'{chosen}'. Pass --backend to choose explicitly and silence this."
+)
+
+MODE_SOURCES = [("plan", ["plan.md"]), ("code", ["mod.py"]), ("diff", ["--diff"])]
+
+
+def _mode_sources(tmp_path, monkeypatch):
+    """A cwd holding one source file per file-driven mode."""
+    (tmp_path / "plan.md").write_text("# Plan\nstep one\n")
+    (tmp_path / "mod.py").write_text("def f():\n    return 1\n")
+    monkeypatch.chdir(tmp_path)
+
+
+def _record_backends(monkeypatch):
+    """Fake all four backends; returns the (name, mode) pairs that actually ran.
+
+    Deliberately leaves missing_binary and available unpatched: backend selection is what
+    is under test, so it must run for real against the stubbed binaries below.
+    """
+    ran = []
+
+    def make(name):
+        def review(job):
+            ran.append((name, job.mode))
+            return "REVIEW"
+        return review
+
+    monkeypatch.setattr(
+        "rocket_review.cli.BACKENDS",
+        {n: types.SimpleNamespace(review=make(n)) for n in ("codex", "claude", "opencode", "api")},
+    )
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    monkeypatch.setattr("rocket_review.cli.get_diff", lambda staged: "diff --git a b\n+x")
+    return ran
+
+
+def _installed(monkeypatch, *names, api_key=None, api_sdk=True):
+    """Make exactly these backends look available to the real availability check."""
+    monkeypatch.setattr(
+        shutil, "which", lambda binary: f"/usr/bin/{binary}" if binary in names else None
+    )
+    # Pin both halves of the api probe: neither a developer's real ~/.env nor whether the
+    # openai extra happens to be installed in this environment may decide the test.
+    monkeypatch.setattr("rocket_review.backends.api._load_env_file", lambda: None)
+    monkeypatch.setattr("rocket_review.backends._openai_sdk_installed", lambda: api_sdk)
+    if api_key:
+        monkeypatch.setenv("OPENAI_API_KEY", api_key)
+    else:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+
+@pytest.mark.parametrize("mode,argv,expected", [
+    ("plan", ["plan.md"], "codex"),
+    ("code", ["mod.py"], "claude"),
+    ("diff", ["--diff"], "claude"),
+])
+def test_default_backend_follows_the_mode(monkeypatch, tmp_path, capsys, mode, argv, expected):
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, "codex", "claude", "opencode")
+    assert run_main(monkeypatch, argv) == 0
+    assert ran == [(expected, mode)]
+    assert "Note: default backend" not in capsys.readouterr().err  # nothing to announce
+
+
+def test_mode_flag_selects_the_default_backend(monkeypatch, tmp_path):
+    # --mode is applied before the backend is chosen, so an overridden mode brings its own
+    # default with it rather than the auto-detected mode's.
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, "codex", "claude")
+    assert run_main(monkeypatch, ["plan.md", "--mode", "code"]) == 0
+    assert ran == [("claude", "code")]
+
+
+@pytest.mark.parametrize("mode,argv", MODE_SOURCES)
+def test_explicit_backend_overrides_every_mode_default(monkeypatch, tmp_path, capsys, mode, argv):
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, "codex", "claude", "opencode")
+    assert run_main(monkeypatch, [*argv, "--backend", "opencode"]) == 0
+    assert ran == [("opencode", mode)]
+    assert "Note: default backend" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode,argv", MODE_SOURCES)
+def test_explicit_backend_list_overrides_every_mode_default(monkeypatch, tmp_path, mode, argv):
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, "codex", "claude")
+    assert run_main(monkeypatch, [*argv, "--backend", "claude,codex"]) == 0
+    assert sorted(ran) == [("claude", mode), ("codex", mode)]
+
+
+def test_model_flag_applies_to_the_mode_default(monkeypatch, tmp_path):
+    # --model names a model, not a backend, so it has to land on whichever backend the
+    # mode selected.
+    _mode_sources(tmp_path, monkeypatch)
+    jobs = _capture_jobs(monkeypatch, "codex", "claude")
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    _installed(monkeypatch, "codex", "claude")
+    assert run_main(monkeypatch, ["--diff", "--model", "claude-opus-4-8"]) == 0
+    assert jobs["claude"].model == "claude-opus-4-8"
+    assert "codex" not in jobs
+
+
+def test_api_alias_conflicts_with_an_explicit_backend(monkeypatch, tmp_path, capsys):
+    # --api is shorthand for one backend, so pairing it with any explicit --backend is a
+    # contradiction and is refused — including --backend codex, which neither wins nor is
+    # silently discarded.
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, "codex", "claude")
+    assert run_cli(monkeypatch, ["--diff", "--api", "--backend", "codex"]) == 1
+    assert "--api conflicts with --backend" in capsys.readouterr().err
+    assert ran == []
+
+
+def test_api_alias_still_overrides_the_mode_default(monkeypatch, tmp_path):
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, "codex", "claude")
+    assert run_main(monkeypatch, ["--diff", "--api"]) == 0
+    assert ran == [("api", "diff")]
+
+
+@pytest.mark.parametrize("mode,argv,default,chosen,installed", [
+    ("diff", ["--diff"], "claude", "codex", ("codex",)),
+    ("plan", ["plan.md"], "codex", "claude", ("claude",)),
+    ("diff", ["--diff"], "claude", "opencode", ("opencode",)),  # past the peer CLI
+])
+def test_missing_default_falls_back_loudly(
+    monkeypatch, tmp_path, capsys, mode, argv, default, chosen, installed
+):
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, *installed)
+    assert run_main(monkeypatch, argv) == 0
+    assert ran == [(chosen, mode)]
+    notice = FALLBACK_NOTICE.format(default=default, mode=mode, chosen=chosen)
+    assert capsys.readouterr().err.count(notice) == 1  # announced once, not per attempt
+
+
+def test_fallback_reaches_api_only_when_a_key_is_configured(monkeypatch, tmp_path, capsys):
+    # api ships no binary, so "installed" cannot mean anything for it: a key is the test.
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, api_key="sk-test")
+    assert run_main(monkeypatch, ["--diff"]) == 0
+    assert ran == [("api", "diff")]
+    notice = FALLBACK_NOTICE.format(default="claude", mode="diff", chosen="api")
+    assert capsys.readouterr().err.count(notice) == 1
+
+
+def test_fallback_notice_names_the_model_that_rides_along(monkeypatch, tmp_path, capsys):
+    # --model follows the substituted backend, where a model from the absent vendor fails
+    # at the backend, so the notice has to say what will actually run.
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, "codex")
+    assert run_main(monkeypatch, ["--diff", "--model", "claude-opus-4-8"]) == 0
+    assert ran == [("codex", "diff")]
+    notice = (
+        "Note: default backend 'claude' for diff review is unavailable; using 'codex' "
+        "with --model claude-opus-4-8. Pass --backend to choose explicitly and silence this."
+    )
+    assert capsys.readouterr().err.count(notice) == 1
+
+
+def test_fallback_skips_api_without_the_sdk(monkeypatch, tmp_path, capsys):
+    # A key alone does not make api runnable: on a base install the SDK is absent, and
+    # announcing a fallback that cannot run would break the notice's promise.
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, api_key="sk-test", api_sdk=False)
+    assert run_cli(monkeypatch, ["--diff"]) == 1
+    err = capsys.readouterr().err
+    assert "backend 'claude' unavailable" in err
+    assert "Note: default backend" not in err
+    assert ran == []
+
+
+def test_fallback_skips_opencode_when_effort_is_set(monkeypatch, tmp_path, capsys):
+    # opencode rejects --effort, so substituting it would turn the user's request into an
+    # error they did not cause; with nothing else left the default's own error stands.
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, "opencode")
+    assert run_cli(monkeypatch, ["--diff", "--effort", "high"]) == 1
+    err = capsys.readouterr().err
+    assert "backend 'claude' unavailable" in err
+    assert "Note: default backend" not in err
+    assert "--effort is not supported" not in err  # not an error the user provoked
+    assert ran == []
+
+
+def test_fallback_uses_opencode_without_effort(monkeypatch, tmp_path, capsys):
+    # The same install without --effort: the opencode skip is conditional, not a removal.
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, "opencode")
+    assert run_main(monkeypatch, ["--diff"]) == 0
+    assert ran == [("opencode", "diff")]
+    notice = FALLBACK_NOTICE.format(default="claude", mode="diff", chosen="opencode")
+    assert capsys.readouterr().err.count(notice) == 1
+
+
+def test_piped_stdin_resolves_the_diff_default(monkeypatch, tmp_path, capsys):
+    # stdin is the one mode-block branch keyed on isatty() rather than a source flag, so
+    # it needs its own proof that the diff default is reached.
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("diff --git a b\n+piped\n"))
+    _installed(monkeypatch, "codex", "claude")
+    assert run_main(monkeypatch, []) == 0
+    assert ran == [("claude", "diff")]
+    assert "Note: default backend" not in capsys.readouterr().err
+
+
+def test_no_fallback_notice_when_the_backend_is_explicit(monkeypatch, tmp_path, capsys):
+    # The default's absence is irrelevant once the user has named a backend.
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, "codex")
+    assert run_main(monkeypatch, ["--diff", "--backend", "codex"]) == 0
+    assert ran == [("codex", "diff")]
+    assert "Note: default backend" not in capsys.readouterr().err
+
+
+def test_explicit_missing_backend_errors_without_falling_back(monkeypatch, tmp_path, capsys):
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, "codex")
+    assert run_cli(monkeypatch, ["--diff", "--backend", "claude"]) == 1
+    err = capsys.readouterr().err
+    assert "backend 'claude' unavailable" in err
+    assert "Note: default backend" not in err  # an explicit choice is never substituted
+    assert ran == []
+
+
+def test_nothing_available_keeps_the_existing_error(monkeypatch, tmp_path, capsys):
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch)  # no CLI on PATH, no API key
+    assert run_cli(monkeypatch, ["--diff"]) == 1
+    err = capsys.readouterr().err
+    # Names the backend the mode asked for, with its install hint — the pre-existing error.
+    assert "Error: backend 'claude' unavailable — npm install -g @anthropic-ai/claude-code" in err
+    assert "Note: default backend" not in err
+    assert ran == []
+
+
+def test_available_requires_both_a_key_and_the_sdk_for_the_api_backend(monkeypatch):
+    monkeypatch.setattr("rocket_review.backends.api._load_env_file", lambda: None)
+    monkeypatch.setattr("rocket_review.backends._openai_sdk_installed", lambda: True)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert not available("api")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    assert available("api")
+    monkeypatch.setattr("rocket_review.backends._openai_sdk_installed", lambda: False)
+    assert not available("api")  # a key without the SDK is still not runnable
+
+
+def test_openai_sdk_probe_fails_closed_on_a_spec_less_module(monkeypatch):
+    # A stand-in module (the api backend tests install one) carries no __spec__ and
+    # find_spec raises on it; the probe answers "no" instead of propagating.
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace())
+    assert not _openai_sdk_installed()
+
+
+def test_version_flag_prints_the_installed_version(monkeypatch, capsys):
+    def fake_version(distribution):
+        assert distribution == "rocket-review"
+        return "9.8.7"
+
+    monkeypatch.setattr("rocket_review.cli.version", fake_version)
+    monkeypatch.setattr("sys.argv", ["rr", "--version"])
+    with pytest.raises(SystemExit) as e:
+        main()
+    assert e.value.code == 0
+    assert capsys.readouterr().out == "rr 9.8.7\n"
+
+
+def test_version_falls_back_outside_an_installed_distribution(monkeypatch):
+    def missing(name):
+        raise PackageNotFoundError(name)
+
+    monkeypatch.setattr("rocket_review.cli.version", missing)
+    assert rr_version() == "unknown (source checkout)"
 
 
 def test_fanout_single_success_is_byte_identical(monkeypatch, capsys):

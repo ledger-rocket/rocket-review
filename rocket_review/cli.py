@@ -8,10 +8,11 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from urllib.parse import unquote, urldefrag
 
-from rocket_review.backends import BACKENDS, base, missing_binary
+from rocket_review.backends import BACKENDS, available, base, missing_binary
 from rocket_review.backends.base import BackendError, ReviewJob
 from rocket_review.models import (
     BackendResult,
@@ -25,6 +26,24 @@ RAW_TRUNCATE_LIMIT = 4000
 # Bounds git/gh preflight calls so a hung credential helper or network fetch
 # can't stall a CI gate indefinitely; backend runs have their own longer timeout.
 SUBPROCESS_TIMEOUT = 300
+
+# Measured strengths, not preference: claude returns deeper code/diff findings with fewer
+# false alarms, while codex keeps plan reviews focused and is the fastest of the two. An
+# explicit --backend always outranks this table.
+DEFAULT_BACKEND_BY_MODE = {"plan": "codex", "code": "claude", "diff": "claude"}
+
+# Stand-ins when a mode's default is not available, closest substitute first: the other
+# agentic CLI reviews the same way, opencode is agentic but provider-dependent, and api
+# cannot navigate the project at all (and needs a key).
+FALLBACK_ORDER = ["codex", "claude", "opencode", "api"]
+
+
+def rr_version() -> str:
+    """The installed distribution's version, or a marker when running from a checkout."""
+    try:
+        return version("rocket-review")
+    except PackageNotFoundError:
+        return "unknown (source checkout)"
 
 
 def run_capture(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -267,6 +286,36 @@ def detect_mode(paths: list[str]) -> str:
     return "code"
 
 
+def resolve_default_backend(mode: str, model: str | None, effort: str | None) -> str:
+    """The mode's default backend, or an available stand-in — announced, never silent.
+
+    Returns the unavailable default when nothing else is available either, so the caller's
+    missing-backend error names the backend the mode actually asked for.
+
+    A --model rides along to whichever backend is substituted, where a model name from the
+    absent vendor fails at the backend, so the notice names it as part of what will run.
+    """
+    default = DEFAULT_BACKEND_BY_MODE[mode]
+    if available(default):
+        return default
+    for candidate in FALLBACK_ORDER:
+        if candidate == default or not available(candidate):
+            continue
+        if effort and candidate == "opencode":
+            # opencode has no reasoning-effort flag, so substituting it here would
+            # manufacture a usage error out of a request the user made of another backend.
+            continue
+        with_model = f" with --model {model}" if model else ""
+        print(
+            f"Note: default backend '{default}' for {mode} review is unavailable; "
+            f"using '{candidate}'{with_model}. "
+            f"Pass --backend to choose explicitly and silence this.",
+            file=sys.stderr,
+        )
+        return candidate
+    return default
+
+
 def stdin_has_input() -> bool:
     """True only for a real pipe or redirected file, not just any non-tty fd.
 
@@ -364,9 +413,14 @@ def _run():
             "  rr --diff --backend codex,claude       # cross-model review, one pass per backend\n"
             "  rr src/auth.py --docs                  # review a file against project standards\n"
             "  git diff | rr                          # review a diff piped on stdin\n"
+            "  rr --version                           # print the installed version\n"
         ),
     )
     parser.add_argument("files", nargs="*", help="Files to review")
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {rr_version()}",
+        help="Show the installed rocket-review version and exit",
+    )
     parser.add_argument("--diff", action="store_true", help="Review git diff (HEAD)")
     parser.add_argument("--staged", action="store_true", help="Review staged changes only")
     parser.add_argument("--commit", metavar="SHA", help="Review a specific commit")
@@ -378,9 +432,10 @@ def _run():
         help="GitHub repo for --pr when not in the repo's checkout (e.g. acme/api-server)",
     )
     parser.add_argument(
-        "--backend", default="codex",
+        "--backend", default=None,
         help="Comma-separated backends: codex, claude, opencode, api. "
-             "Per-backend model via name:model (e.g. codex:gpt-5.6-sol,claude).",
+             "Per-backend model via name:model (e.g. codex:gpt-5.6-sol,claude). "
+             "Defaults per mode: plan -> codex, code -> claude, diff -> claude.",
     )
     parser.add_argument(
         "--model", default=None,
@@ -457,7 +512,7 @@ def _run():
         sys.exit(1)
 
     if args.api:
-        if args.backend != "codex":
+        if args.backend is not None:
             print(
                 "Error: --api conflicts with --backend; --api is shorthand for --backend api.",
                 file=sys.stderr,
@@ -465,7 +520,41 @@ def _run():
             sys.exit(1)
         args.backend = "api"
 
-    specs = parse_backend_arg(args.backend, args.model)
+    # An explicit --backend is parsed here so a typo or a duplicate fails before any git/gh
+    # work; the per-mode default can only be resolved once the mode is known, below.
+    specs = parse_backend_arg(args.backend, args.model) if args.backend is not None else None
+
+    # Validate mutually exclusive sources
+    explicit_sources = sum([
+        bool(args.pr),
+        bool(args.commit),
+        args.diff or args.staged,
+        bool(args.files),
+    ])
+    sources = explicit_sources + int(stdin_has_input())
+    if sources > 1:
+        print("Error: specify only one review source (files, --diff, --staged, --commit, --pr, or stdin).", file=sys.stderr)
+        sys.exit(1)
+
+    # The mode is settled before the backend: the default backend follows the mode, and the
+    # chosen backends in turn decide whether the review content has to be materialized.
+    # Pure flag inspection — no git, gh, or stdin read happens here.
+    if args.pr or args.commit or args.diff or args.staged:
+        mode = "diff"
+    elif args.files:
+        mode = detect_mode(args.files)
+    elif not sys.stdin.isatty():
+        mode = "diff"
+    else:
+        parser.print_help()
+        sys.exit(1)
+    if args.mode:
+        mode = args.mode
+
+    if specs is None:
+        default_backend = resolve_default_backend(mode, args.model, args.effort)
+        specs = parse_backend_arg(default_backend, args.model)
+
     if args.effort and any(name == "opencode" for name, _ in specs):
         # opencode has no reasoning-effort flag; drop nothing silently.
         print("Error: --effort is not supported by the opencode backend.", file=sys.stderr)
@@ -483,22 +572,12 @@ def _run():
     # only api/opencode get it materialized (run_one) while codex/claude git-show the OID.
     needs_content = any(name in {"api", "opencode"} for name, _ in specs)
 
-    # Validate mutually exclusive sources
-    explicit_sources = sum([
-        bool(args.pr),
-        bool(args.commit),
-        args.diff or args.staged,
-        bool(args.files),
-    ])
-    sources = explicit_sources + int(stdin_has_input())
-    if sources > 1:
-        print("Error: specify only one review source (files, --diff, --staged, --commit, --pr, or stdin).", file=sys.stderr)
-        sys.exit(1)
-
     # Gather content to review. For a mutable working-tree diff, needs_content captures one
     # `content` shared by every backend; otherwise it stays None and codex/claude run git.
     # For a commit, codex/claude always git-show the OID (commit_oid) and api/opencode get
     # the diff via commit_content (run_one). Files, stdin, and PR sources are materialized.
+    # The branch conditions mirror the mode block above, which has already exited when none
+    # of them holds.
     content: str | None = None
     commit_content: str | None = None
     git_cmd: str | None = None
@@ -506,23 +585,19 @@ def _run():
     if args.pr:
         pr_description, diff = get_pr_content(args.pr, repo=args.repo)
         content = f"=== PULL REQUEST ===\n{pr_description}\n=== END PULL REQUEST ===\n\n{diff}"
-        mode = "diff"
     elif args.commit:
         commit_oid = resolve_commit(args.commit)
         if needs_content:
             commit_content = get_commit_diff(commit_oid)  # for api/opencode
-        mode = "diff"
     elif args.diff or args.staged:
         if needs_content:
             content = get_diff(args.staged)  # one snapshot for every backend
         else:
             ensure_diff_exists(args.staged)
             git_cmd = "git diff --staged" if args.staged else "git diff HEAD"
-        mode = "diff"
     elif args.files:
         content = read_files(args.files)
-        mode = detect_mode(args.files)
-    elif not sys.stdin.isatty():
+    else:
         # Piped diffs can carry non-UTF8 bytes (files in other encodings); decode
         # with replacement instead of crashing mid-pipe.
         try:
@@ -533,13 +608,6 @@ def _run():
         if not content:
             print("Error: empty input from stdin.", file=sys.stderr)
             sys.exit(1)
-        mode = "diff"
-    else:
-        parser.print_help()
-        sys.exit(1)
-
-    if args.mode:
-        mode = args.mode
 
     # Read project standards docs
     docs_content = collect_docs(args.docs, args.llms)
