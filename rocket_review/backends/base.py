@@ -111,11 +111,23 @@ class ReviewJob:
     #: the trust question is "does the repository that wrote this text carry the file", and
     #: for a foreign repository there is no way to ask it from here.
     foreign_repo: bool = False
-    # Repo-relative paths this review touches, in the order git or the patch reports
-    # them, deduplicated, no empty strings. Carried to every backend, read by none
-    # yet: it is what a prompt would need to select content from the languages a
-    # review actually touches. Never shared between jobs (default_factory, not a
-    # bare list literal).
+    # The paths this review touches, in the order git or the patch reports them,
+    # deduplicated, no empty strings. Repo-relative from every source that asks git or
+    # reads a patch; file arguments are the paths the user typed, which may be absolute
+    # or reach outside the checkout. Carried to every backend and read by none yet: it is
+    # what a prompt would need to select content from the languages a review actually
+    # touches.
+    #
+    # Three things it does not promise. It is a snapshot of a moving tree — for --diff the
+    # paths are read next to the diff they describe, but nothing freezes the working tree
+    # between the two reads. A merge commit reports its combined diff, so a merge that
+    # resolved nothing reports nothing, exactly as `git show` displays nothing for it. And
+    # a patch source names a rename only by its destination, where git's own diff of the
+    # same change names both sides.
+    #
+    # default_factory gives each ReviewJob its own list; the fan-out's per-backend jobs
+    # come from dataclasses.replace, which copies the reference, so every backend in one
+    # run shares this list. Nothing may mutate it.
     changed_paths: list[str] = field(default_factory=list)
 
 

@@ -329,20 +329,20 @@ def _discover(cmd: list[str], input_text: str | None = None) -> subprocess.Compl
             encoding="utf-8", errors="replace", timeout=SUBPROCESS_TIMEOUT,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        print(
-            "Note: could not determine changed paths"
-            f" ({type(exc).__name__}).",
-            file=sys.stderr,
-        )
+        print(f"Note: could not determine changed paths ({type(exc).__name__}).",
+              file=sys.stderr)
         return None
 
 
 def git_diff_changed_paths(staged: bool) -> list[str]:
-    """The paths `git diff` (with this source's own ref) touches, or [] on failure.
+    """The paths `git diff` (with this source's own ref) touches, or [] when it cannot say.
 
     `--name-only -z` is NUL-separated and never C-quotes, so a path carrying a space, a
-    non-ascii byte, a quote or a control character arrives as the path it is. A non-zero
-    exit — a repo the review itself could read — is an empty list, never a new failure.
+    quote or a control character arrives whole rather than as git's rendering of it. A name
+    that is not valid UTF-8 is still lossy: the decoder replaces what it cannot read, here
+    as everywhere else rr reads a subprocess. A non-zero exit — no repository, no HEAD —
+    yields no paths and no error; the review's own git calls are the ones that must fail
+    loudly.
     """
     cmd = ["git", "diff", "--name-only", "-z"]
     cmd.append("--staged" if staged else "HEAD")
@@ -392,7 +392,11 @@ def changed_paths_from_patch(patch: str) -> list[str]:
     patch can carry — binary changes (counts `-`/`-`), renames (reported as their
     destination, once), quoted paths, header-shaped lines inside a hunk. The `-z` output is
     one NUL-terminated record per file, `added\\tdeleted\\tpath`, the path verbatim and never
-    quoted. Non-zero exit (text that is not a patch) is an empty list.
+    quoted — which is why it is split on two tabs and not on every one: the path may carry
+    tabs of its own. Non-zero exit (text that is not a patch) is an empty list.
+
+    `--numstat` only parses. The patch is untrusted text — a fork's pull request, a pipe
+    from anywhere — so nothing here may reach a form of `git apply` that writes.
     """
     # git refuses a patch that does not end in a newline ("corrupt patch"); the two sources
     # strip trailing whitespace when they read, so restore the terminator before parsing.
