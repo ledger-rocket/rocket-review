@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from rocket_review import repo
 from rocket_review.backends.base import BackendError, ReviewJob, format_duration, interrupted
 from rocket_review.models import REVIEW_SCHEMA
 from rocket_review.prompts import get_prompt
@@ -82,10 +83,12 @@ def extract_referenced_files(text: str, max_size: int = 100_000) -> str:
     parts = []
     seen = set()
     for c in sorted(candidates):
-        p = Path(c).resolve()
-        # Only include files within the repo/cwd. is_relative_to, not a string-prefix
-        # check: /repo-sibling must not pass as inside /repo.
-        if not p.is_relative_to(repo_root):
+        # The path the text named is the repository's word, not the user's, so the same
+        # gate as every docs route applies: tracked at HEAD, inside the repo, never
+        # repository metadata. The resolved path must be judged and read where it really
+        # is (a symlink may open a file that flunks the gate).
+        p = repo.resolve_doc_path(Path(c).resolve(), user_named=False, base=repo_root)
+        if p is None:
             continue
         if p.is_file() and p not in seen:
             try:
