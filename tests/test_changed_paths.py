@@ -17,11 +17,18 @@ from rocket_review.cli import main
 from rocket_review.prompts import build_agent_prompt
 
 
-def git(repo, *args):
-    subprocess.run(
+def git(repo, *args, check=True):
+    """Run git in `repo` with an identity of our own.
+
+    Every call carries `user.*`, including the ones that only look like they read: `git
+    merge` establishes its committer before it touches anything, so without an identity it
+    fails outright on a machine that has none configured — which is any CI runner — and a
+    fixture then quietly builds something other than what it says.
+    """
+    return subprocess.run(
         ["git", "-c", "user.email=t@t.io", "-c", "user.name=t",
          "-c", "commit.gpgsign=false", *args],
-        cwd=repo, check=True, capture_output=True,
+        cwd=repo, check=check, capture_output=True, text=True,
     )
 
 
@@ -29,6 +36,8 @@ def new_repo(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
+    # Named here rather than taken from init.defaultBranch, which differs between machines.
+    git(repo, "checkout", "-q", "-b", "trunk")
     return repo
 
 
@@ -155,26 +164,52 @@ def test_root_commit_source_lists_its_files(tmp_path, monkeypatch):
     assert other[0].endswith(".py")
 
 
-def test_a_merge_commit_lists_what_its_combined_diff_shows(tmp_path, monkeypatch):
+def _conflicted_merge_repo(tmp_path):
+    """A repository whose HEAD is a two-parent merge that resolved a conflict in shared.py.
+
+    Each branch also touches a file the other never sees, so a reader that reported the
+    union across parents instead of the combined diff would be caught.
+
+    Every step is checked rather than assumed. A merge needs a committer identity before it
+    touches anything, branch names come from config unless they are named, and a combined
+    diff shows only what differs from *every* parent — three ways for this fixture to build
+    an ordinary commit while still looking like it worked.
+    """
     repo = new_repo(tmp_path)
     (repo / "shared.py").write_text("a\n")
     git(repo, "add", "-A")
     git(repo, "commit", "-qm", "init")
-    git(repo, "checkout", "-qb", "side")
-    (repo / "side_only.py").write_text("s\n")
+
+    git(repo, "checkout", "-q", "-b", "side")
     (repo / "shared.py").write_text("a\nside\n")
+    (repo / "side_only.py").write_text("s\n")
     git(repo, "add", "-A")
     git(repo, "commit", "-qm", "side")
-    git(repo, "checkout", "-q", "-")
-    (repo / "main_only.py").write_text("m\n")
-    (repo / "shared.py").write_text("a\nmain\n")
+
+    git(repo, "checkout", "-q", "trunk")
+    (repo / "shared.py").write_text("a\ntrunk\n")
+    (repo / "trunk_only.py").write_text("m\n")
     git(repo, "add", "-A")
-    git(repo, "commit", "-qm", "main")
-    subprocess.run(["git", "merge", "--no-ff", "side", "-m", "merge"],
-                   cwd=repo, capture_output=True)  # conflicts, by construction
+    git(repo, "commit", "-qm", "trunk")
+
+    merged = git(repo, "merge", "--no-ff", "side", "-m", "merge", check=False)
+    assert merged.returncode != 0, "the merge was meant to conflict and did not"
+    assert (repo / ".git/MERGE_HEAD").exists(), (
+        f"no merge in progress after `git merge`: {merged.stderr.strip()!r}"
+    )
+
+    # Different from both parents, which is the only thing a combined diff shows.
     (repo / "shared.py").write_text("a\nboth\n")
     git(repo, "add", "shared.py")
     git(repo, "commit", "-qm", "merge")
+
+    parents = git(repo, "rev-list", "--parents", "-n", "1", "HEAD").stdout.split()
+    assert len(parents) == 3, f"HEAD has {len(parents) - 1} parent(s), so it is no merge"
+    return repo
+
+
+def test_a_merge_commit_lists_what_its_combined_diff_shows(tmp_path, monkeypatch):
+    repo = _conflicted_merge_repo(tmp_path)
     monkeypatch.chdir(repo)
 
     job = run_with_backend(monkeypatch, ["--commit", "HEAD"])
@@ -191,15 +226,17 @@ def test_a_merge_that_resolved_nothing_reports_nothing(tmp_path, monkeypatch):
     (repo / "base.py").write_text("a\n")
     git(repo, "add", "-A")
     git(repo, "commit", "-qm", "init")
-    git(repo, "checkout", "-qb", "side")
+    git(repo, "checkout", "-q", "-b", "side")
     (repo / "side_only.py").write_text("s\n")
     git(repo, "add", "-A")
     git(repo, "commit", "-qm", "side")
-    git(repo, "checkout", "-q", "-")
-    (repo / "main_only.py").write_text("m\n")
+    git(repo, "checkout", "-q", "trunk")
+    (repo / "trunk_only.py").write_text("m\n")
     git(repo, "add", "-A")
-    git(repo, "commit", "-qm", "main")
+    git(repo, "commit", "-qm", "trunk")
     git(repo, "merge", "-q", "--no-ff", "side", "-m", "merge")
+    parents = git(repo, "rev-list", "--parents", "-n", "1", "HEAD").stdout.split()
+    assert len(parents) == 3, f"HEAD has {len(parents) - 1} parent(s), so it is no merge"
     monkeypatch.chdir(repo)
 
     job = run_with_backend(monkeypatch, ["--commit", "HEAD"])
@@ -388,33 +425,13 @@ def test_a_binary_change_is_a_changed_path(monkeypatch):
     assert job.changed_paths == ["src/a.py", "src/blob.bin"]
 
 
-def _conflicted_merge_repo(tmp_path):
-    """A repository whose HEAD is a merge that resolved a conflict in shared.py."""
-    repo = new_repo(tmp_path)
-    (repo / "shared.py").write_text("a\n")
-    git(repo, "add", "-A")
-    git(repo, "commit", "-qm", "init")
-    git(repo, "checkout", "-qb", "side")
-    (repo / "shared.py").write_text("a\nside\n")
-    git(repo, "add", "-A")
-    git(repo, "commit", "-qm", "side")
-    git(repo, "checkout", "-q", "-")
-    (repo / "shared.py").write_text("a\nmain\n")
-    git(repo, "add", "-A")
-    git(repo, "commit", "-qm", "main")
-    subprocess.run(["git", "merge", "--no-ff", "side", "-m", "merge"],
-                   cwd=repo, capture_output=True)  # conflicts, by construction
-    (repo / "shared.py").write_text("a\nboth\n")
-    git(repo, "add", "shared.py")
-    git(repo, "commit", "-qm", "merge")
-    return repo
-
-
 def test_a_piped_combined_diff_reports_the_file_the_merge_resolved(tmp_path, monkeypatch):
     repo = _conflicted_merge_repo(tmp_path)
-    shown = subprocess.run(["git", "show", "HEAD"], cwd=repo, capture_output=True,
-                           text=True).stdout
-    assert "diff --cc shared.py" in shown  # the route under test really is a combined diff
+    shown = git(repo, "show", "HEAD").stdout
+    assert "diff --cc shared.py" in shown, (
+        "the fixture did not produce a combined diff, so this would test nothing; "
+        f"`git show HEAD` gave:\n{shown}"
+    )
     monkeypatch.chdir(repo)
 
     job = run_with_backend(monkeypatch, [], stdin_text=shown)
