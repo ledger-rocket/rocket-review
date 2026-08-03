@@ -4,6 +4,23 @@ from rocket_review.backends import base
 
 
 @pytest.fixture(autouse=True)
+def isolate_config(monkeypatch, tmp_path):
+    """Keep whatever config the developer running the suite has out of every test.
+
+    Both discovery roots are redirected: XDG_CONFIG_HOME for the user file, and the working
+    directory for the project file, which is found by walking up from it to the git root —
+    from rocket-review's own checkout that would be the repo's own .rocket-review.toml. A
+    test that wants either file writes it under tmp_path itself.
+    """
+    home = tmp_path / "config-home"
+    home.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+
+
+@pytest.fixture(autouse=True)
 def reset_interrupt_gate():
     """Keep the process-global interrupt gate from leaking between tests.
 

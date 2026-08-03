@@ -12,6 +12,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from urllib.parse import unquote, urldefrag
 
+from rocket_review import config
 from rocket_review.backends import BACKENDS, available, base, missing_binary
 from rocket_review.backends.base import BackendError, ReviewJob
 from rocket_review.models import (
@@ -26,11 +27,6 @@ RAW_TRUNCATE_LIMIT = 4000
 # Bounds git/gh preflight calls so a hung credential helper or network fetch
 # can't stall a CI gate indefinitely; backend runs have their own longer timeout.
 SUBPROCESS_TIMEOUT = 300
-
-# Measured strengths, not preference: claude returns deeper code/diff findings with fewer
-# false alarms, while codex keeps plan reviews focused and is the fastest of the two. An
-# explicit --backend always outranks this table.
-DEFAULT_BACKEND_BY_MODE = {"plan": "codex", "code": "claude", "diff": "claude"}
 
 # Stand-ins when a mode's default is not available, closest substitute first: the other
 # agentic CLI reviews the same way, opencode is agentic but provider-dependent, and api
@@ -140,14 +136,21 @@ def read_doc_with_links(doc_path: Path) -> str:
 DISCOVERY_CANDIDATES = ["llms.txt", "AGENTS.md", "CLAUDE.md"]
 
 
-def collect_docs(docs_args: list[str] | None, llms_arg: str | None) -> str | None:
-    """Assemble standards context from --docs (explicit or auto-discovered) and --llms."""
+def collect_docs(
+    docs_args: list[str] | None, llms_arg: str | None, *, discovery_required: bool = True
+) -> str | None:
+    """Assemble standards context from --docs (explicit or auto-discovered) and --llms.
+
+    discovery_required is false when a config file rather than the flag asked for
+    auto-discovery: as a standing preference it means "use this project's standards doc if
+    it has one", so a project without one is not an error the way the typed flag is.
+    """
     paths: list[Path] = []
     if llms_arg:
         paths.append(Path(llms_arg))
     if docs_args is not None and len(docs_args) == 0:
         found = [Path(c) for c in DISCOVERY_CANDIDATES if Path(c).is_file()]
-        if not found:
+        if not found and discovery_required:
             print(
                 "Error: --docs given without paths and none of "
                 f"{', '.join(DISCOVERY_CANDIDATES)} found in the current directory.",
@@ -286,7 +289,7 @@ def detect_mode(paths: list[str]) -> str:
     return "code"
 
 
-def resolve_default_backend(mode: str, model: str | None, effort: str | None) -> str:
+def resolve_default_backend(default: str, mode: str, model: str | None, effort: str | None) -> str:
     """The mode's default backend, or an available stand-in — announced, never silent.
 
     Returns the unavailable default when nothing else is available either, so the caller's
@@ -295,7 +298,6 @@ def resolve_default_backend(mode: str, model: str | None, effort: str | None) ->
     A --model rides along to whichever backend is substituted, where a model name from the
     absent vendor fails at the backend, so the notice names it as part of what will run.
     """
-    default = DEFAULT_BACKEND_BY_MODE[mode]
     if available(default):
         return default
     for candidate in FALLBACK_ORDER:
@@ -314,6 +316,12 @@ def resolve_default_backend(mode: str, model: str | None, effort: str | None) ->
         )
         return candidate
     return default
+
+
+def where_set(settings: config.Settings, key: str) -> str:
+    """Name the config file a value came from, for an error the user typed no flag for."""
+    origin = settings.from_file(key)
+    return f" ({key} is set in {origin})" if origin else ""
 
 
 def stdin_has_input() -> bool:
@@ -446,7 +454,9 @@ def _run():
     )
     parser.add_argument(
         "--mode",
-        choices=["plan", "code", "diff"],
+        # The same set the per-mode default backend table is keyed by; a mode outside it
+        # would have no default to resolve.
+        choices=list(config.MODES),
         help="Review mode (auto-detected if omitted)",
     )
     parser.add_argument("--prompt", help="Additional review instructions")
@@ -476,8 +486,10 @@ def _run():
         help="Alias for --backend api: OpenAI API directly, no project navigation "
              "(auto-extracts referenced files)",
     )
+    # store_true with default=None so an absent flag is distinguishable from an explicit
+    # false, which is what lets a config file supply the value without overriding the flag.
     parser.add_argument(
-        "--json", action="store_true",
+        "--json", action="store_true", default=None,
         help="Emit findings as a JSON envelope instead of prose",
     )
     parser.add_argument(
@@ -485,21 +497,41 @@ def _run():
         help="Exit 2 if any finding is at or above this severity (requires --json)",
     )
     parser.add_argument(
-        "--full", action="store_true",
+        "--full", action="store_true", default=None,
         help="Inline full backend output in the --json envelope (skip truncation)",
+    )
+    parser.add_argument(
+        "--no-config", action="store_true",
+        help="Ignore .rocket-review.toml and ~/.config/rocket-review/config.toml",
     )
 
     args = parser.parse_args()
 
-    if args.fail_on and not args.json:
+    # Settled before anything else runs: a bad config must fail before any git, gh, or
+    # backend work, and every check below judges the effective value, not just the flag.
+    try:
+        settings = config.resolve(
+            {key: getattr(args, key) for key in config.FLAG_KEYS},
+            config.load(no_config=args.no_config, cwd=Path.cwd()),
+        )
+    except config.ConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if settings.fail_on and not settings.json:
         print(
-            "Error: --fail-on requires --json (findings must be parsed to be gated).",
+            "Error: --fail-on requires --json (findings must be parsed to be gated)."
+            + where_set(settings, "fail_on"),
             file=sys.stderr,
         )
         sys.exit(1)
 
-    if args.full and not args.json:
-        print("Error: --full requires --json (text mode never truncates).", file=sys.stderr)
+    if settings.full and not settings.json:
+        print(
+            "Error: --full requires --json (text mode never truncates)."
+            + where_set(settings, "full"),
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if args.repo and not args.pr:
@@ -552,12 +584,22 @@ def _run():
         mode = args.mode
 
     if specs is None:
-        default_backend = resolve_default_backend(mode, args.model, args.effort)
+        default_backend = resolve_default_backend(
+            settings.backends[mode], mode, args.model, settings.effort
+        )
         specs = parse_backend_arg(default_backend, args.model)
 
-    if args.effort and any(name == "opencode" for name, _ in specs):
+    # A model pinned on the command line (--backend name:model, or --model) stays as pinned;
+    # [models] fills in the rest, exactly as writing the suffix out would have.
+    specs = [(name, model or settings.models.get(name)) for name, model in specs]
+
+    if settings.effort and any(name == "opencode" for name, _ in specs):
         # opencode has no reasoning-effort flag; drop nothing silently.
-        print("Error: --effort is not supported by the opencode backend.", file=sys.stderr)
+        print(
+            "Error: --effort is not supported by the opencode backend."
+            + where_set(settings, "effort"),
+            file=sys.stderr,
+        )
         sys.exit(1)
     for name, _ in specs:
         hint = missing_binary(name)
@@ -610,7 +652,9 @@ def _run():
             sys.exit(1)
 
     # Read project standards docs
-    docs_content = collect_docs(args.docs, args.llms)
+    docs_content = collect_docs(
+        settings.docs, args.llms, discovery_required=settings.from_file("docs") is None
+    )
 
     # Per-backend model is injected by run_one; the template leaves it unset.
     job = ReviewJob(
@@ -622,9 +666,9 @@ def _run():
         pr=bool(args.pr),
         git_cmd=git_cmd,
         model=None,
-        json_output=args.json,
-        effort=args.effort,
-        timeout=args.timeout,
+        json_output=settings.json,
+        effort=settings.effort,
+        timeout=settings.timeout,
     )
 
     base.begin_fanout()
@@ -661,15 +705,15 @@ def _run():
     for name, model, raw, error in outputs:
         if error is not None:
             results.append(BackendResult(backend=name, model=model, error=error))
-        elif args.json:
+        elif settings.json:
             results.append(parse_backend_output(raw, name, model))
         else:
             results.append(BackendResult(backend=name, model=model, raw=raw))
 
-    if args.json:
-        if not args.full:
+    if settings.json:
+        if not settings.full:
             truncate_raw(results)
-        print(json.dumps(to_envelope(results, fail_on=args.fail_on), indent=2))
+        print(json.dumps(to_envelope(results, fail_on=settings.fail_on), indent=2))
     else:
         for r in results:
             # A failed backend's block (header + error) goes to stderr so piping stdout
@@ -695,5 +739,5 @@ def _run():
         sys.exit(1)
     if any(r.error for r in results):
         print("Warning: some backends failed; findings above are partial.", file=sys.stderr)
-    if args.fail_on and should_fail(results, args.fail_on):
+    if settings.fail_on and should_fail(results, settings.fail_on):
         sys.exit(2)

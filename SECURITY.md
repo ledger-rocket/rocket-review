@@ -53,6 +53,15 @@ exfiltrating**:
   repo can attempt to steer an agentic backend into reading and leaking secrets or
   emitting misleading findings. This risk is highest with `--pr` run on a developer
   machine, where real credentials are present.
+- **Repo-supplied configuration.** A `.rocket-review.toml` in the repo you run `rr`
+  from sets that project's defaults, including which backend — and therefore which
+  provider — receives your code. It can only select backends you have installed, and
+  the docs it names must live inside the repo, but it is input the repo's author
+  controls: read it as you would any tooling config a clone brings with it, or run
+  with `--no-config`, which ignores both config files. The docs it names are confined to
+  the repo and excluded from `.git/` — a doc is copied into the prompt verbatim, so
+  without that a clone could have your local git config, credentialed remote URLs and
+  all, sent upstream.
 - **Confused-deputy across checkouts.** `--repo <other>` reviews a PR from a *different*
   remote repository, but the agent still runs with read access to your **local current
   working directory**. Do not run it from inside an unrelated sensitive checkout — the

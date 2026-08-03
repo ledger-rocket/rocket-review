@@ -95,6 +95,7 @@ rr --pr 123                       # review a GitHub PR (number, URL, or branch)
 rr --pr 123 --repo acme/api-server  # ...from outside that repo's checkout
 git diff HEAD~3 | rr              # pipe anything
 rr src/auth.py --docs             # review files against your documented standards
+rr --diff --no-config             # ignore the config files (hermetic run)
 rr --version                      # print the installed version
 ```
 
@@ -114,7 +115,8 @@ eval corpus, not from a preference between vendors — and they are only default
 - **Overriding** — an explicit `--backend` always wins, in any mode, single
   (`--backend codex`) or as a list (`--backend codex,claude`). `--mode` is applied
   before the backend is chosen, so `rr plan.md --mode code` reviews as code *and*
-  uses the code default.
+  uses the code default. To change the table itself for a project or for yourself,
+  set `[backends]` in a [config file](#config-file).
 - **Missing backend** — if the mode's default isn't available, `rr` uses the next
   available one and says so in a single line on stderr; pass `--backend` to choose
   explicitly and silence it. The order is the other agentic CLI first, then
@@ -215,6 +217,63 @@ Relative markdown links inside the docs are followed one level, so an index file
 paths when your standards live elsewhere. `--llms [PATH]` is kept as a compatibility
 alias for `--docs [PATH]`, defaulting to `llms.txt`.
 
+## Config file
+
+Two optional TOML files hold the defaults you would otherwise retype:
+
+- **Project** — `.rocket-review.toml`, found by walking up from the current directory
+  to the git root (and no further; outside a repo only the current directory is read).
+- **User** — `~/.config/rocket-review/config.toml`, or `$XDG_CONFIG_HOME/rocket-review/config.toml`.
+
+**Precedence: CLI flag > project file > user file > built-in default**, settled per
+key. A project file that sets only `[backends]` leaves your user file's `timeout` in
+force, and the same holds inside `[backends]` and `[models]`.
+
+```toml
+timeout = 1800          # --timeout
+effort = "high"         # --effort
+fail_on = "high"        # --fail-on (needs json = true, exactly as the flag needs --json)
+json = false            # --json
+full = false            # --full
+docs = true             # --docs with no path (auto-discovery); or a list of paths
+
+[backends]              # per-mode default backend, overriding the built-in table
+plan = "codex"
+code = "claude"
+diff = "claude"
+default = "claude"      # optional: covers any mode you leave out above
+
+[models]                # per backend, i.e. what `--backend name:model` pins
+codex = "gpt-5.6-sol"
+claude = "claude-opus-5"
+```
+
+Every key mirrors a flag — a config file changes what `rr` does by default, never what
+it can do. What to review (`--diff`, `--pr`, files, `--mode`, `--prompt`) stays on the
+command line, where it is visible in the invocation.
+
+Anything else is an error, named rather than ignored: an unknown key or mode, a backend
+`rr` doesn't have, a non-integer `timeout`, a `fail_on` that isn't a severity, malformed
+TOML (reported with the file and the parse position). Config is validated before any git,
+`gh`, or backend work starts.
+
+`--no-config` ignores both files — for hermetic CI runs, and for when you suspect a
+config file of causing what you are seeing. It is also the way out of a `json = true`,
+`full = true`, or `docs` you don't want on this run: `rr` has no `--no-json`-style
+inverse flags, so a lower layer can only be turned off by a higher config file
+(`json = false` in the project file) or by `--no-config`. Flags always win where they
+can say anything at all.
+
+`docs = true` means "use this project's standards doc if it has one": unlike a typed
+`--docs`, a project with no `llms.txt` / `AGENTS.md` / `CLAUDE.md` is not an error, it
+just has no standards doc. Explicit `docs` paths are relative to the config file that
+names them. A project file may only name docs inside its own directory, and never inside
+`.git`: it comes from the repository rather than from you, so it must not be able to have
+a file elsewhere on your machine — or your local git config, with whatever credentials a
+remote URL carries — read and sent to a backend. Treat `.rocket-review.toml` in a repo
+you cloned like any other tooling config it ships: it can pick the backend your review is
+sent to. `--no-config` opts out.
+
 ## How it works
 
 `rr` assembles a review prompt — a mode-specific rubric, your standards docs, and
@@ -242,6 +301,10 @@ read-only is not the same as safe:
 - Untrusted input can prompt-inject the reviewer — a hostile PR body, diff, comment,
   or `AGENTS.md` can try to steer an agentic backend. Be especially careful with `--pr`
   on a dev machine.
+- A repo's `.rocket-review.toml` configures the runs you make inside it — including
+  which backend, and therefore which provider, gets your code. It can only name docs
+  inside the repo, and only backends you have installed, but it is repo-supplied input:
+  read it like any other tooling config a clone brings with it, or use `--no-config`.
 
 **Don't run agentic backends against untrusted repos or PRs on a machine where readable
 secrets exist.** See [SECURITY.md](SECURITY.md) for the full threat model and how to
@@ -275,7 +338,8 @@ For plans, run `rr plan.md --docs` before implementing. Use a 900000ms timeout.
   (edit/write denied at the tool level). Read-only stops writes; it does not stop the
   agent *reading* readable secrets and sending them to the backend's provider — see
   [Security & data flow](#security--data-flow).
-- `--fail-on` requires `--json`.
+- `--fail-on` requires `--json` — including when a [config file](#config-file) is what
+  set it; the error names the file.
 - Exit codes: 0 no gate tripped · 1 operational error (or every backend failed) · 2 findings at/above `--fail-on`. A partial backend failure warns on stderr but still exits 0 — gate CI with `--json --fail-on` to fail closed.
 
 ## Contributing
