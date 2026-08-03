@@ -116,10 +116,13 @@ eval corpus, not from a preference between vendors — and they are only default
   before the backend is chosen, so `rr plan.md --mode code` reviews as code *and*
   uses the code default.
 - **Missing backend** — if the mode's default isn't available, `rr` uses the next
-  available one (the other agentic CLI first, then `opencode`, then `api` when
-  `OPENAI_API_KEY` is set) and says so in a single line on stderr; pass `--backend`
-  to choose explicitly and silence it. The fallback is never silent. If nothing is
-  available, `rr` errors with the install hint for the backend the mode wanted.
+  available one and says so in a single line on stderr; pass `--backend` to choose
+  explicitly and silence it. The order is the other agentic CLI first, then
+  `opencode` (skipped when `--effort` is set, which it doesn't support), then `api`
+  — and only when both `OPENAI_API_KEY` and the SDK extra are present, since a
+  substitute that can't run would defeat the point. The fallback is never silent. If
+  nothing is available, `rr` errors with the install hint for the backend the mode
+  wanted.
 - **Two opinions at once** — `--backend codex,claude` runs both and prints each
   review under its own heading. Some teams do this on pre-merge changes and read the
   disagreements; others keep the single per-mode default and spend the time

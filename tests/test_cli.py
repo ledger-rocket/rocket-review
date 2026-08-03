@@ -1,6 +1,6 @@
+import io
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -11,7 +11,7 @@ from importlib.metadata import PackageNotFoundError
 
 import pytest
 
-from rocket_review.backends import available, base
+from rocket_review.backends import _openai_sdk_installed, available, base
 from rocket_review.backends.base import BackendError
 from rocket_review.cli import (
     RAW_TRUNCATE_LIMIT,
@@ -161,13 +161,15 @@ def _record_backends(monkeypatch):
     return ran
 
 
-def _installed(monkeypatch, *names, api_key=None):
+def _installed(monkeypatch, *names, api_key=None, api_sdk=True):
     """Make exactly these backends look available to the real availability check."""
     monkeypatch.setattr(
         shutil, "which", lambda binary: f"/usr/bin/{binary}" if binary in names else None
     )
-    # Pin the api backend's key lookup: a developer's real ~/.env must not decide the test.
+    # Pin both halves of the api probe: neither a developer's real ~/.env nor whether the
+    # openai extra happens to be installed in this environment may decide the test.
     monkeypatch.setattr("rocket_review.backends.api._load_env_file", lambda: None)
+    monkeypatch.setattr("rocket_review.backends._openai_sdk_installed", lambda: api_sdk)
     if api_key:
         monkeypatch.setenv("OPENAI_API_KEY", api_key)
     else:
@@ -292,6 +294,57 @@ def test_fallback_notice_names_the_model_that_rides_along(monkeypatch, tmp_path,
     assert capsys.readouterr().err.count(notice) == 1
 
 
+def test_fallback_skips_api_without_the_sdk(monkeypatch, tmp_path, capsys):
+    # A key alone does not make api runnable: on a base install the SDK is absent, and
+    # announcing a fallback that cannot run would break the notice's promise.
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, api_key="sk-test", api_sdk=False)
+    assert run_cli(monkeypatch, ["--diff"]) == 1
+    err = capsys.readouterr().err
+    assert "backend 'claude' unavailable" in err
+    assert "Note: default backend" not in err
+    assert ran == []
+
+
+def test_fallback_skips_opencode_when_effort_is_set(monkeypatch, tmp_path, capsys):
+    # opencode rejects --effort, so substituting it would turn the user's request into an
+    # error they did not cause; with nothing else left the default's own error stands.
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, "opencode")
+    assert run_cli(monkeypatch, ["--diff", "--effort", "high"]) == 1
+    err = capsys.readouterr().err
+    assert "backend 'claude' unavailable" in err
+    assert "Note: default backend" not in err
+    assert "--effort is not supported" not in err  # not an error the user provoked
+    assert ran == []
+
+
+def test_fallback_uses_opencode_without_effort(monkeypatch, tmp_path, capsys):
+    # The same install without --effort: the opencode skip is conditional, not a removal.
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, "opencode")
+    assert run_main(monkeypatch, ["--diff"]) == 0
+    assert ran == [("opencode", "diff")]
+    notice = FALLBACK_NOTICE.format(default="claude", mode="diff", chosen="opencode")
+    assert capsys.readouterr().err.count(notice) == 1
+
+
+def test_piped_stdin_resolves_the_diff_default(monkeypatch, tmp_path, capsys):
+    # stdin is the one mode-block branch keyed on isatty() rather than a source flag, so
+    # it needs its own proof that the diff default is reached.
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("diff --git a b\n+piped\n"))
+    _installed(monkeypatch, "codex", "claude")
+    assert run_main(monkeypatch, []) == 0
+    assert ran == [("claude", "diff")]
+    assert "Note: default backend" not in capsys.readouterr().err
+
+
 def test_no_fallback_notice_when_the_backend_is_explicit(monkeypatch, tmp_path, capsys):
     # The default's absence is irrelevant once the user has named a backend.
     _mode_sources(tmp_path, monkeypatch)
@@ -325,20 +378,35 @@ def test_nothing_available_keeps_the_existing_error(monkeypatch, tmp_path, capsy
     assert ran == []
 
 
-def test_available_requires_a_key_for_the_api_backend(monkeypatch):
+def test_available_requires_both_a_key_and_the_sdk_for_the_api_backend(monkeypatch):
     monkeypatch.setattr("rocket_review.backends.api._load_env_file", lambda: None)
+    monkeypatch.setattr("rocket_review.backends._openai_sdk_installed", lambda: True)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     assert not available("api")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     assert available("api")
+    monkeypatch.setattr("rocket_review.backends._openai_sdk_installed", lambda: False)
+    assert not available("api")  # a key without the SDK is still not runnable
 
 
-def test_version_flag_prints_a_version_and_exits_0(monkeypatch, capsys):
+def test_openai_sdk_probe_fails_closed_on_a_spec_less_module(monkeypatch):
+    # A stand-in module (the api backend tests install one) carries no __spec__ and
+    # find_spec raises on it; the probe answers "no" instead of propagating.
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace())
+    assert not _openai_sdk_installed()
+
+
+def test_version_flag_prints_the_installed_version(monkeypatch, capsys):
+    def fake_version(distribution):
+        assert distribution == "rocket-review"
+        return "9.8.7"
+
+    monkeypatch.setattr("rocket_review.cli.version", fake_version)
     monkeypatch.setattr("sys.argv", ["rr", "--version"])
     with pytest.raises(SystemExit) as e:
         main()
     assert e.value.code == 0
-    assert re.fullmatch(r"rr \S.*", capsys.readouterr().out.strip())
+    assert capsys.readouterr().out == "rr 9.8.7\n"
 
 
 def test_version_falls_back_outside_an_installed_distribution(monkeypatch):

@@ -286,7 +286,7 @@ def detect_mode(paths: list[str]) -> str:
     return "code"
 
 
-def resolve_default_backend(mode: str, model: str | None) -> str:
+def resolve_default_backend(mode: str, model: str | None, effort: str | None) -> str:
     """The mode's default backend, or an available stand-in — announced, never silent.
 
     Returns the unavailable default when nothing else is available either, so the caller's
@@ -300,6 +300,10 @@ def resolve_default_backend(mode: str, model: str | None) -> str:
         return default
     for candidate in FALLBACK_ORDER:
         if candidate == default or not available(candidate):
+            continue
+        if effort and candidate == "opencode":
+            # opencode has no reasoning-effort flag, so substituting it here would
+            # manufacture a usage error out of a request the user made of another backend.
             continue
         with_model = f" with --model {model}" if model else ""
         print(
@@ -548,7 +552,8 @@ def _run():
         mode = args.mode
 
     if specs is None:
-        specs = parse_backend_arg(resolve_default_backend(mode, args.model), args.model)
+        default_backend = resolve_default_backend(mode, args.model, args.effort)
+        specs = parse_backend_arg(default_backend, args.model)
 
     if args.effort and any(name == "opencode" for name, _ in specs):
         # opencode has no reasoning-effort flag; drop nothing silently.
