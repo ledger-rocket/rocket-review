@@ -372,7 +372,14 @@ def unquote_git_path(value: str) -> str:
             while i < n and len(digits) < 3 and "0" <= value[i] <= "7":
                 digits += value[i]
                 i += 1
-            data.append(int(digits, 8))
+            byte_val = int(digits, 8)
+            if byte_val <= 255:
+                data.append(byte_val)
+            else:
+                # An octal value above \377 names no byte — a malformed escape out of
+                # untrusted patch text. Place a replacement char rather than crash or
+                # emit nothing; the header is already worth nothing either way.
+                data.extend("\ufffd".encode("utf-8"))
         else:
             data.extend(nxt.encode("utf-8", "replace"))
             i += 1
