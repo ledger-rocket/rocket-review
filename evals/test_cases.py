@@ -473,22 +473,22 @@ def test_merged_pr_is_reviewed_in_place_at_its_commit(tmp_path, git_repo, head_o
 
 def test_seeded_plan_is_reviewed_as_a_file_argument(tmp_path, git_repo, head_oid):
     (tmp_path / "cases").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "cases" / "p-001-plan.md").write_text("# Plan\n", encoding="utf-8")
+    (tmp_path / "cases" / "p-101-plan.md").write_text("# Plan\n", encoding="utf-8")
     text = (
-        f"id: p-001\nmode: plan\nsource: seeded-plan\nrepo_commit: {head_oid}\n"
-        "path: cases/p-001-plan.md\n"
+        f"id: p-101\nmode: plan\nsource: seeded-plan\nrepo_commit: {head_oid}\n"
+        "path: cases/p-101-plan.md\n"
     )
-    case = load_case(write_manifest(tmp_path, "p-001", text))
+    case = load_case(write_manifest(tmp_path, "p-101", text))
     staged = materialize(case, git_repo, tmp_path / "work")
     assert staged.worktree is None
-    assert staged.rr_args == [str(tmp_path / "cases" / "p-001-plan.md")]
+    assert staged.rr_args == [str(tmp_path / "cases" / "p-101-plan.md")]
 
 
 def test_a_missing_artifact_is_rejected(tmp_path, git_repo, head_oid):
     text = (
-        f"id: p-001\nmode: plan\nsource: seeded-plan\nrepo_commit: {head_oid}\n"
+        f"id: p-101\nmode: plan\nsource: seeded-plan\nrepo_commit: {head_oid}\n"
         "path: cases/absent.md\n"
     )
-    case = load_case(write_manifest(tmp_path, "p-001", text))
+    case = load_case(write_manifest(tmp_path, "p-101", text))
     with pytest.raises(CaseError, match="not found"):
         materialize(case, git_repo, tmp_path / "work")

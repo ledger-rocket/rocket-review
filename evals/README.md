@@ -480,13 +480,29 @@ Every commit here is squash-merged, so `repo_commit` is the merge commit itself 
 
 ### Plan set
 
-Four cases: two seeded-flaw plans (`class: plan-flaw` — one step depending on something no
-step creates, one plan whose only success criterion cannot fail) and two controls. The
-seeded flaws are planted in plans that are otherwise deliberately sound, so a reviewer has
-to read for the flaw rather than for general weakness. `p-001` predates the designed set and
-is a pipeline smoke case rather than a scoring control; read it as such.
+Three cases: two seeded-flaw plans (`class: plan-flaw` — one step depending on something no
+step creates, one plan whose only success criterion cannot fail) and one clean control
+(`p-004`). The seeded flaws are planted in plans that are otherwise deliberately sound, so a
+reviewer has to read for the flaw rather than for general weakness.
 
-Four cases cannot certify anything about plan-mode prompts, and the decision rules below say
+A fourth case, `p-001`, was **removed under the clean-control adjudication rule below**: the
+findings reviewers raised against it were verified real rather than false positives, which is
+what that rule turns into a `case-invalidated` call. All of them hold — its premise
+mis-describes this repo's behaviour (`rr` never probes a backend's `--version`), the cache it
+designs records provenance that is stale by construction, and its stated validation cannot
+exercise the change it proposes. A plan a reviewer is right to criticise cannot be the thing
+false positives are counted against, so the rule removes it rather than scoring it. Its
+id is retired rather than freed, for the reason ids are never reused anywhere here: `p-001`
+keys the result rows of the sweeps it did run, and a second case under that id would make
+two different artifacts share one history.
+
+That leaves **one clean control in `plan` mode**, and the thinness is worth stating: the
+veto's per-case condition still applies to `p-004`, but one control is a narrow base to read
+a plan-mode false-positive rate off. The gap is deliberately left open. Writing a plan sound
+enough to survive as a control is the work whose failure produced `p-001`, and refilling the
+count in a hurry is how the next bad control gets in; it is a task of its own.
+
+Three cases cannot certify anything about plan-mode prompts, and the decision rules below say
 so: `plan-flaw` is two independent cases, well under the ≥5 the success criterion requires.
 The one class that does reach five, `dropped-guard`, is a mutant class scored in `diff` and
 `code` mode with no plan case in it — so nothing that ever clears the gate on this corpus
@@ -757,7 +773,7 @@ Against this corpus, that is **`diff` mode alone**:
   `diff` mode. Its two `code`-mode re-expressions are twins of cases already counted and
   never certify (*Twin dedup*).
 - `plan-flaw` is the only class in `plan` mode and has 2 cases — reported, cannot certify.
-- `code` mode has **no clean controls at all** — the eight are 6 `diff` and 2 `plan` — so
+- `code` mode has **no clean controls at all** — the seven are 6 `diff` and 1 `plan` — so
   the veto, which is computed on clean controls alone, cannot be evaluated there. A
   `code`-body change could clear a sweep without its false-positive cost being looked at
   once.
