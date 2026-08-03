@@ -76,8 +76,10 @@ exfiltrating**:
     Tracking decides the *path*, not the bytes: the file is then read from your working
     tree, so uncommitted edits to a tracked doc — a `config/settings.yml` you filled in
     locally — are what gets sent. Outside a git repository nothing is tracked, so the
-    directory confinement and the `.git` guard are what remain. What you name directly — `--docs PATH`, `--llms PATH`,
-    or a path in your own user config — is read as-is, `.git` excepted. The bare flags are
+    directory confinement and the `.git` guard are what remain. What you name directly —
+    `--docs PATH`, `--llms PATH`, or a path in your own user config — is read as-is,
+    repository metadata excepted: rr refuses a path that lands in the checkout's `.git`,
+    whatever the path is called and wherever that directory really is. The bare flags are
     not that: they ask the repository what it has.
 
   Read it as you would any tooling config a clone brings with it, or run with

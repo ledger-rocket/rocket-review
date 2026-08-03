@@ -138,6 +138,22 @@ def test_no_home_means_no_user_config_not_a_dead_run(monkeypatch, tmp_path):
     ]
 
 
+def test_a_backend_probe_without_a_home_directory_does_not_kill_the_run(monkeypatch, tmp_path):
+    # available("api") reads ~/.env to decide whether a key is configured, which is reached
+    # whenever the chosen backend's binary is missing. No home is no ~/.env, not a crash.
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    def no_home():
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "home", staticmethod(no_home))
+    from rocket_review.backends import available
+
+    monkeypatch.setattr("shutil.which", lambda binary: None)
+    assert available("api") is False
+
+
 def test_a_run_without_a_home_directory_still_works(monkeypatch, tmp_path):
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("HOME", raising=False)

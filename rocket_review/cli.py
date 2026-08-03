@@ -192,6 +192,24 @@ def tracked_files(root: Path) -> frozenset[str]:
     return frozenset(tracked_key(entry, folds) for entry in result.stdout.split("\0") if entry)
 
 
+def is_repository_metadata(resolved: Path, base: Path) -> bool:
+    """Whether a resolved path lands in the checkout's own .git, whatever it is called.
+
+    config.inside_dot_git covers every spelling of the name; this covers the spelling that
+    never says it — a symlink whose target sits in an external gitdir, where neither the
+    name nor the resolved path carries a `.git` component at all. Asked of the checkout the
+    path came from, since that is whose metadata it would be.
+    """
+    root = config.find_git_root(base)
+    if root is None:
+        return False
+    try:
+        gitdir = (root / ".git").resolve()
+    except (OSError, ValueError):
+        return False
+    return resolved == gitdir or resolved.is_relative_to(gitdir)
+
+
 def resolve_doc_path(path: Path, *, user_named: bool, base: Path) -> Path | None:
     """The one gate every docs path passes: the resolved path, or None if rr must not read it.
 
@@ -218,7 +236,7 @@ def resolve_doc_path(path: Path, *, user_named: bool, base: Path) -> Path | None
         resolved = path.resolve()
     except (OSError, ValueError):
         return None
-    if config.inside_dot_git(resolved):
+    if config.inside_dot_git(resolved) or is_repository_metadata(resolved, base):
         return None
     if user_named:
         return resolved
@@ -344,7 +362,10 @@ def collect_docs(
     if docs_args is not None and len(docs_args) == 0:
         search_root = source.discovery_root if source else cwd
         found = [search_root / c for c in DISCOVERY_CANDIDATES if (search_root / c).is_file()]
-        kept_docs = [p for p in found if offer(p, base=search_root) is not None]
+        kept_docs = [
+            allowed for allowed in (offer(p, base=search_root) for p in found)
+            if allowed is not None
+        ]
         if not kept_docs and source is None:
             refused = " (" + ", ".join(c.name for c in found) + " refused)" if found else ""
             print(

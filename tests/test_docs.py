@@ -292,6 +292,44 @@ def test_a_git_symlinked_to_an_external_gitdir_is_still_metadata(tmp_path, monke
     assert "rules" in out
 
 
+def test_a_doc_symlinked_into_an_external_gitdir_is_still_metadata(tmp_path, monkeypatch):
+    # Neither spelling carries a .git component here: the doc is `cfg.md` and it resolves
+    # to /elsewhere/config. What gives it away is where it lands — inside the checkout's
+    # own .git, whatever that directory is called.
+    gitdir = tmp_path / "elsewhere"
+    gitdir.mkdir()
+    (gitdir / "config").write_text(f'[remote "o"]\n\turl = https://x:{SECRET}@h/r.git\n')
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").symlink_to(gitdir)
+    (repo / "cfg.md").symlink_to(gitdir / "config")
+    (repo / "real.md").write_text("real standards\n")
+    monkeypatch.chdir(repo)
+    with pytest.raises(SystemExit):
+        collect_docs(["cfg.md"], None)
+    # And nothing beside it is caught up in that.
+    assert "real standards" in collect_docs(["real.md"], None)
+
+
+def test_discovery_reads_a_symlinked_doc_from_where_it_really_is(tmp_path, monkeypatch):
+    # The same rule the named route follows: a discovered doc that is a symlink has its
+    # links judged from the file's own directory, not the symlink's.
+    repo = repo_with_a_local_secret(tmp_path)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "std.md").write_text("# std\nrules\n[note](notes.md)\n")
+    (repo / "docs" / "notes.md").write_text("NOTES BESIDE THE REAL DOC\n")
+    (repo / "notes.md").write_text("NOTES BESIDE THE SYMLINK\n")
+    (repo / "llms.txt").unlink()
+    (repo / "llms.txt").symlink_to("docs/std.md")
+    carry(repo, "docs/std.md", "docs/notes.md", "notes.md", "llms.txt")
+    monkeypatch.chdir(repo)
+    named = collect_docs(["llms.txt"], None)
+    discovered = collect_docs([], None, source=config_source(repo))
+    assert "NOTES BESIDE THE REAL DOC" in discovered
+    assert "NOTES BESIDE THE SYMLINK" not in discovered
+    assert ("NOTES BESIDE THE REAL DOC" in named) == ("NOTES BESIDE THE REAL DOC" in discovered)
+
+
 def test_a_tracked_doc_is_found_through_a_case_variant_link_where_the_filesystem_folds(
     tmp_path, monkeypatch
 ):
