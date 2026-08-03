@@ -328,11 +328,12 @@ def _discover(cmd: list[str], input_text: str | None = None) -> subprocess.Compl
             cmd, input=input_text, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=SUBPROCESS_TIMEOUT,
         )
-    except subprocess.TimeoutExpired:
-        print("Note: could not determine changed paths.", file=sys.stderr)
-        return None
-    except (FileNotFoundError, OSError):
-        print("Note: could not determine changed paths.", file=sys.stderr)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(
+            "Note: could not determine changed paths"
+            f" ({type(exc).__name__}).",
+            file=sys.stderr,
+        )
         return None
 
 
@@ -408,7 +409,7 @@ def changed_paths_from_patch(patch: str) -> list[str]:
     for record in result.stdout.split("\0"):
         if not record:
             continue
-        fields = record.split("\t")
+        fields = record.split("\t", 2)
         if len(fields) < 3:
             continue
         path = fields[2]
