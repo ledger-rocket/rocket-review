@@ -376,7 +376,7 @@ def test_a_case_variant_is_refused_where_the_filesystem_does_not_fold(
     (repo / "README.md").write_text("the readme rules\n")
     (repo / "llms.txt").write_text("# llms\nstandards\n[r](README.MD)\n")
     carry(repo, "README.md", "llms.txt")
-    monkeypatch.setattr("rocket_review.cli.case_folds", lambda root: False)
+    monkeypatch.setattr("rocket_review.repo.case_folds", lambda root: False)
     cli.tracked_files.cache_clear()
     monkeypatch.chdir(repo)
     out = collect_docs([], None, source=config_source(repo))
