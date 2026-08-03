@@ -19,7 +19,9 @@ def available(name: str) -> bool:
 
     Stricter than missing_binary for api, which ships no binary at all: its readiness is
     a resolvable API key (environment or .env, found exactly the way the backend itself
-    finds it), so an automatic choice never lands on an api call that is certain to fail.
+    finds it), so an automatic choice never lands on an api call certain to fail for lack
+    of a key. The OpenAI SDK is not checked here — its absence surfaces at call time with
+    its own install instructions.
     """
     if missing_binary(name):
         return False

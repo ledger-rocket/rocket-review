@@ -229,6 +229,18 @@ def test_model_flag_applies_to_the_mode_default(monkeypatch, tmp_path):
     assert "codex" not in jobs
 
 
+def test_api_alias_conflicts_with_an_explicit_backend(monkeypatch, tmp_path, capsys):
+    # --api is shorthand for one backend, so pairing it with any explicit --backend is a
+    # contradiction and is refused — including --backend codex, which neither wins nor is
+    # silently discarded.
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, "codex", "claude")
+    assert run_cli(monkeypatch, ["--diff", "--api", "--backend", "codex"]) == 1
+    assert "--api conflicts with --backend" in capsys.readouterr().err
+    assert ran == []
+
+
 def test_api_alias_still_overrides_the_mode_default(monkeypatch, tmp_path):
     _mode_sources(tmp_path, monkeypatch)
     ran = _record_backends(monkeypatch)
@@ -251,7 +263,7 @@ def test_missing_default_falls_back_loudly(
     assert run_main(monkeypatch, argv) == 0
     assert ran == [(chosen, mode)]
     notice = FALLBACK_NOTICE.format(default=default, mode=mode, chosen=chosen)
-    assert notice in capsys.readouterr().err
+    assert capsys.readouterr().err.count(notice) == 1  # announced once, not per attempt
 
 
 def test_fallback_reaches_api_only_when_a_key_is_configured(monkeypatch, tmp_path, capsys):
@@ -262,7 +274,22 @@ def test_fallback_reaches_api_only_when_a_key_is_configured(monkeypatch, tmp_pat
     assert run_main(monkeypatch, ["--diff"]) == 0
     assert ran == [("api", "diff")]
     notice = FALLBACK_NOTICE.format(default="claude", mode="diff", chosen="api")
-    assert notice in capsys.readouterr().err
+    assert capsys.readouterr().err.count(notice) == 1
+
+
+def test_fallback_notice_names_the_model_that_rides_along(monkeypatch, tmp_path, capsys):
+    # --model follows the substituted backend, where a model from the absent vendor fails
+    # at the backend, so the notice has to say what will actually run.
+    _mode_sources(tmp_path, monkeypatch)
+    ran = _record_backends(monkeypatch)
+    _installed(monkeypatch, "codex")
+    assert run_main(monkeypatch, ["--diff", "--model", "claude-opus-4-8"]) == 0
+    assert ran == [("codex", "diff")]
+    notice = (
+        "Note: default backend 'claude' for diff review is unavailable; using 'codex' "
+        "with --model claude-opus-4-8. Pass --backend to choose explicitly and silence this."
+    )
+    assert capsys.readouterr().err.count(notice) == 1
 
 
 def test_no_fallback_notice_when_the_backend_is_explicit(monkeypatch, tmp_path, capsys):

@@ -286,11 +286,14 @@ def detect_mode(paths: list[str]) -> str:
     return "code"
 
 
-def resolve_default_backend(mode: str) -> str:
+def resolve_default_backend(mode: str, model: str | None) -> str:
     """The mode's default backend, or an available stand-in — announced, never silent.
 
     Returns the unavailable default when nothing else is available either, so the caller's
     missing-backend error names the backend the mode actually asked for.
+
+    A --model rides along to whichever backend is substituted, where a model name from the
+    absent vendor fails at the backend, so the notice names it as part of what will run.
     """
     default = DEFAULT_BACKEND_BY_MODE[mode]
     if available(default):
@@ -298,9 +301,11 @@ def resolve_default_backend(mode: str) -> str:
     for candidate in FALLBACK_ORDER:
         if candidate == default or not available(candidate):
             continue
+        with_model = f" with --model {model}" if model else ""
         print(
             f"Note: default backend '{default}' for {mode} review is unavailable; "
-            f"using '{candidate}'. Pass --backend to choose explicitly and silence this.",
+            f"using '{candidate}'{with_model}. "
+            f"Pass --backend to choose explicitly and silence this.",
             file=sys.stderr,
         )
         return candidate
@@ -404,6 +409,7 @@ def _run():
             "  rr --diff --backend codex,claude       # cross-model review, one pass per backend\n"
             "  rr src/auth.py --docs                  # review a file against project standards\n"
             "  git diff | rr                          # review a diff piped on stdin\n"
+            "  rr --version                           # print the installed version\n"
         ),
     )
     parser.add_argument("files", nargs="*", help="Files to review")
@@ -542,7 +548,7 @@ def _run():
         mode = args.mode
 
     if specs is None:
-        specs = parse_backend_arg(resolve_default_backend(mode), args.model)
+        specs = parse_backend_arg(resolve_default_backend(mode, args.model), args.model)
 
     if args.effort and any(name == "opencode" for name, _ in specs):
         # opencode has no reasoning-effort flag; drop nothing silently.
