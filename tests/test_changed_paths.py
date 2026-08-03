@@ -186,6 +186,30 @@ def test_a_merge_commit_lists_what_its_combined_diff_shows(tmp_path, monkeypatch
     assert job.changed_paths == ["shared.py"]
 
 
+def test_a_merge_that_resolved_nothing_reports_nothing(tmp_path, monkeypatch):
+    repo = new_repo(tmp_path)
+    (repo / "base.py").write_text("a\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "init")
+    git(repo, "checkout", "-qb", "side")
+    (repo / "side_only.py").write_text("s\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "side")
+    git(repo, "checkout", "-q", "-")
+    (repo / "main_only.py").write_text("m\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "main")
+    git(repo, "merge", "-q", "--no-ff", "side", "-m", "merge")
+    monkeypatch.chdir(repo)
+
+    job = run_with_backend(monkeypatch, ["--commit", "HEAD"])
+
+    # `git show` prints this merge's message and no diff — it settled nothing its parents
+    # had not already settled. Reporting the files either branch touched would name paths
+    # the review is never shown. The empty list and the empty diff are the same statement.
+    assert job.changed_paths == []
+
+
 def test_working_tree_paths_are_read_after_the_diff_they_describe(tmp_path, monkeypatch):
     from rocket_review import cli
 
@@ -362,6 +386,22 @@ def test_a_binary_change_is_a_changed_path(monkeypatch):
     # A binary file's change carries no hunk and no "+++" line at all — it is announced in
     # one prose sentence. It is still a file this review touches.
     assert job.changed_paths == ["src/a.py", "src/blob.bin"]
+
+
+BACKSLASH_NAME_PATCH = (
+    'diff --git "a/weird\\\\" "b/weird\\\\"\n'
+    '--- "a/weird\\\\"\n'
+    '+++ "b/weird\\\\"\n'
+    "@@ -1 +1 @@\n-x\n+y\n"
+)
+
+
+def test_a_backslash_terminated_name_is_still_a_changed_path(monkeypatch):
+    job = run_with_backend(monkeypatch, [], stdin_text=BACKSLASH_NAME_PATCH)
+
+    # The closing quote of a C-quoted name is preceded by the escaped backslash that ends
+    # the name itself. Finding the wrong terminator loses the file entirely.
+    assert job.changed_paths == ["weird\\"]
 
 
 TAB_IN_NAME_PATCH = (
