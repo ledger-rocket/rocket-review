@@ -323,9 +323,10 @@ def run_one(
         job = replace(job, content=commit_content, commit=None)
     try:
         raw = BACKENDS[name].review(job)
-        # Central fail-closed check: the CLI backends already reject empty output, but
-        # the API backend can return a blank string. An empty error would also read as
-        # success under the downstream truthiness checks, so never emit one.
+        # Central fail-closed check, defence in depth: all four shipped backends already
+        # reject blank output before returning, so this only catches a future or
+        # misbehaving one. Blank raw would read as success under the downstream truthiness
+        # checks, so it must never get past here.
         if not isinstance(raw, str) or not raw.strip():
             raise BackendError(f"{name} produced no review output")
         return name, model, raw, None
