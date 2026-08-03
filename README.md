@@ -257,12 +257,18 @@ Anything else is an error, named rather than ignored: an unknown key or mode, a 
 TOML (reported with the file and the parse position). Config is validated before any git,
 `gh`, or backend work starts.
 
-`--no-config` ignores both files — for hermetic CI runs, and for when you suspect a
-config file of causing what you are seeing. It is also the way out of a `json = true`,
+`--no-config` ignores both files. It is also the way out of a `json = true`,
 `full = true`, or `docs` you don't want on this run: `rr` has no `--no-json`-style
 inverse flags, so a lower layer can only be turned off by a higher config file
 (`json = false` in the project file) or by `--no-config`. Flags always win where they
 can say anything at all.
+
+**In a gated CI job, pass `--no-config` (or at least an explicit `--backend`).** The
+config a job picks up comes from the branch under test, which on a fork's PR is the
+contributor's: `[backends]`/`[models]` decide *which model reviews the code*, so a
+config change alone can downgrade the reviewer your gate depends on. `--fail-on` is the
+one direction that is safe either way — a file can only tighten a gate the job did not
+set, never loosen the one it did, since your flag outranks it.
 
 `docs = true` means "use this project's standards doc if it has one": unlike a typed
 `--docs`, a project with no `llms.txt` / `AGENTS.md` / `CLAUDE.md` is not an error, it

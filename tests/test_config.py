@@ -394,10 +394,15 @@ def test_a_project_config_may_not_name_docs_outside_itself(tmp_path):
     assert "may only name docs inside its own directory" in message
 
 
-def test_a_project_config_may_not_name_docs_inside_dot_git(tmp_path):
+@pytest.mark.parametrize(
+    "item", [".git/config", ".GIT/config", "./.Git/config", "src/../.GIT/config"]
+)
+def test_a_project_config_may_not_name_docs_inside_dot_git(tmp_path, item):
     # Inside the repo but not of it: .git holds local state a clone does not control, and a
-    # named doc is copied into the prompt verbatim.
-    path = write(tmp_path / "repo", "docs = ['.git/config']\n")
+    # named doc is copied into the prompt verbatim. Compared case-insensitively because
+    # resolve() does not canonicalise case, and on a case-insensitive filesystem '.GIT'
+    # opens the real .git.
+    path = write(tmp_path / "repo", f"docs = ['{item}']\n")
     assert "is inside .git" in error_from(path, confine_docs=True)
 
 
@@ -581,6 +586,19 @@ def test_config_effort_with_opencode_errors_and_names_the_file(monkeypatch, tmp_
     assert jobs == {}
 
 
+def test_the_substitution_notice_names_the_config_that_chose_the_backend(
+    monkeypatch, tmp_path, capsys
+):
+    run_from = make_repo(tmp_path, "[backends]\ndefault = 'claude'\n")
+    monkeypatch.chdir(run_from)
+    fake_backends(monkeypatch)
+    monkeypatch.setattr("rocket_review.cli.available", lambda name: name == "codex")
+    assert run_main(monkeypatch, ["--diff"]) == 0
+    err = capsys.readouterr().err
+    assert "default backend 'claude' for diff review is unavailable; using 'codex'" in err
+    assert f"the diff backend is set in {run_from / config.PROJECT_CONFIG_NAME}" in err
+
+
 def test_a_flag_conflict_the_user_typed_names_no_file(monkeypatch, tmp_path, capsys):
     monkeypatch.chdir(make_repo(tmp_path))
     fake_backends(monkeypatch)
@@ -671,6 +689,50 @@ def test_backends_default_applies_to_every_mode(monkeypatch, tmp_path):
     assert run_main(monkeypatch, ["plan.md"]) == 0
     assert list(jobs) == ["opencode"]
     assert jobs["opencode"].mode == "plan"  # the second run, over the plan default too
+
+
+SECRET = "SECRET-ghp-DEADBEEF"
+
+
+def repo_with_a_credentialed_remote(tmp_path, body):
+    """A repo whose .git/config holds a secret, plus the project config under test."""
+    run_from = make_repo(tmp_path, body)
+    (run_from / ".git" / "config").write_text(
+        f'[remote "origin"]\n\turl = https://x-token:{SECRET}@github.com/acme/private.git\n'
+    )
+    return run_from
+
+
+@pytest.mark.parametrize("item", [".git/config", ".GIT/config", "./.Git/config"])
+def test_a_repo_config_cannot_get_git_metadata_into_the_payload(monkeypatch, tmp_path, item):
+    # The end-to-end form of the confinement: whatever the config names, the secret in
+    # .git/config must never reach what a backend is handed.
+    monkeypatch.chdir(repo_with_a_credentialed_remote(tmp_path, f"docs = ['{item}']\n"))
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 1
+    assert jobs == {}
+
+
+def test_a_repo_standards_doc_cannot_link_git_metadata_into_the_payload(monkeypatch, tmp_path):
+    # One markdown hop out of a committed doc: the doc is read, the link into .git is not.
+    run_from = repo_with_a_credentialed_remote(tmp_path, "docs = true\n")
+    (run_from / "llms.txt").write_text("# llms\nno bare excepts\n[cfg](.GIT/config)\n")
+    monkeypatch.chdir(run_from)
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 0
+    assert SECRET not in jobs["claude"].docs_content
+    assert "no bare excepts" in jobs["claude"].docs_content
+
+
+def test_config_docs_true_discovers_beside_the_config_not_the_cwd(monkeypatch, tmp_path):
+    # A project standardising on `docs = true` applies to everyone who runs rr in it, not
+    # only to whoever happens to be standing at the repo root.
+    run_from = make_repo(tmp_path, "docs = true\n", subdir="src/deep")
+    (tmp_path / "repo" / "llms.txt").write_text("project standards: small diffs\n")
+    monkeypatch.chdir(run_from)
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 0
+    assert "small diffs" in jobs["claude"].docs_content
 
 
 def test_config_docs_true_is_silent_where_a_project_has_no_standards_doc(

@@ -117,11 +117,23 @@ def read_doc_with_links(doc_path: Path) -> str:
         link, _ = urldefrag(unquote(raw_link))
         if not link:
             continue
-        linked_path = (base_dir / link).resolve()
+        try:
+            linked_path = (base_dir / link).resolve()
+        except (OSError, ValueError):
+            print(f"Warning: skipping unusable link: {raw_link}", file=sys.stderr)
+            continue
         # Prevent path traversal outside the doc's directory. is_relative_to, not a
         # string-prefix check: /a/b-sibling must not pass as inside /a/b.
         if not linked_path.is_relative_to(base_dir):
             print(f"Warning: skipping link outside project: {raw_link}", file=sys.stderr)
+            continue
+        # A doc at the repo root has the whole repo inside its base_dir, .git included, and
+        # its links are followed and appended verbatim — so a committed standards doc could
+        # otherwise exfiltrate repository metadata in one hop. Checked here rather than only
+        # where config paths are validated: the same hop works from a --docs on the command
+        # line, where the user vouched for the doc and not for what it links to.
+        if config.inside_dot_git(linked_path):
+            print(f"Warning: skipping link into repository metadata: {raw_link}", file=sys.stderr)
             continue
         if linked_path.is_file():
             try:
@@ -137,20 +149,23 @@ DISCOVERY_CANDIDATES = ["llms.txt", "AGENTS.md", "CLAUDE.md"]
 
 
 def collect_docs(
-    docs_args: list[str] | None, llms_arg: str | None, *, discovery_required: bool = True
+    docs_args: list[str] | None, llms_arg: str | None, *, config_file: Path | None = None
 ) -> str | None:
     """Assemble standards context from --docs (explicit or auto-discovered) and --llms.
 
-    discovery_required is false when a config file rather than the flag asked for
-    auto-discovery: as a standing preference it means "use this project's standards doc if
-    it has one", so a project without one is not an error the way the typed flag is.
+    config_file names the config that supplied `docs`, when a file did rather than the flag.
+    Both differences follow from it being a standing preference rather than this run's
+    instruction: auto-discovery looks beside that file — the project's root, not wherever
+    the user happens to be standing — and a project with no standards doc is simply a
+    project without one, where the typed flag asked for something specific and errors.
     """
     paths: list[Path] = []
     if llms_arg:
         paths.append(Path(llms_arg))
     if docs_args is not None and len(docs_args) == 0:
-        found = [Path(c) for c in DISCOVERY_CANDIDATES if Path(c).is_file()]
-        if not found and discovery_required:
+        root = config_file.parent if config_file else Path.cwd()
+        found = [root / c for c in DISCOVERY_CANDIDATES if (root / c).is_file()]
+        if not found and config_file is None:
             print(
                 "Error: --docs given without paths and none of "
                 f"{', '.join(DISCOVERY_CANDIDATES)} found in the current directory.",
@@ -289,7 +304,9 @@ def detect_mode(paths: list[str]) -> str:
     return "code"
 
 
-def resolve_default_backend(default: str, mode: str, model: str | None, effort: str | None) -> str:
+def resolve_default_backend(
+    default: str, mode: str, model: str | None, effort: str | None, *, origin: str = "",
+) -> str:
     """The mode's default backend, or an available stand-in — announced, never silent.
 
     Returns the unavailable default when nothing else is available either, so the caller's
@@ -311,17 +328,21 @@ def resolve_default_backend(default: str, mode: str, model: str | None, effort: 
         print(
             f"Note: default backend '{default}' for {mode} review is unavailable; "
             f"using '{candidate}'{with_model}. "
-            f"Pass --backend to choose explicitly and silence this.",
+            f"Pass --backend to choose explicitly and silence this.{origin}",
             file=sys.stderr,
         )
         return candidate
     return default
 
 
-def where_set(settings: config.Settings, key: str) -> str:
-    """Name the config file a value came from, for an error the user typed no flag for."""
+def where_set(settings: config.Settings, key: str, label: str | None = None) -> str:
+    """Name the config file a value came from, for a message the user typed no flag for.
+
+    A label carries keys whose spelling in the file may differ from the setting they
+    settled — `backends.default` names a mode's backend just as `backends.diff` does.
+    """
     origin = settings.from_file(key)
-    return f" ({key} is set in {origin})" if origin else ""
+    return f" ({label or key} is set in {origin})" if origin else ""
 
 
 def stdin_has_input() -> bool:
@@ -585,7 +606,8 @@ def _run():
 
     if specs is None:
         default_backend = resolve_default_backend(
-            settings.backends[mode], mode, args.model, settings.effort
+            settings.backends[mode], mode, args.model, settings.effort,
+            origin=where_set(settings, f"backends.{mode}", f"the {mode} backend"),
         )
         specs = parse_backend_arg(default_backend, args.model)
 
@@ -652,8 +674,9 @@ def _run():
             sys.exit(1)
 
     # Read project standards docs
+    docs_origin = settings.from_file("docs")
     docs_content = collect_docs(
-        settings.docs, args.llms, discovery_required=settings.from_file("docs") is None
+        settings.docs, args.llms, config_file=Path(docs_origin) if docs_origin else None
     )
 
     # Per-backend model is injected by run_one; the template leaves it unset.

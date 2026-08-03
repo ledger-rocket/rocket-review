@@ -73,14 +73,27 @@ class Settings:
     backends: dict[str, str]
     #: backend name -> model, i.e. what `--backend name:model` pins.
     models: dict[str, str]
-    #: one entry per flag-mirroring key above, naming the layer its value came from, so an
-    #: error about a value nobody typed can name the file responsible.
+    #: one entry per flag-mirroring key above, plus `backends.<mode>` for the mode's chosen
+    #: backend, naming the layer each came from — so a message about a value nobody typed
+    #: can name the file responsible.
     sources: dict[str, str]
 
     def from_file(self, key: str) -> str | None:
         """The config file that set `key`, or None when a flag or the built-in default did."""
         source = self.sources[key]
         return None if source in (COMMAND_LINE, BUILT_IN) else source
+
+
+def inside_dot_git(path: Path) -> bool:
+    """Whether a path enters a .git directory, compared case-insensitively.
+
+    Path.resolve() does not canonicalise case, so an exact ".git" comparison is bypassed by
+    ".GIT/config" on the case-insensitive filesystems macOS and Windows default to — where
+    the file that then opens is the real one. Repository metadata is never a standards doc:
+    it is local machine state a clone does not control, credentialed remote URLs above all,
+    and a doc is copied into the prompt verbatim.
+    """
+    return any(part.lower() == ".git" for part in path.parts)
 
 
 def user_config_path() -> Path:
@@ -165,16 +178,16 @@ def resolve(cli: dict[str, Any], layers: list[Layer]) -> Settings:
     if values["docs"] is False:
         values["docs"] = None
 
-    tables = [layer_values.get("backends") or {} for _, layer_values in stack]
     backends = {}
     for mode in MODES:
         # Within one file the named mode outranks that file's `default`; between files the
         # higher layer wins outright, so a project file's `default` settles a mode a user
         # file names — the same order every other key follows.
-        backends[mode] = DEFAULT_BACKEND_BY_MODE[mode]
-        for table in tables:
+        backends[mode], sources[f"backends.{mode}"] = DEFAULT_BACKEND_BY_MODE[mode], BUILT_IN
+        for origin, layer_values in stack:
+            table = layer_values.get("backends") or {}
             if chosen := table.get(mode) or table.get("default"):
-                backends[mode] = chosen
+                backends[mode], sources[f"backends.{mode}"] = chosen, origin
                 break
 
     models: dict[str, str] = {}
@@ -286,10 +299,7 @@ def _docs(path: Path, value: Any, *, confine: bool) -> list[str] | bool:
                     f"{path}: docs path {item!r} resolves outside {root} — a project config "
                     "may only name docs inside its own directory."
                 )
-            if ".git" in doc.relative_to(root).parts:
-                # Inside the repo but not of it: .git holds local machine state a clone does
-                # not control — credentialed remote URLs above all — and a named doc is
-                # copied into the prompt verbatim, so this would be a guaranteed leak.
+            if inside_dot_git(doc):
                 raise ConfigError(
                     f"{path}: docs path {item!r} is inside .git — a project config may not "
                     "name repository metadata."

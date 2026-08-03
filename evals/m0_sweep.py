@@ -1,8 +1,9 @@
 """Measure how often backends really produce `REVIEW_SCHEMA`-compliant `--json` output.
 
-Runs `rr --commit <sha> --backend <name>:<model> --json --full` repeatedly across a set of
-commits and backends, stores one JSONL record per run under `evals/results/`, and prints
-per-backend counts of valid / schema_violation / decode_failure / backend_error.
+Runs `rr --commit <sha> --backend <name>:<model> --json --full --no-config` repeatedly
+across a set of commits and backends, stores one JSONL record per run under
+`evals/results/`, and prints per-backend counts of valid / schema_violation /
+decode_failure / backend_error.
 
 Every run is a real backend review and costs real tokens, so this is a deliberate,
 manual, offline measurement — never a CI gate. See evals/README.md.
