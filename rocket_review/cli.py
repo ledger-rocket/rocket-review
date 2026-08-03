@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -21,6 +22,7 @@ from rocket_review.models import (
     to_envelope,
 )
 from rocket_review.repo import (
+    SUBPROCESS_TIMEOUT,
     case_folds as case_folds,
     resolve_doc_path,
     resolve_doc_paths,
@@ -310,6 +312,172 @@ def ensure_diff_exists(staged: bool) -> None:
     if result.returncode != 1:
         print(f"Error: {' '.join(cmd)} failed: {result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
+
+
+def _discover(cmd: list[str], input_text: str | None = None) -> subprocess.CompletedProcess | None:
+    """Run one path-discovery call so it can never end a review.
+
+    run_capture exits on a machine that cannot answer — a missing binary, a timeout, an
+    OSError. Discovery is decoration on a review that is otherwise fine, so it returns what
+    run_capture must not: None on any of those, with one note on stderr. A command that ran
+    and failed (non-zero, i.e. text that is not a patch) is not a broken machine; it comes
+    back whole and the caller turns it into a silent empty list.
+    """
+    try:
+        return subprocess.run(
+            cmd, input=input_text, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=SUBPROCESS_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"Note: could not determine changed paths ({type(exc).__name__}).",
+              file=sys.stderr)
+        return None
+
+
+def git_diff_changed_paths(staged: bool) -> list[str]:
+    """The paths `git diff` (with this source's own ref) touches, or [] when it cannot say.
+
+    `--name-only -z` is NUL-separated and never C-quotes, so a path carrying a space, a
+    quote or a control character arrives whole rather than as git's rendering of it. A name
+    that is not valid UTF-8 is still lossy: the decoder replaces what it cannot read, here
+    as everywhere else rr reads a subprocess. A non-zero exit — no repository, no HEAD —
+    yields no paths and no error; the review's own git calls are the ones that must fail
+    loudly.
+    """
+    # Two diff settings silently change what this call reports, so both are pinned here and
+    # discovery answers the same way in every checkout: diff.relative would root the paths
+    # at wherever the user stands and drop everything outside it, and diff.renames decides
+    # whether a rename is one path or two. diff-tree ignores both, so only this call pins.
+    cmd = ["git", "-c", "diff.relative=false", "-c", "diff.renames=false",
+           "diff", "--name-only", "-z"]
+    cmd.append("--staged" if staged else "HEAD")
+    result = _discover(cmd)
+    if result is None or result.returncode != 0:
+        return []
+    return [p for p in result.stdout.split("\0") if p]
+
+
+def commit_changed_paths(oid: str) -> list[str]:
+    """The paths a commit touches, or [] on failure.
+
+    `--root` is what makes a root commit yield its files instead of nothing; `--cc` names
+    the same combined diff `git show` puts in front of the review. `-z` keeps the names
+    unquoted, exactly as with git_diff_changed_paths.
+    """
+    result = _discover(
+        ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", "--cc", "-z", oid]
+    )
+    if result is None or result.returncode != 0:
+        return []
+    return [p for p in result.stdout.split("\0") if p]
+
+
+def patch_prefix(patch: str) -> int:
+    """How many leading components `git apply --numstat` must strip: -p1 for a patch that
+    carries the standard `a/`/`b/` prefixes, -p0 for one written with --no-prefix.
+
+    Which form a patch uses is decided from a header that carries a real name — never
+    /dev/null, which names no file and cannot say. Prefer a `diff --git ` line; fall back to
+    the first `--- ` line that is not /dev/null (`a/` means -p1), then the first `+++ ` line
+    that is not /dev/null (`b/` means -p1). On the diff --git line, `a/` at the front is only
+    a prefix when `b/` answers it on the other side of the same line — a project with a
+    top-level `a/` directory writes the same first component under --no-prefix. Getting this
+    wrong renames a file to the one a directory up, silently.
+    """
+    for line in patch.splitlines():
+        if line.startswith("diff --git "):
+            rest = line[len("diff --git "):]
+            first = rest.split(" ", 1)[0]
+            if (first.startswith("a/") or first.startswith('"a/')) and (
+                " b/" in rest or ' "b/' in rest
+            ):
+                return 1
+            return 0
+    for line in patch.splitlines():
+        if line.startswith("--- ") and not line.startswith("--- /dev/null"):
+            return 1 if line[len("--- "):].startswith("a/") else 0
+    for line in patch.splitlines():
+        if line.startswith("+++ ") and not line.startswith("+++ /dev/null"):
+            return 1 if line[len("+++ "):].startswith("b/") else 0
+    return 1
+
+
+def changed_paths_from_combined(patch: str) -> list[str]:
+    """The files a combined diff (a merge's) lists, or [] when it carries none.
+
+    A combined diff is not a patch anything can apply, so numstat refuses it and falls back
+    here. Only a `diff --cc `/`diff --combined ` line at column 0 names a file, because every
+    line of a combined diff's body carries one prefix column per parent — a header spelling
+    can never reach column 0 from inside a hunk. A name git C-quoted in that header (the
+    value opens with `\"`) is skipped: decoding it means re-implementing git's quoting, and
+    a missing path is better than an invented one.
+    """
+    paths: list[str] = []
+    seen: set[str] = set()
+    for line in patch.splitlines():
+        if line.startswith("diff --cc "):
+            name = line[len("diff --cc "):].strip()
+        elif line.startswith("diff --combined "):
+            name = line[len("diff --combined "):].strip()
+        else:
+            continue
+        if not name or name.startswith('"'):
+            continue
+        if name not in seen:
+            seen.add(name)
+            paths.append(name)
+    return paths
+
+
+def changed_paths_from_patch(patch: str) -> list[str]:
+    """The paths a patch text touches, deduplicated, in the order it reports them.
+
+    The patch is parsed by git itself: `git apply --numstat` understands every header a
+    patch can carry — binary changes (counts `-`/`-`), renames (reported as their
+    destination, once), quoted paths, header-shaped lines inside a hunk. The `-z` output is
+    one NUL-terminated record per file, `added\\tdeleted\\tpath`, the path verbatim and never
+    quoted — which is why it is split on two tabs and not on every one: the path may carry
+    tabs of its own.
+
+    The parse is all or nothing, because git's is: anything it refuses — text that is no
+    patch at all, or one header it cannot read inside an otherwise good patch — costs every
+    path in that text, not only the entry that failed. A combined diff is the one refusal
+    with a second chance, below.
+
+    `--numstat` only parses. The patch is untrusted text — a fork's pull request, a pipe
+    from anywhere — so nothing here may reach a form of `git apply` that writes.
+    """
+    # git refuses a patch that does not end in a newline ("corrupt patch"); the two sources
+    # strip trailing whitespace when they read, so restore the terminator before parsing.
+    if not patch.endswith("\n"):
+        patch += "\n"
+    # --whitespace=nowarn is pinned here: a user's apply.whitespace=error would make git
+    # report the records and *then* exit non-zero, so a patch that adds trailing whitespace
+    # would silently name nothing. Reading a patch is not the place to hold an opinion about
+    # its hygiene.
+    result = _discover(
+        ["git", "apply", "--numstat", "-z", "--whitespace=nowarn",
+         f"-p{patch_prefix(patch)}", "-"],
+        input_text=patch,
+    )
+    if result is None or result.returncode != 0:
+        # numstat is the parser for every ordinary patch; only when it refuses does the
+        # patch get a second chance from its own combined headers. A combined diff cannot be
+        # applied, so this is the one input numstat cannot represent.
+        return changed_paths_from_combined(patch)
+    paths: list[str] = []
+    seen: set[str] = set()
+    for record in result.stdout.split("\0"):
+        if not record:
+            continue
+        fields = record.split("\t", 2)
+        if len(fields) < 3:
+            continue
+        path = fields[2]
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return paths
 
 
 def resolve_commit(rev: str) -> str:
@@ -740,21 +908,31 @@ def _run():
     commit_content: str | None = None
     git_cmd: str | None = None
     commit_oid: str | None = None
+    changed_paths: list[str] = []
     if args.pr:
         pr_description, diff = get_pr_content(args.pr, repo=args.repo)
         content = f"=== PULL REQUEST ===\n{pr_description}\n=== END PULL REQUEST ===\n\n{diff}"
+        # The patch is what is under review; a PR body quoting a patch is prose, not it.
+        changed_paths = changed_paths_from_patch(diff)
     elif args.commit:
         commit_oid = resolve_commit(args.commit)
+        changed_paths = commit_changed_paths(commit_oid)
         if needs_content:
             commit_content = get_commit_diff(commit_oid)  # for api/opencode
     elif args.diff or args.staged:
+        # One call on the same ref the review itself uses, shared by both branches, so the
+        # agentic (preflight-only) and materialized (api/opencode) sources agree. The paths
+        # are read after the diff they describe: a working tree moves under a review that is
+        # only ever a snapshot of it, and adjacency is the whole of the fix.
         if needs_content:
             content = get_diff(args.staged)  # one snapshot for every backend
         else:
             ensure_diff_exists(args.staged)
             git_cmd = "git diff --staged" if args.staged else "git diff HEAD"
+        changed_paths = git_diff_changed_paths(args.staged)
     elif args.files:
         content = read_files(args.files)
+        changed_paths = list(dict.fromkeys(args.files))
     else:
         # Piped diffs can carry non-UTF8 bytes (files in other encodings); decode
         # with replacement instead of crashing mid-pipe.
@@ -766,6 +944,7 @@ def _run():
         if not content:
             print("Error: empty input from stdin.", file=sys.stderr)
             sys.exit(1)
+        changed_paths = changed_paths_from_patch(content)
 
     # Read project standards docs
     docs_content = collect_docs(settings.docs, args.llms, source=docs_source(settings, layers))
@@ -784,6 +963,7 @@ def _run():
         effort=settings.effort,
         timeout=settings.timeout,
         foreign_repo=bool(args.repo),
+        changed_paths=changed_paths,
     )
 
     base.begin_fanout()
