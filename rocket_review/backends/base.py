@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # Grace period between SIGTERM and SIGKILL when tearing a backend down on Ctrl-C.
@@ -111,6 +111,12 @@ class ReviewJob:
     #: the trust question is "does the repository that wrote this text carry the file", and
     #: for a foreign repository there is no way to ask it from here.
     foreign_repo: bool = False
+    # Repo-relative paths this review touches, in the order git or the patch reports
+    # them, deduplicated, no empty strings. Carried to every backend, read by none
+    # yet: a later change will select prompt content from the languages a review
+    # actually touches, and this is only the data that change needs. Never shared
+    # between jobs (default_factory, not a bare list literal).
+    changed_paths: list[str] = field(default_factory=list)
 
 
 def format_duration(seconds: int) -> str:

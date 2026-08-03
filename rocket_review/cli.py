@@ -312,6 +312,113 @@ def ensure_diff_exists(staged: bool) -> None:
         sys.exit(1)
 
 
+def git_diff_changed_paths(staged: bool) -> list[str]:
+    """The paths `git diff` (with this source's own ref) touches, or [] on failure.
+
+    `--name-only -z` is NUL-separated and never C-quotes, so a path carrying a space, a
+    non-ascii byte, a quote or a control character arrives as the path it is. A non-zero
+    exit — a repo the review itself could read — is an empty list, never a new failure.
+    """
+    cmd = ["git", "diff", "--name-only", "-z"]
+    cmd.append("--staged" if staged else "HEAD")
+    result = run_capture(cmd)
+    if result.returncode != 0:
+        return []
+    return [p for p in result.stdout.split("\0") if p]
+
+
+def commit_changed_paths(oid: str) -> list[str]:
+    """The paths a commit touches, or [] on failure.
+
+    `--root` is what makes a root commit yield its files instead of nothing; `-z` keeps
+    the names unquoted, exactly as with git_diff_changed_paths.
+    """
+    result = run_capture(
+        ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", "-z", oid]
+    )
+    if result.returncode != 0:
+        return []
+    return [p for p in result.stdout.split("\0") if p]
+
+
+def unquote_git_path(value: str) -> str:
+    """Undo git's C-style quoting of one path value, decoding octal bytes as UTF-8.
+
+    Git quotes a path carrying a quote, a non-ascii byte or a control character as a
+    backslash-quote, the single-letter escapes, and three-digit octal escapes. The octal
+    escapes are bytes of one UTF-8 sequence, so they are decoded together rather than one
+    replacement char each.
+    """
+    simple = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11,
+              "\\": 92, '"': 34, "'": 39}
+    data = bytearray()
+    i = 0
+    n = len(value)
+    while i < n:
+        c = value[i]
+        if c != "\\":
+            data.extend(c.encode("utf-8", "replace"))
+            i += 1
+            continue
+        i += 1
+        if i >= n:
+            break
+        nxt = value[i]
+        if nxt in simple:
+            data.append(simple[nxt])
+            i += 1
+        elif "0" <= nxt <= "7":
+            digits = ""
+            while i < n and len(digits) < 3 and "0" <= value[i] <= "7":
+                digits += value[i]
+                i += 1
+            data.append(int(digits, 8))
+        else:
+            data.extend(nxt.encode("utf-8", "replace"))
+            i += 1
+    return data.decode("utf-8", "replace")
+
+
+def changed_paths_from_patch(patch: str) -> list[str]:
+    """The paths a patch text touches, deduplicated, in the order it reports them.
+
+    A `+++ ` line names a file only when the line before it starts with `--- `: adding a
+    line that itself begins `++ ` renders as `+++ ` inside a hunk, and that is not a
+    header. From the header value, in order: drop a trailing `\r`; if it opens with `\"`
+    take the text to its closing `\"` and undo C-style quoting, otherwise cut it at the
+    first tab (git appends one after a path containing a space); drop `/dev/null`; strip
+    a leading `b/`; drop what is left if it is empty.
+    """
+    paths: list[str] = []
+    seen: set[str] = set()
+    prev = ""
+    for line in patch.splitlines():
+        if prev.startswith("--- ") and line.startswith("+++ "):
+            value = line[4:].rstrip("\r")
+            if value.startswith('"'):
+                end = 1
+                while end < len(value):
+                    if value[end] == '"' and value[end - 1] != "\\":
+                        break
+                    end += 1
+                if end >= len(value):
+                    prev = line
+                    continue
+                value = unquote_git_path(value[1:end])
+            else:
+                value = value.split("\t", 1)[0]
+            if value == "/dev/null":
+                prev = line
+                continue
+            if value.startswith("b/"):
+                value = value[2:]
+            if value and value not in seen:
+                seen.add(value)
+                paths.append(value)
+        prev = line
+    return paths
+
+
 def resolve_commit(rev: str) -> str:
     """Resolve a commit revision to its full object ID, failing closed on unknown input.
 
@@ -740,14 +847,21 @@ def _run():
     commit_content: str | None = None
     git_cmd: str | None = None
     commit_oid: str | None = None
+    changed_paths: list[str] = []
     if args.pr:
         pr_description, diff = get_pr_content(args.pr, repo=args.repo)
         content = f"=== PULL REQUEST ===\n{pr_description}\n=== END PULL REQUEST ===\n\n{diff}"
+        # The patch is what is under review; a PR body quoting a patch is prose, not it.
+        changed_paths = changed_paths_from_patch(diff)
     elif args.commit:
         commit_oid = resolve_commit(args.commit)
+        changed_paths = commit_changed_paths(commit_oid)
         if needs_content:
             commit_content = get_commit_diff(commit_oid)  # for api/opencode
     elif args.diff or args.staged:
+        # One call on the same ref the review itself uses, shared by both branches, so the
+        # agentic (preflight-only) and materialized (api/opencode) sources agree.
+        changed_paths = git_diff_changed_paths(args.staged)
         if needs_content:
             content = get_diff(args.staged)  # one snapshot for every backend
         else:
@@ -755,6 +869,7 @@ def _run():
             git_cmd = "git diff --staged" if args.staged else "git diff HEAD"
     elif args.files:
         content = read_files(args.files)
+        changed_paths = list(dict.fromkeys(args.files))
     else:
         # Piped diffs can carry non-UTF8 bytes (files in other encodings); decode
         # with replacement instead of crashing mid-pipe.
@@ -766,6 +881,7 @@ def _run():
         if not content:
             print("Error: empty input from stdin.", file=sys.stderr)
             sys.exit(1)
+        changed_paths = changed_paths_from_patch(content)
 
     # Read project standards docs
     docs_content = collect_docs(settings.docs, args.llms, source=docs_source(settings, layers))
@@ -784,6 +900,7 @@ def _run():
         effort=settings.effort,
         timeout=settings.timeout,
         foreign_repo=bool(args.repo),
+        changed_paths=changed_paths,
     )
 
     base.begin_fanout()
