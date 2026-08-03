@@ -216,6 +216,29 @@ def test_stdin_patch_keeps_spaced_and_quoted_paths_whole(monkeypatch):
     ]
 
 
+MALFORMED_QUOTED_PATCH = (
+    'diff --git "a/\\777bad.py" "b/\\777bad.py"\n'
+    '--- "a/\\777bad.py"\n'
+    '+++ "b/\\777bad.py"\n'
+    "@@ -1 +1 @@\n-x\n+y\n"
+    "diff --git a/src/fine.py b/src/fine.py\n"
+    "--- a/src/fine.py\n"
+    "+++ b/src/fine.py\n"
+    "@@ -1 +1 @@\n-x\n+y\n"
+)
+
+
+def test_an_unreadable_quoted_path_does_not_break_the_review(monkeypatch):
+    job = run_with_backend(monkeypatch, [], stdin_text=MALFORMED_QUOTED_PATCH)
+
+    # A patch is untrusted text — a fork's PR, a pipe from anywhere. An escape naming no
+    # byte is not a path, and it is not a crash either: the rest of the patch still
+    # reports, and every entry kept is a real, non-empty string.
+    assert "src/fine.py" in job.changed_paths
+    assert all(isinstance(p, str) and p for p in job.changed_paths)
+    assert len(job.changed_paths) <= 2
+
+
 HUNK_BODY_PATCH = """\
 diff --git a/src/real.py b/src/real.py
 --- a/src/real.py
