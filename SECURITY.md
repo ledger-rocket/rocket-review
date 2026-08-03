@@ -84,6 +84,14 @@ exfiltrating**:
 
   Read it as you would any tooling config a clone brings with it, or run with
   `--no-config`, which ignores both config files.
+- **Files the reviewed text names (`api` backend).** The `api` backend cannot navigate your
+  checkout, so it attaches files the text under review mentions — a path in the diff, in a
+  PR description, or in a standards doc's prose ("never commit `id.pem`"). That text is
+  repository content, so those paths pass the same rule the `docs` paths do: read only if
+  the repository tracks the file at `HEAD`, it resolves inside the checkout, and it is not
+  inside `.git`. Outside a git repository the directory confinement is what remains. The
+  agentic backends read the checkout themselves, which is a different trust model and one
+  you opt into by choosing them.
 - **Confused-deputy across checkouts.** `--repo <other>` reviews a PR from a *different*
   remote repository, but the agent still runs with read access to your **local current
   working directory**. Do not run it from inside an unrelated sensitive checkout — the
