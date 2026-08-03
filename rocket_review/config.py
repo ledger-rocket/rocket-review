@@ -13,6 +13,7 @@ from typing import Any
 
 from rocket_review.backends import BACKENDS
 from rocket_review.models import SEVERITIES
+from rocket_review.repo import find_git_root, inside_dot_git as inside_dot_git
 
 PROJECT_CONFIG_NAME = ".rocket-review.toml"
 USER_CONFIG_RELPATH = Path("rocket-review") / "config.toml"
@@ -87,19 +88,6 @@ class Settings:
         return None if source in (COMMAND_LINE, BUILT_IN) else source
 
 
-def inside_dot_git(path: Path) -> bool:
-    """Whether a path enters a .git directory, under the spellings that reach the same file.
-
-    Path.resolve() does not canonicalise case, so an exact ".git" comparison is bypassed by
-    ".GIT/config" on the case-insensitive filesystems macOS and Windows default to — where
-    the file that then opens is the real one. Win32 additionally strips trailing dots and
-    spaces while resolving, so ".git." and ".git " land there too. Repository metadata is
-    never a standards doc: it is local machine state a clone does not control, credentialed
-    remote URLs above all, and a doc is copied into the prompt verbatim.
-    """
-    return any(part.lower().rstrip(". ") == ".git" for part in path.parts)
-
-
 def user_config_path() -> Path | None:
     """The user-level config path, honouring XDG_CONFIG_HOME — or None when there is none.
 
@@ -115,16 +103,6 @@ def user_config_path() -> Path | None:
     except RuntimeError:
         return None
     return home / ".config" / USER_CONFIG_RELPATH
-
-
-def find_git_root(start: Path) -> Path | None:
-    """The checkout `start` is in, or None outside one.
-
-    A worktree's or submodule's .git is a file rather than a directory, hence exists()
-    over is_dir().
-    """
-    start = start.resolve()
-    return next((d for d in [start, *start.parents] if (d / ".git").exists()), None)
 
 
 def find_project_config(start: Path) -> Path | None:
