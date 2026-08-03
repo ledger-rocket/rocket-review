@@ -18,6 +18,32 @@ TIMEOUT = 900
 _active_procs: set[subprocess.Popen] = set()
 _active_lock = threading.Lock()
 
+# Refuses launches that have not happened yet. Tearing the running backends down is not
+# enough on its own: a worker that has been accepted but has not yet reached Popen() is
+# invisible to the teardown snapshot, so without this gate it would start a fresh backend
+# afterwards and the executor's non-daemon threads would hold the CLI open — still
+# billing — for that backend's full timeout.
+_interrupted = threading.Event()
+
+
+def begin_fanout() -> None:
+    """Arm a new fan-out. Must run before any backend is submitted.
+
+    The gate latches until cleared, so a run that ends in an interrupt would otherwise
+    make every later run in the same process fail before launch. main() runs once per
+    process, but tests and in-process embeddings call it repeatedly.
+    """
+    _interrupted.clear()
+
+
+def request_interrupt() -> None:
+    """Refuse any backend launch from here on. Set this before tearing down."""
+    _interrupted.set()
+
+
+def interrupted() -> bool:
+    return _interrupted.is_set()
+
 
 def _signal_process_group(proc: subprocess.Popen, sig: int) -> None:
     # start_new_session makes the child its own group leader, so its pid IS the group id.
@@ -95,19 +121,30 @@ def run_command(cmd: list[str], *, stdin: str | None = None, timeout: int = TIME
     # that itself spawns children (a CLI shelling out to a model runner) can be torn
     # down as a whole. Without it, a Ctrl-C leaves the group orphaned and running until
     # the timeout while the ThreadPoolExecutor blocks on communicate().
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE if stdin is not None else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            # errors="replace": backend output may quote non-UTF8 bytes from reviewed
-            # files; a stray byte must not turn a finished review into a decode crash.
-            text=True, encoding="utf-8", errors="replace",
-            start_new_session=True,
-        )
-    except FileNotFoundError:
-        raise BackendError(f"{cmd[0]} not found on PATH")
+    # Check the gate, launch, and register as one step under the lock that
+    # terminate_active_commands() snapshots under. What the pairing buys is exclusion
+    # against the snapshot, not against the gate: request_interrupt() takes no lock, so an
+    # interrupt can still be raised mid-section — the teardown that follows it just blocks
+    # here until registration lands, and so it still sees this process. Every launch is
+    # therefore either refused at the check or present in the snapshot. Split across two
+    # acquisitions, one could slip between the two and outlive the interrupt.
+    with _active_lock:
+        if _interrupted.is_set():
+            raise BackendError("interrupted before launch")
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE if stdin is not None else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                # errors="replace": backend output may quote non-UTF8 bytes from reviewed
+                # files; a stray byte must not turn a finished review into a decode crash.
+                text=True, encoding="utf-8", errors="replace",
+                start_new_session=True,
+            )
+        except FileNotFoundError:
+            raise BackendError(f"{cmd[0]} not found on PATH")
+        _active_procs.add(proc)
 
     def _terminate() -> None:
         _signal_process_group(proc, signal.SIGTERM)
@@ -120,8 +157,6 @@ def run_command(cmd: list[str], *, stdin: str | None = None, timeout: int = TIME
             except subprocess.TimeoutExpired:
                 pass  # group SIGKILLed; don't block the gate waiting on a wedged reap
 
-    with _active_lock:
-        _active_procs.add(proc)
     try:
         out, err = proc.communicate(input=stdin, timeout=timeout)
     except subprocess.TimeoutExpired:

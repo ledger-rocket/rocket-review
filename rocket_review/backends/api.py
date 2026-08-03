@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from rocket_review.backends.base import BackendError, ReviewJob, format_duration
+from rocket_review.backends.base import BackendError, ReviewJob, format_duration, interrupted
 from rocket_review.models import REVIEW_SCHEMA
 from rocket_review.prompts import get_prompt
 
@@ -171,6 +171,12 @@ def _call_openai(
     timeout: int | None = None,
     json_output: bool = False,
 ) -> str:
+    # Same gate the subprocess backends check before Popen: once an interrupt is under way
+    # this worker must not open a billed call the teardown has no way to stop. Checked at
+    # the top so neither model resolution nor the response call goes out.
+    if interrupted():
+        raise BackendError("interrupted before launch")
+
     _load_env_file()
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:

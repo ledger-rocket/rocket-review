@@ -323,9 +323,10 @@ def run_one(
         job = replace(job, content=commit_content, commit=None)
     try:
         raw = BACKENDS[name].review(job)
-        # Central fail-closed check: the CLI backends already reject empty output, but
-        # the API backend can return a blank string. An empty error would also read as
-        # success under the downstream truthiness checks, so never emit one.
+        # Central fail-closed check, defence in depth: all four shipped backends already
+        # reject blank output before returning, so this only catches a future or
+        # misbehaving one. Blank raw would read as success under the downstream truthiness
+        # checks, so it must never get past here.
         if not isinstance(raw, str) or not raw.strip():
             raise BackendError(f"{name} produced no review output")
         return name, model, raw, None
@@ -558,20 +559,33 @@ def _run():
         timeout=args.timeout,
     )
 
+    base.begin_fanout()
     with ThreadPoolExecutor(max_workers=len(specs)) as pool:
-        futures = [
-            pool.submit(run_one, name, model, job, commit_content) for name, model in specs
-        ]
         try:
+            futures = [
+                pool.submit(run_one, name, model, job, commit_content) for name, model in specs
+            ]
             outputs = [f.result() for f in futures]  # preserves --backend order
         except KeyboardInterrupt:
-            # SIGINT lands here on the main thread, not in the workers blocked on their
-            # subprocesses. Tear the backend process groups down before the executor's
-            # __exit__ waits on the workers, or Ctrl-C hangs until each backend times out.
+            # SIGINT lands on the main thread, not in the workers blocked on their
+            # subprocesses, so it can arrive anywhere in this block — including mid-submit,
+            # once an earlier worker has already launched a billed backend. Both phases are
+            # therefore inside the same handler.
+            #
+            # Order matters. Closing the gate first means every backend is accounted for:
+            # one already running is in terminate_active_commands()' snapshot, and one whose
+            # worker has not reached its launch yet gives up instead of starting a backend
+            # nothing is left to reap. Reversed, that second worker would launch after the
+            # snapshot and the executor's non-daemon threads would hold the CLI open for its
+            # full timeout. cancel_futures then drops any work item no thread has picked up
+            # yet, so those never reach the gate at all. The teardown itself unblocks the
+            # workers already in communicate(), before the executor's __exit__ waits on them.
+            #
             # Best-effort by design: this kills registered subprocess groups
             # (codex/claude/opencode); an in-flight `api` HTTP request has no process to
-            # signal and finishes or hits its own client timeout, and a subprocess launched
-            # during teardown may survive to its own timeout.
+            # signal and finishes or hits its own client timeout.
+            base.request_interrupt()
+            pool.shutdown(wait=False, cancel_futures=True)
             base.terminate_active_commands()
             raise
 

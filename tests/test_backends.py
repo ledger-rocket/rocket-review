@@ -1,3 +1,4 @@
+import threading
 import types
 
 import pytest
@@ -706,6 +707,102 @@ def test_terminate_active_commands_signals_registered_groups(monkeypatch):
         base._active_procs.discard(proc)
     assert (555, base.signal.SIGTERM) in signals  # main-thread teardown reaches the group
     assert (555, base.signal.SIGKILL) not in signals  # died on SIGTERM, no escalation
+
+
+class _LockWatcher:
+    """The real lock, announcing when a named thread is about to block on it.
+
+    Lets a test park inside the launch section and still know the teardown has reached the
+    lock, without sleeping to guess at it.
+    """
+
+    def __init__(self, real, thread_name, at_lock):
+        self._real = real
+        self._thread_name = thread_name
+        self._at_lock = at_lock
+
+    def __enter__(self):
+        if threading.current_thread().name == self._thread_name:
+            self._at_lock.set()
+        self._real.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self._real.release()
+
+
+def test_teardown_cannot_snapshot_between_a_launch_and_its_registration(monkeypatch):
+    # The invariant behind the gate: check, launch and register happen under ONE acquisition
+    # of the lock terminate_active_commands() snapshots under. A teardown arriving mid-launch
+    # therefore waits and then sees the new process. Split into two acquisitions it would
+    # snapshot the gap instead and leave that process running — which every other test in
+    # this suite still passes through, so it is pinned here explicitly.
+    proc_pid = 9090
+    in_launch = threading.Event()
+    teardown_at_lock = threading.Event()
+    snapshot_done = threading.Event()
+    signals = _patch_group_signals(monkeypatch)
+
+    class _ParkedProc(_FakeProc):
+        def communicate(self, input=None, timeout=None):
+            # Holds the worker where a real backend sits while the teardown runs, so the
+            # registration cannot be undone before the snapshot is taken.
+            snapshot_done.wait(5)
+            return super().communicate(input=input, timeout=timeout)
+
+    proc = _ParkedProc(pid=proc_pid)
+
+    def parked_popen(*args, **kwargs):
+        in_launch.set()
+        teardown_at_lock.wait(5)  # give the teardown its chance to reach the lock
+        return proc
+
+    monkeypatch.setattr(base.subprocess, "Popen", parked_popen)
+    monkeypatch.setattr(
+        base, "_active_lock", _LockWatcher(base._active_lock, "teardown", teardown_at_lock)
+    )
+
+    def teardown():
+        assert in_launch.wait(5), "the launch never started"
+        base.terminate_active_commands()
+        snapshot_done.set()
+
+    thread = threading.Thread(target=teardown, name="teardown")
+    thread.start()
+    try:
+        base.run_command(["backend"])
+    finally:
+        thread.join(10)
+    assert not thread.is_alive()
+    # Signalled at all == it was in the snapshot: the teardown waited out the launch section.
+    assert (proc_pid, base.signal.SIGTERM) in signals
+
+
+def test_run_command_refuses_to_launch_once_interrupted(monkeypatch):
+    # The teardown only reaches processes that already exist, so a worker arriving at the
+    # gate afterwards has to give up rather than start one nobody is left to reap.
+    launched = []
+    monkeypatch.setattr(base.subprocess, "Popen", lambda *a, **k: launched.append(a))
+    base.request_interrupt()
+    with pytest.raises(BackendError, match="interrupted before launch"):
+        base.run_command(["echo", "hi"])
+    assert not launched
+
+
+def test_api_refuses_to_call_once_interrupted(monkeypatch):
+    # An HTTP request has no process group to signal, so refusing to start one is the only
+    # way the api backend can honour an interrupt.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    base.request_interrupt()
+    with pytest.raises(BackendError, match="interrupted before launch"):
+        api._call_openai("content", "instructions", "gpt-5.6-terra", None)
+
+
+def test_begin_fanout_reopens_the_gate():
+    base.request_interrupt()
+    assert base.interrupted()
+    base.begin_fanout()
+    assert not base.interrupted()
 
 
 def test_terminate_active_commands_escalates_to_sigkill(monkeypatch):

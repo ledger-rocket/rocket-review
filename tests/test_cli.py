@@ -2,10 +2,13 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import types
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from rocket_review.backends import base
 from rocket_review.backends.base import BackendError
 from rocket_review.cli import (
     RAW_TRUNCATE_LIMIT,
@@ -406,6 +409,118 @@ def test_keyboardinterrupt_during_fanout_terminates_active_commands(monkeypatch)
     with pytest.raises(KeyboardInterrupt):
         main()
     assert killed["called"]
+
+
+def test_keyboardinterrupt_during_submit_terminates_active_commands(monkeypatch):
+    # Ctrl-C can also land part-way through the submit loop, once an earlier worker has
+    # already launched a billed backend but before any f.result() is reached. The teardown
+    # has to cover that window too, or the backend outlives the CLI and keeps billing.
+    launched = threading.Event()
+    torn_down = threading.Event()
+    killed = {"called": False}
+
+    def terminate():
+        killed["called"] = True
+        torn_down.set()  # stands in for the signal that unblocks the worker's communicate()
+
+    monkeypatch.setattr("rocket_review.cli.base.terminate_active_commands", terminate)
+
+    def review(job):
+        launched.set()
+        torn_down.wait(5)  # a live backend process: only the teardown ends it
+        return "review"
+
+    monkeypatch.setattr(
+        "rocket_review.cli.BACKENDS",
+        {
+            "codex": types.SimpleNamespace(review=review),
+            "claude": types.SimpleNamespace(review=lambda job: "unreached"),
+        },
+    )
+
+    submits = {"n": 0}
+
+    class InterruptingPool(ThreadPoolExecutor):
+        """Raises on the second submit, forcing the window without real signals."""
+
+        def submit(self, *args, **kwargs):
+            if submits["n"]:
+                assert launched.wait(5), "first backend never started"
+                raise KeyboardInterrupt
+            submits["n"] += 1
+            return super().submit(*args, **kwargs)
+
+    monkeypatch.setattr("rocket_review.cli.ThreadPoolExecutor", InterruptingPool)
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    monkeypatch.setattr("sys.argv", ["rr", "--diff", "--backend", "codex,claude"])
+    with pytest.raises(KeyboardInterrupt):
+        main()
+    assert killed["called"]
+
+
+def test_keyboardinterrupt_before_launch_stops_a_worker_from_starting_a_backend(monkeypatch):
+    # The other half of the leak: a worker accepted by the pool but not yet at its Popen()
+    # is invisible to the teardown snapshot. Unless it is told to give up it launches a
+    # backend nothing is left to reap, and the executor's non-daemon threads then hold the
+    # CLI open — still billing — for that backend's full timeout.
+    MARKER = "rr-test-backend"
+    parked = threading.Event()
+    torn_down = threading.Event()
+    launches = {"n": 0}
+
+    real_popen = subprocess.Popen
+
+    def spy_popen(cmd, *args, **kwargs):
+        # Counts only this test's backend, so unrelated subprocess use (git, etc.) can't
+        # be mistaken for the launch under test.
+        if any(MARKER in part for part in cmd):
+            launches["n"] += 1
+        return real_popen(cmd, *args, **kwargs)
+
+    monkeypatch.setattr("rocket_review.backends.base.subprocess.Popen", spy_popen)
+
+    real_terminate = base.terminate_active_commands
+
+    def terminate():
+        real_terminate()
+        torn_down.set()  # releases the parked worker exactly after the teardown snapshot
+
+    monkeypatch.setattr("rocket_review.cli.base.terminate_active_commands", terminate)
+
+    def interrupting_review(job):
+        assert parked.wait(5), "the other worker never parked"
+        raise KeyboardInterrupt
+
+    def parked_review(job):
+        parked.set()
+        assert torn_down.wait(5), "teardown never ran"
+        return base.run_command([sys.executable, "-c", f"pass  # {MARKER}"])
+
+    monkeypatch.setattr(
+        "rocket_review.cli.BACKENDS",
+        {
+            "codex": types.SimpleNamespace(review=interrupting_review),
+            "claude": types.SimpleNamespace(review=parked_review),
+        },
+    )
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    monkeypatch.setattr("sys.argv", ["rr", "--diff", "--backend", "codex,claude"])
+    with pytest.raises(KeyboardInterrupt):
+        main()
+    assert launches["n"] == 0  # gave up at the gate instead of launching post-teardown
+
+
+def test_interrupt_gate_is_cleared_for_each_fanout(monkeypatch):
+    # The gate latches, so a run that ended in an interrupt must not make the next run in
+    # the same process refuse to launch anything.
+    base.request_interrupt()
+    patch_backends(monkeypatch, {"codex": "review"})
+    assert run_main(monkeypatch, ["--diff", "--backend", "codex"]) == 0
+    assert not base.interrupted()
 
 
 def _json_envelope(monkeypatch, capsys, review_output, extra_args=()):
