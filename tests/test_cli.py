@@ -2,7 +2,9 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import types
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -403,6 +405,55 @@ def test_keyboardinterrupt_during_fanout_terminates_active_commands(monkeypatch)
     monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
     monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
     monkeypatch.setattr("sys.argv", ["rr", "--diff", "--backend", "codex"])
+    with pytest.raises(KeyboardInterrupt):
+        main()
+    assert killed["called"]
+
+
+def test_keyboardinterrupt_during_submit_terminates_active_commands(monkeypatch):
+    # Ctrl-C can also land part-way through the submit loop, once an earlier worker has
+    # already launched a billed backend but before any f.result() is reached. The teardown
+    # has to cover that window too, or the backend outlives the CLI and keeps billing.
+    launched = threading.Event()
+    torn_down = threading.Event()
+    killed = {"called": False}
+
+    def terminate():
+        killed["called"] = True
+        torn_down.set()  # stands in for the signal that unblocks the worker's communicate()
+
+    monkeypatch.setattr("rocket_review.cli.base.terminate_active_commands", terminate)
+
+    def review(job):
+        launched.set()
+        torn_down.wait(5)  # a live backend process: only the teardown ends it
+        return "review"
+
+    monkeypatch.setattr(
+        "rocket_review.cli.BACKENDS",
+        {
+            "codex": types.SimpleNamespace(review=review),
+            "claude": types.SimpleNamespace(review=lambda job: "unreached"),
+        },
+    )
+
+    submits = {"n": 0}
+
+    class InterruptingPool(ThreadPoolExecutor):
+        """Raises on the second submit, forcing the window without real signals."""
+
+        def submit(self, *args, **kwargs):
+            if submits["n"]:
+                assert launched.wait(5), "first backend never started"
+                raise KeyboardInterrupt
+            submits["n"] += 1
+            return super().submit(*args, **kwargs)
+
+    monkeypatch.setattr("rocket_review.cli.ThreadPoolExecutor", InterruptingPool)
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.cli.stdin_has_input", lambda: False)
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    monkeypatch.setattr("sys.argv", ["rr", "--diff", "--backend", "codex,claude"])
     with pytest.raises(KeyboardInterrupt):
         main()
     assert killed["called"]

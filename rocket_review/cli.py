@@ -559,15 +559,18 @@ def _run():
     )
 
     with ThreadPoolExecutor(max_workers=len(specs)) as pool:
-        futures = [
-            pool.submit(run_one, name, model, job, commit_content) for name, model in specs
-        ]
         try:
+            futures = [
+                pool.submit(run_one, name, model, job, commit_content) for name, model in specs
+            ]
             outputs = [f.result() for f in futures]  # preserves --backend order
         except KeyboardInterrupt:
-            # SIGINT lands here on the main thread, not in the workers blocked on their
-            # subprocesses. Tear the backend process groups down before the executor's
-            # __exit__ waits on the workers, or Ctrl-C hangs until each backend times out.
+            # SIGINT lands on the main thread, not in the workers blocked on their
+            # subprocesses, so it can arrive anywhere in this block — including mid-submit,
+            # once an earlier worker has already launched a billed backend. Both phases are
+            # therefore inside the same handler. Tear the backend process groups down before
+            # the executor's __exit__ waits on the workers, or Ctrl-C hangs until each
+            # backend times out.
             # Best-effort by design: this kills registered subprocess groups
             # (codex/claude/opencode); an in-flight `api` HTTP request has no process to
             # signal and finishes or hits its own client timeout, and a subprocess launched
