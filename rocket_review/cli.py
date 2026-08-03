@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -21,6 +22,7 @@ from rocket_review.models import (
     to_envelope,
 )
 from rocket_review.repo import (
+    SUBPROCESS_TIMEOUT,
     case_folds as case_folds,
     resolve_doc_path,
     resolve_doc_paths,
@@ -312,6 +314,28 @@ def ensure_diff_exists(staged: bool) -> None:
         sys.exit(1)
 
 
+def _discover(cmd: list[str], input_text: str | None = None) -> subprocess.CompletedProcess | None:
+    """Run one path-discovery call so it can never end a review.
+
+    run_capture exits on a machine that cannot answer — a missing binary, a timeout, an
+    OSError. Discovery is decoration on a review that is otherwise fine, so it returns what
+    run_capture must not: None on any of those, with one note on stderr. A command that ran
+    and failed (non-zero, i.e. text that is not a patch) is not a broken machine; it comes
+    back whole and the caller turns it into a silent empty list.
+    """
+    try:
+        return subprocess.run(
+            cmd, input=input_text, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=SUBPROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        print("Note: could not determine changed paths.", file=sys.stderr)
+        return None
+    except (FileNotFoundError, OSError):
+        print("Note: could not determine changed paths.", file=sys.stderr)
+        return None
+
+
 def git_diff_changed_paths(staged: bool) -> list[str]:
     """The paths `git diff` (with this source's own ref) touches, or [] on failure.
 
@@ -321,8 +345,8 @@ def git_diff_changed_paths(staged: bool) -> list[str]:
     """
     cmd = ["git", "diff", "--name-only", "-z"]
     cmd.append("--staged" if staged else "HEAD")
-    result = run_capture(cmd)
-    if result.returncode != 0:
+    result = _discover(cmd)
+    if result is None or result.returncode != 0:
         return []
     return [p for p in result.stdout.split("\0") if p]
 
@@ -330,99 +354,67 @@ def git_diff_changed_paths(staged: bool) -> list[str]:
 def commit_changed_paths(oid: str) -> list[str]:
     """The paths a commit touches, or [] on failure.
 
-    `--root` is what makes a root commit yield its files instead of nothing; `-z` keeps
-    the names unquoted, exactly as with git_diff_changed_paths.
+    `--root` is what makes a root commit yield its files instead of nothing; `--cc` names
+    the same combined diff `git show` puts in front of the review. `-z` keeps the names
+    unquoted, exactly as with git_diff_changed_paths.
     """
-    result = run_capture(
-        ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", "-z", oid]
+    result = _discover(
+        ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", "--cc", "-z", oid]
     )
-    if result.returncode != 0:
+    if result is None or result.returncode != 0:
         return []
     return [p for p in result.stdout.split("\0") if p]
 
 
-def unquote_git_path(value: str) -> str:
-    """Undo git's C-style quoting of one path value, decoding octal bytes as UTF-8.
+def patch_prefix(patch: str) -> int:
+    """How many leading components `git apply --numstat` must strip: -p1 for a patch that
+    carries the standard `a/`/`b/` prefixes, -p0 for one written with --no-prefix.
 
-    Git quotes a path carrying a quote, a non-ascii byte or a control character as a
-    backslash-quote, the single-letter escapes, and three-digit octal escapes. The octal
-    escapes are bytes of one UTF-8 sequence, so they are decoded together rather than one
-    replacement char each.
+    The first file header of the patch says which it is. A `diff --git ` header whose first
+    path opens with `a/` (or its C-quoted spelling `\"a/`) is the standard form; a plain
+    unified diff has no such line, so its first `--- ` header that is not /dev/null decides.
+    Getting this wrong renames a file to the one a directory up, silently.
     """
-    simple = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11,
-              "\\": 92, '"': 34, "'": 39}
-    data = bytearray()
-    i = 0
-    n = len(value)
-    while i < n:
-        c = value[i]
-        if c != "\\":
-            data.extend(c.encode("utf-8", "replace"))
-            i += 1
-            continue
-        i += 1
-        if i >= n:
-            break
-        nxt = value[i]
-        if nxt in simple:
-            data.append(simple[nxt])
-            i += 1
-        elif "0" <= nxt <= "7":
-            digits = ""
-            while i < n and len(digits) < 3 and "0" <= value[i] <= "7":
-                digits += value[i]
-                i += 1
-            byte_val = int(digits, 8)
-            if byte_val <= 255:
-                data.append(byte_val)
-            else:
-                # An octal value above \377 names no byte — a malformed escape out of
-                # untrusted patch text. Place a replacement char rather than crash or
-                # emit nothing; the header is already worth nothing either way.
-                data.extend("\ufffd".encode("utf-8"))
-        else:
-            data.extend(nxt.encode("utf-8", "replace"))
-            i += 1
-    return data.decode("utf-8", "replace")
+    for line in patch.splitlines():
+        if line.startswith("diff --git "):
+            first = line[len("diff --git "):]
+            return 1 if first.startswith("a/") or first.startswith('"a/') else 0
+        if line.startswith("--- ") and not line.startswith("--- /dev/null"):
+            return 1 if line[len("--- "):].startswith("a/") else 0
+    return 1
 
 
 def changed_paths_from_patch(patch: str) -> list[str]:
     """The paths a patch text touches, deduplicated, in the order it reports them.
 
-    A `+++ ` line names a file only when the line before it starts with `--- `: adding a
-    line that itself begins `++ ` renders as `+++ ` inside a hunk, and that is not a
-    header. From the header value, in order: drop a trailing `\r`; if it opens with `\"`
-    take the text to its closing `\"` and undo C-style quoting, otherwise cut it at the
-    first tab (git appends one after a path containing a space); drop `/dev/null`; strip
-    a leading `b/`; drop what is left if it is empty.
+    The patch is parsed by git itself: `git apply --numstat` understands every header a
+    patch can carry — binary changes (counts `-`/`-`), renames (reported as their
+    destination, once), quoted paths, header-shaped lines inside a hunk. The `-z` output is
+    one NUL-terminated record per file, `added\\tdeleted\\tpath`, the path verbatim and never
+    quoted. Non-zero exit (text that is not a patch) is an empty list.
     """
+    # git refuses a patch that does not end in a newline ("corrupt patch"); the two sources
+    # strip trailing whitespace when they read, so restore the terminator before parsing.
+    if not patch.endswith("\n"):
+        patch += "\n"
+    result = _discover(
+        ["git", "apply", "--numstat", "-z", f"-p{patch_prefix(patch)}", "-"],
+        input_text=patch,
+    )
+    if result is None or result.returncode != 0:
+        return []
     paths: list[str] = []
     seen: set[str] = set()
-    prev = ""
-    for line in patch.splitlines():
-        if prev.startswith("--- ") and line.startswith("+++ "):
-            value = line[4:].rstrip("\r")
-            if value.startswith('"'):
-                end = 1
-                while end < len(value):
-                    if value[end] == '"' and value[end - 1] != "\\":
-                        break
-                    end += 1
-                if end >= len(value):
-                    prev = line
-                    continue
-                value = unquote_git_path(value[1:end])
-            else:
-                value = value.split("\t", 1)[0]
-            if value == "/dev/null":
-                prev = line
-                continue
-            if value.startswith("b/"):
-                value = value[2:]
-            if value and value not in seen:
-                seen.add(value)
-                paths.append(value)
-        prev = line
+    for record in result.stdout.split("\0"):
+        if not record:
+            continue
+        fields = record.split("\t")
+        if len(fields) < 3:
+            continue
+        path = fields[2]
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
     return paths
 
 
@@ -867,13 +859,15 @@ def _run():
             commit_content = get_commit_diff(commit_oid)  # for api/opencode
     elif args.diff or args.staged:
         # One call on the same ref the review itself uses, shared by both branches, so the
-        # agentic (preflight-only) and materialized (api/opencode) sources agree.
-        changed_paths = git_diff_changed_paths(args.staged)
+        # agentic (preflight-only) and materialized (api/opencode) sources agree. The paths
+        # are read after the diff they describe: a working tree moves under a review that is
+        # only ever a snapshot of it, and adjacency is the whole of the fix.
         if needs_content:
             content = get_diff(args.staged)  # one snapshot for every backend
         else:
             ensure_diff_exists(args.staged)
             git_cmd = "git diff --staged" if args.staged else "git diff HEAD"
+        changed_paths = git_diff_changed_paths(args.staged)
     elif args.files:
         content = read_files(args.files)
         changed_paths = list(dict.fromkeys(args.files))
