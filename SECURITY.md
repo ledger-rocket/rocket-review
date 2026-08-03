@@ -53,6 +53,37 @@ exfiltrating**:
   repo can attempt to steer an agentic backend into reading and leaking secrets or
   emitting misleading findings. This risk is highest with `--pr` run on a developer
   machine, where real credentials are present.
+- **Repo-supplied configuration.** A `.rocket-review.toml` in the repo you run `rr` from
+  sets that project's defaults. It is input the repo's author controls — on a fork's PR,
+  the contributor — and four things it decides are worth knowing:
+  - **Where your code goes** — `[backends]` picks the backend and therefore the provider.
+  - **What it costs** — `[models]` can name an expensive model and `timeout` a long run,
+    on your account or your CI minutes. A hostile *short* `timeout` fails closed: the
+    backend is killed and the run reports a backend error rather than a clean review.
+  - **What reviews a gated change** — a PR that only edits the config file can downgrade
+    the model your gate depends on. Pass `--no-config`, or an explicit `--backend`, in
+    gated jobs.
+  - **Which files from your working tree are copied into the prompt** — `docs` paths are
+    read in full and sent to the backend, so this is a direct exfiltration path and the
+    one place `rr` enforces limits on the config rather than documenting them. One rule
+    covers every route: a doc the *repository* chose is read only if the repository tracks
+    it at `HEAD`, it resolves inside the directory it came from, and it is not inside
+    `.git`. The repository chose it when a project config named it, when auto-discovery
+    found it (`docs = true`, or a bare `--docs` or `--llms` — the repo decides which file
+    matches), or when a markdown link inside a repo-resident doc points at it, *including
+    links out of a doc you named yourself*. Decided on the resolved path, so a tracked
+    symlink is judged by what it opens rather than by the name the repository carries.
+    Tracking decides the *path*, not the bytes: the file is then read from your working
+    tree, so uncommitted edits to a tracked doc — a `config/settings.yml` you filled in
+    locally — are what gets sent. Outside a git repository nothing is tracked, so the
+    directory confinement and the `.git` guard are what remain. What you name directly —
+    `--docs PATH`, `--llms PATH`, or a path in your own user config — is read as-is,
+    repository metadata excepted: rr refuses a path that lands in the checkout's `.git`,
+    whatever the path is called and wherever that directory really is. The bare flags are
+    not that: they ask the repository what it has.
+
+  Read it as you would any tooling config a clone brings with it, or run with
+  `--no-config`, which ignores both config files.
 - **Confused-deputy across checkouts.** `--repo <other>` reviews a PR from a *different*
   remote repository, but the agent still runs with read access to your **local current
   working directory**. Do not run it from inside an unrelated sensitive checkout — the

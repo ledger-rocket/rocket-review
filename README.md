@@ -95,6 +95,7 @@ rr --pr 123                       # review a GitHub PR (number, URL, or branch)
 rr --pr 123 --repo acme/api-server  # ...from outside that repo's checkout
 git diff HEAD~3 | rr              # pipe anything
 rr src/auth.py --docs             # review files against your documented standards
+rr --diff --no-config             # ignore the config files (hermetic run)
 rr --version                      # print the installed version
 ```
 
@@ -114,7 +115,8 @@ eval corpus, not from a preference between vendors — and they are only default
 - **Overriding** — an explicit `--backend` always wins, in any mode, single
   (`--backend codex`) or as a list (`--backend codex,claude`). `--mode` is applied
   before the backend is chosen, so `rr plan.md --mode code` reviews as code *and*
-  uses the code default.
+  uses the code default. To change the table itself for a project or for yourself,
+  set `[backends]` in a [config file](#config-file).
 - **Missing backend** — if the mode's default isn't available, `rr` uses the next
   available one and says so in a single line on stderr; pass `--backend` to choose
   explicitly and silence it. The order is the other agentic CLI first, then
@@ -213,7 +215,121 @@ Relative markdown links inside the docs are followed one level, so an index file
 (like `llms.txt`) pulls in everything it references. Bare `--docs` errors if none of
 `llms.txt` / `AGENTS.md` / `CLAUDE.md` exist in the current directory — pass explicit
 paths when your standards live elsewhere. `--llms [PATH]` is kept as a compatibility
-alias for `--docs [PATH]`, defaulting to `llms.txt`.
+alias for `--docs [PATH]`: bare, it takes the project's `llms.txt` if the repository
+carries one and errors if it cannot — like a bare `--docs`, and unlike a config file's
+`docs = true`, which is a standing preference and stays silent; with a path, it reads
+what you name.
+
+Inside a git repository, an auto-discovered doc and every link followed out of any doc
+must be a file the repository tracks — the repo, not you, chose those, and a standards
+doc is copied into the prompt verbatim. Name a path directly (`--docs CLAUDE.md`) to
+read one the repository does not carry. The full rule is under
+[What rr will read as a standards doc](#what-rr-will-read-as-a-standards-doc).
+
+## Config file
+
+Two optional TOML files hold the defaults you would otherwise retype:
+
+- **Project** — `.rocket-review.toml`, found by walking up from the current directory
+  to the git root (and no further; outside a repo only the current directory is read).
+- **User** — `~/.config/rocket-review/config.toml`, or `$XDG_CONFIG_HOME/rocket-review/config.toml`.
+
+**Precedence: CLI flag > project file > user file > built-in default**, settled per
+key. A project file that sets only `[backends]` leaves your user file's `timeout` in
+force, and the same holds inside `[backends]` and `[models]`.
+
+```toml
+timeout = 1800          # --timeout
+effort = "high"         # --effort
+fail_on = "high"        # --fail-on (needs json = true, exactly as the flag needs --json)
+json = false            # --json
+full = false            # --full
+docs = true             # --docs with no path (auto-discovery); or a list of paths
+
+[backends]              # per-mode default backend, overriding the built-in table
+plan = "codex"
+code = "claude"
+diff = "claude"
+default = "claude"      # optional: covers any mode you leave out above
+
+[models]                # per backend, i.e. what `--backend name:model` pins
+codex = "gpt-5.6-sol"
+claude = "claude-opus-5"
+```
+
+Every key mirrors a flag — a config file changes what `rr` does by default, never what
+it can do. What to review (`--diff`, `--pr`, files, `--mode`, `--prompt`) stays on the
+command line, where it is visible in the invocation.
+
+Anything else is an error, named rather than ignored: an unknown key or mode, a backend
+`rr` doesn't have, a non-integer `timeout`, a `fail_on` that isn't a severity, malformed
+TOML (reported with the file and the parse position). Config is validated before any git,
+`gh`, or backend work starts.
+
+`--no-config` ignores both files. It is also the way out of a `json = true`,
+`full = true`, or `docs` you don't want on this run: `rr` has no `--no-json`-style
+inverse flags, so a lower layer can only be turned off by a higher config file
+(`json = false` in the project file) or by `--no-config`. Flags always win where they
+can say anything at all.
+
+**In a gated CI job, pass `--no-config` (or at least an explicit `--backend`).** The
+config a job picks up comes from the branch under test, which on a fork's PR is the
+contributor's: `[backends]`/`[models]` decide *which model reviews the code*, so a
+config change alone can downgrade the reviewer your gate depends on. `--fail-on` is the
+one direction that is safe either way — a file can only tighten a gate the job did not
+set, never loosen the one it did, since your flag outranks it.
+
+### `docs` in a config file
+
+`docs = true` means "use this project's standards doc if it has one" — `llms.txt` /
+`AGENTS.md` / `CLAUDE.md`, and a project without one is not an error the way a typed
+`--docs` is. Which project depends on which file asked:
+
+- **Project file** — looks in the directory holding the `.rocket-review.toml`, so
+  everyone gets the same standards wherever in the repo they run from.
+- **User file** — looks in the checkout you are in (its git root, or the current
+  directory outside a repo), never beside `~/.config/rocket-review/config.toml`, which
+  is nobody's project.
+
+Explicit `docs` paths are relative to the config file that names them.
+
+### What rr will read as a standards doc
+
+One rule decides every docs path, whether a config named it, discovery found it, or a
+markdown link inside another doc points at it:
+
+> **A doc the repository chose is read only if the repository tracks it (at `HEAD`), it
+> resolves inside the directory it came from, and it is not inside `.git`. A doc *you*
+> name is read as-is.**
+
+"The repository chose it" covers three cases:
+
+- **a path in a project's `.rocket-review.toml`** — that file is repository content, and
+  on a fork's PR it is a contributor's;
+- **anything auto-discovered** (`docs = true`, or `--docs` / `--llms` with no path) — the
+  repo decides which file answers the pattern, whoever asked for the pattern;
+- **every markdown link followed out of a doc that resolves inside a repository** — the
+  link was written by whoever wrote that doc. This holds even for a doc you named
+  yourself: naming `--docs STANDARDS.md` vouches for that file, not for what it points at.
+
+Everything is decided on the *resolved* path, so a tracked symlink is judged by the file
+it actually opens — the repository carries the link, not its target. Untracked and ignored
+files are yours, not the project's: a `.env`, a key, a private note. A named path that is
+refused stops the run and says so; a discovered or linked one is skipped with a warning,
+since discovery is a standing "if there is one".
+
+**Outside a git repository** nothing is tracked, so what remains is the directory
+confinement and the `.git` guard: a config's docs must stay inside the config's own
+directory, and a link inside the doc's.
+
+**What you name is yours** — `--docs PATH`, `--llms PATH`, or a path in your own
+`~/.config/rocket-review/config.toml` — and is read wherever it points, including files
+no repository tracks. The single exception is `.git`, which `rr` never reads into a
+review, as a footgun check.
+
+`--docs` and `--llms` sit on the same boundary in both forms, which is what makes them
+the alias this README calls them: bare, each takes what the repository offers; with a
+path, each reads what you named.
 
 ## How it works
 
@@ -242,6 +358,11 @@ read-only is not the same as safe:
 - Untrusted input can prompt-inject the reviewer — a hostile PR body, diff, comment,
   or `AGENTS.md` can try to steer an agentic backend. Be especially careful with `--pr`
   on a dev machine.
+- A repo's `.rocket-review.toml` configures the runs you make inside it — including which
+  backend, and therefore which provider, gets your code, and which model at what cost. The
+  docs it can name are bounded (see [`docs` in a config file](#docs-in-a-config-file)) and
+  it can only select backends you have installed, but it is repo-supplied input: read it
+  like any other tooling config a clone brings with it, or use `--no-config`.
 
 **Don't run agentic backends against untrusted repos or PRs on a machine where readable
 secrets exist.** See [SECURITY.md](SECURITY.md) for the full threat model and how to
@@ -275,7 +396,8 @@ For plans, run `rr plan.md --docs` before implementing. Use a 900000ms timeout.
   (edit/write denied at the tool level). Read-only stops writes; it does not stop the
   agent *reading* readable secrets and sending them to the backend's provider — see
   [Security & data flow](#security--data-flow).
-- `--fail-on` requires `--json`.
+- `--fail-on` requires `--json` — including when a [config file](#config-file) is what
+  set it; the error names the file.
 - Exit codes: 0 no gate tripped · 1 operational error (or every backend failed) · 2 findings at/above `--fail-on`. A partial backend failure warns on stderr but still exits 0 — gate CI with `--json --fail-on` to fail closed.
 
 ## Contributing

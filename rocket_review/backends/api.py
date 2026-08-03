@@ -34,7 +34,14 @@ def _load_env_file() -> None:
     """Load OPENAI_API_KEY from .env files if not already in environment."""
     if os.environ.get("OPENAI_API_KEY"):
         return
-    for candidate in [Path.cwd() / ".env", Path.home() / ".env"]:
+    candidates = [Path.cwd() / ".env"]
+    try:
+        candidates.append(Path.home() / ".env")
+    except RuntimeError:
+        # HOME unset and no passwd entry for this uid — an ordinary container setup. There
+        # is no ~/.env to read then; the environment variable path is unaffected.
+        pass
+    for candidate in candidates:
         if candidate.is_file():
             try:
                 lines = candidate.read_text(encoding="utf-8", errors="replace").splitlines()

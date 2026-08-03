@@ -7,11 +7,13 @@ import stat
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from urllib.parse import unquote, urldefrag
 
+from rocket_review import config
 from rocket_review.backends import BACKENDS, available, base, missing_binary
 from rocket_review.backends.base import BackendError, ReviewJob
 from rocket_review.models import (
@@ -26,11 +28,6 @@ RAW_TRUNCATE_LIMIT = 4000
 # Bounds git/gh preflight calls so a hung credential helper or network fetch
 # can't stall a CI gate indefinitely; backend runs have their own longer timeout.
 SUBPROCESS_TIMEOUT = 300
-
-# Measured strengths, not preference: claude returns deeper code/diff findings with fewer
-# false alarms, while codex keeps plan reviews focused and is the fastest of the two. An
-# explicit --backend always outranks this table.
-DEFAULT_BACKEND_BY_MODE = {"plan": "codex", "code": "claude", "diff": "claude"}
 
 # Stand-ins when a mode's default is not available, closest substitute first: the other
 # agentic CLI reviews the same way, opencode is agentic but provider-dependent, and api
@@ -62,6 +59,11 @@ def run_capture(cmd: list[str]) -> subprocess.CompletedProcess:
         sys.exit(1)
     except FileNotFoundError:
         print(f"Error: {cmd[0]} not found on PATH", file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        # E2BIG above all: a command line built from user data can outgrow ARG_MAX, and an
+        # OSError here would otherwise surface as a traceback rather than a refusal.
+        print(f"Error: could not run {cmd[0]}: {e}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -100,8 +102,164 @@ def read_files(paths: list[str]) -> str:
     return "\n\n".join(parts)
 
 
+@dataclass(frozen=True)
+class DocsSource:
+    """A config file's `docs` value: where discovery looks, and whose word its paths are."""
+
+    #: The config file itself, so a refusal can name what asked for the path.
+    config_file: Path
+    #: The project the file speaks for: the directory holding a project config, or the
+    #: checkout a user config is being used in — never ~/.config, which is no project.
+    discovery_root: Path
+    #: Whether this file is repository content rather than the user's own.
+    repo_supplied: bool
+
+
+def docs_source(settings: config.Settings, layers: list[config.Layer]) -> DocsSource | None:
+    """The config file that supplied `docs`, or None when the flag did — or nothing did."""
+    origin = settings.from_file("docs")
+    if origin is None:
+        return None
+    layer = next(item for item in layers if str(item.path) == origin)
+    if layer.repo_supplied:
+        return DocsSource(layer.path, layer.path.parent, repo_supplied=True)
+    # A user config speaks for whatever project it is used in, so discovery follows the
+    # checkout rather than ~/.config, where no project's standards live.
+    cwd = Path.cwd()
+    return DocsSource(layer.path, config.find_git_root(cwd) or cwd, repo_supplied=False)
+
+
+# What a refused doc path is told, and what the README states: one rule, one wording.
+DOC_RULE = (
+    "rr reads a doc the repository chose only when the repository tracks it, it resolves "
+    "inside the directory it came from, and it is not repository metadata (.git). Name a "
+    "path yourself with --docs/--llms to read anything else"
+)
+
+#: Why a path the *user* named was refused. Neither the tracked rule nor the confinement
+#: applies to their own word, so the only ways left to fail are the .git footgun check and
+#: a path that will not resolve at all — and a message reciting the rest would misdirect.
+NAMED_DOC_RULE = (
+    "rr never reads repository metadata (.git) into a review, and a path it cannot resolve "
+    "it cannot read"
+)
+
+#: `--llms` with no path. A distinct object, not the string "llms.txt", so the bare flag
+#: (the repository's llms.txt if it has one) stays distinguishable from `--llms llms.txt`
+#: (the user naming a file) — argparse cannot tell a const from a value otherwise, and the
+#: two sit on opposite sides of the trust boundary.
+LLMS_DISCOVER = object()
+
+
+@lru_cache(maxsize=None)
+def case_folds(root: Path) -> bool:
+    """Whether this filesystem folds case, asked of the checkout itself.
+
+    Every git root holds a .git, so a .GIT that also exists is the filesystem answering.
+    It matters because resolve() does not canonicalise case: on macOS a link to `readme.md`
+    opens the tracked `README.md` and has to count as tracked, while on Linux those are two
+    different files and only one of them is the repository's.
+    """
+    return (root / ".GIT").exists()
+
+
+def tracked_key(relative: str, folds: bool) -> str:
+    return relative.lower() if folds else relative
+
+
+@lru_cache(maxsize=None)
+def tracked_files(root: Path) -> frozenset[str]:
+    """Every path the repository at `root` carries at HEAD, repo-relative.
+
+    `ls-tree HEAD`, not `ls-files`: the index would let a stray `git add .env` widen what a
+    repository may offer, while HEAD is what the repository actually carries. A repo with no
+    commits has no HEAD, git fails, and nothing is tracked — which refuses, as it should.
+
+    Listing the whole tree once, rather than asking about each path, is also what keeps a doc
+    with thousands of links from ever building a command line: no path is passed to git at
+    all. Strings rather than Paths because a monorepo's HEAD tree is large and this set only
+    ever answers "is this one in it".
+
+    Cached for the process, which is one rr run: HEAD cannot move under a run that never
+    writes, and a checkout replaced at the same path mid-run would need a second rr in the
+    same interpreter. An embedder calling main() twice around such a change would see the
+    first answer — cache_clear() is the release valve, and the test suite pulls it.
+    """
+    result = run_capture(["git", "-C", str(root), "ls-tree", "-r", "-z", "--name-only", "HEAD"])
+    if result.returncode != 0:
+        return frozenset()
+    folds = case_folds(root)
+    return frozenset(tracked_key(entry, folds) for entry in result.stdout.split("\0") if entry)
+
+
+def is_repository_metadata(resolved: Path, base: Path) -> bool:
+    """Whether a resolved path lands in the checkout's own .git, whatever it is called.
+
+    config.inside_dot_git covers every spelling of the name; this covers the spelling that
+    never says it — a symlink whose target sits in an external gitdir, where neither the
+    name nor the resolved path carries a `.git` component at all. Asked of the checkout the
+    path came from, since that is whose metadata it would be.
+    """
+    root = config.find_git_root(base)
+    if root is None:
+        return False
+    try:
+        gitdir = (root / ".git").resolve()
+    except (OSError, ValueError):
+        return False
+    return resolved == gitdir or resolved.is_relative_to(gitdir)
+
+
+def resolve_doc_path(path: Path, *, user_named: bool, base: Path) -> Path | None:
+    """The one gate every docs path passes: the resolved path, or None if rr must not read it.
+
+    Every route — a path a config named, an auto-discovered doc, a markdown link out of any
+    doc, a path typed on the command line — comes through here, and the answer is the
+    *resolved* path, which is what callers must carry onwards: a doc read through a symlink
+    has its links judged from where the file really is, not from where the link sat.
+
+    `user_named` is the user's own word: a --docs/--llms path, or one written in their own
+    user config. It reads whatever it points at, with .git kept as a footgun check.
+
+    Everything else was chosen by a repository — a project config is repository content, an
+    auto-discovered doc is whichever file the repo put in the pattern's way, and a link out
+    of a doc is written by whoever wrote that doc. Those must be tracked by the repository,
+    inside `base` (the directory they came from), and outside .git. Outside a checkout there
+    is nothing to track, so confinement to `base` is what remains.
+    """
+    # Both spellings, because either can be the one that reaches metadata: `.git/config`
+    # resolves away when .git is a symlink to an external gitdir, and a symlink elsewhere in
+    # the path resolves *into* .git without ever naming it.
+    if config.inside_dot_git(path if path.is_absolute() else base / path):
+        return None
+    try:
+        resolved = path.resolve()
+    except (OSError, ValueError):
+        return None
+    if config.inside_dot_git(resolved) or is_repository_metadata(resolved, base):
+        return None
+    if user_named:
+        return resolved
+    base_dir = base.resolve()
+    if not resolved.is_relative_to(base_dir):
+        return None
+    root = config.find_git_root(base_dir)
+    if root is None:
+        return resolved
+    inside = root.resolve()
+    if not resolved.is_relative_to(inside):
+        return None
+    relative = resolved.relative_to(inside).as_posix()
+    return resolved if tracked_key(relative, case_folds(root)) in tracked_files(root) else None
+
+
 def read_doc_with_links(doc_path: Path) -> str:
-    """Read a doc and follow all relative markdown links to build full project context."""
+    """Read a doc and follow its relative markdown links to build full project context.
+
+    A link is written by whoever wrote the doc, so every one of them goes through
+    resolve_doc_path as repository-chosen — including out of a doc the user named, since
+    what a doc points at is not what the user vouched for.
+    """
     if not doc_path.is_file():
         print(f"Error: {doc_path} not found.", file=sys.stderr)
         sys.exit(1)
@@ -114,25 +272,22 @@ def read_doc_with_links(doc_path: Path) -> str:
         sys.exit(1)
     parts = [f"--- {doc_path.name} ---\n{doc_text}"]
 
-    links = re.findall(r"\[[^\]]*\]\(([^)]+)\)", doc_text)
-    for raw_link in links:
+    for raw_link in re.findall(r"\[[^\]]*\]\(([^)]+)\)", doc_text):
         if raw_link.startswith(("http://", "https://", "#")):
             continue
         link, _ = urldefrag(unquote(raw_link))
         if not link:
             continue
-        linked_path = (base_dir / link).resolve()
-        # Prevent path traversal outside the doc's directory. is_relative_to, not a
-        # string-prefix check: /a/b-sibling must not pass as inside /a/b.
-        if not linked_path.is_relative_to(base_dir):
-            print(f"Warning: skipping link outside project: {raw_link}", file=sys.stderr)
+        linked_path = resolve_doc_path(base_dir / link, user_named=False, base=base_dir)
+        if linked_path is None:
+            print(f"Warning: skipping link {link}: {DOC_RULE}.", file=sys.stderr)
             continue
-        if linked_path.is_file():
-            try:
-                text = linked_path.read_text(encoding="utf-8")
-                parts.append(f"--- {link} ---\n{text}")
-            except (OSError, UnicodeDecodeError) as e:
-                print(f"Warning: could not read {link}: {e}", file=sys.stderr)
+        if not linked_path.is_file():
+            continue
+        try:
+            parts.append(f"--- {link} ---\n{linked_path.read_text(encoding='utf-8')}")
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"Warning: could not read {link}: {e}", file=sys.stderr)
 
     return "\n\n".join(parts)
 
@@ -140,33 +295,105 @@ def read_doc_with_links(doc_path: Path) -> str:
 DISCOVERY_CANDIDATES = ["llms.txt", "AGENTS.md", "CLAUDE.md"]
 
 
-def collect_docs(docs_args: list[str] | None, llms_arg: str | None) -> str | None:
-    """Assemble standards context from --docs (explicit or auto-discovered) and --llms."""
+def collect_docs(
+    docs_args: list[str] | None,
+    llms_arg: str | object | None,
+    *,
+    source: DocsSource | None = None,
+) -> str | None:
+    """Assemble standards context from --docs (explicit or auto-discovered) and --llms.
+
+    `source` is set when a config file supplied `docs` rather than the flag. Being a standing
+    preference rather than this run's instruction changes two things: discovery looks at the
+    project the file speaks for instead of wherever the user is standing, and a project with
+    no standards doc is simply a project without one, where the typed flag asked for
+    something specific and errors.
+
+    `--llms` is the compatibility alias for `--docs` and sits on the same boundary: a bare
+    flag is the repository's llms.txt if it carries one, a path is the user naming a file.
+
+    Which paths are the user's own word and which the repository chose is decided here and
+    settled by resolve_doc_path; nothing downstream re-decides it.
+    """
+    cwd = Path.cwd()
+
+    def require(path: Path, *, user_named: bool, base: Path, named_by: Path | None) -> Path:
+        """A path someone named outright: refusing it stops the run.
+
+        named_by is the config file that named this path, or None when the command line
+        did. Carried explicitly rather than inferred: a config may be supplying `docs`
+        while the refused path came from a flag, and blaming the file for it would send
+        the user to edit something they did not write.
+        """
+        allowed = resolve_doc_path(path, user_named=user_named, base=base)
+        if allowed is None:
+            origin = f"{named_by}: " if named_by else ""
+            rule = NAMED_DOC_RULE if user_named else DOC_RULE
+            print(f"Error: {origin}refusing docs path {str(path)!r} — {rule}.",
+                  file=sys.stderr)
+            sys.exit(1)
+        return allowed
+
+    def offer(path: Path, *, base: Path) -> Path | None:
+        """A path discovery turned up: refusing it skips it, since discovery meant "if any".
+
+        Never the user's own word — whoever asked for the pattern, the repository decides
+        which file answers it.
+        """
+        allowed = resolve_doc_path(path, user_named=False, base=base)
+        if allowed is None:
+            print(f"Warning: skipping {path.name}: {DOC_RULE}.", file=sys.stderr)
+        return allowed
+
     paths: list[Path] = []
-    if llms_arg:
-        paths.append(Path(llms_arg))
+    if llms_arg is LLMS_DISCOVER:
+        # Bare --llms is bare --docs narrowed to llms.txt: the repository decides whether it
+        # has one, so the file it offers is not the user's own word.
+        candidate = cwd / "llms.txt"
+        kept = offer(candidate, base=cwd) if candidate.is_file() else None
+        if kept is None:
+            print("Error: --llms given without a path and llms.txt cannot be read here.",
+                  file=sys.stderr)
+            sys.exit(1)
+        paths.append(kept)
+    elif isinstance(llms_arg, str) and llms_arg:
+        paths.append(require(Path(llms_arg), user_named=True, base=cwd, named_by=None))
+
     if docs_args is not None and len(docs_args) == 0:
-        found = [Path(c) for c in DISCOVERY_CANDIDATES if Path(c).is_file()]
-        if not found:
+        search_root = source.discovery_root if source else cwd
+        found = [search_root / c for c in DISCOVERY_CANDIDATES if (search_root / c).is_file()]
+        kept_docs = [
+            allowed for allowed in (offer(p, base=search_root) for p in found)
+            if allowed is not None
+        ]
+        if not kept_docs and source is None:
+            refused = " (" + ", ".join(c.name for c in found) + " refused)" if found else ""
             print(
                 "Error: --docs given without paths and none of "
-                f"{', '.join(DISCOVERY_CANDIDATES)} found in the current directory.",
+                f"{', '.join(DISCOVERY_CANDIDATES)} can be read here{refused}.",
                 file=sys.stderr,
             )
             sys.exit(1)
-        paths.extend(found)
+        paths.extend(kept_docs)
     elif docs_args:
-        paths.extend(Path(p) for p in docs_args)
-    if not paths:
-        return None
+        # A project config is repository content; the user's own config is not.
+        user_named = source is None or not source.repo_supplied
+        base = source.config_file.parent if source else cwd
+        named_by = source.config_file if source else None
+        paths.extend(
+            require(Path(raw), user_named=user_named, base=base, named_by=named_by)
+            for raw in docs_args
+        )
+
     seen: set[Path] = set()
-    unique: list[Path] = []
-    for p in paths:
-        rp = p.resolve()
-        if rp not in seen:
-            seen.add(rp)
-            unique.append(p)
-    return "\n\n".join(read_doc_with_links(p) for p in unique)
+    parts: list[str] = []
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        parts.append(read_doc_with_links(path))
+    return "\n\n".join(parts) if parts else None
 
 
 def get_diff(staged: bool) -> str:
@@ -286,7 +513,9 @@ def detect_mode(paths: list[str]) -> str:
     return "code"
 
 
-def resolve_default_backend(mode: str, model: str | None, effort: str | None) -> str:
+def resolve_default_backend(
+    default: str, mode: str, model: str | None, effort: str | None, *, origin: str = "",
+) -> str:
     """The mode's default backend, or an available stand-in — announced, never silent.
 
     Returns the unavailable default when nothing else is available either, so the caller's
@@ -295,7 +524,6 @@ def resolve_default_backend(mode: str, model: str | None, effort: str | None) ->
     A --model rides along to whichever backend is substituted, where a model name from the
     absent vendor fails at the backend, so the notice names it as part of what will run.
     """
-    default = DEFAULT_BACKEND_BY_MODE[mode]
     if available(default):
         return default
     for candidate in FALLBACK_ORDER:
@@ -309,11 +537,21 @@ def resolve_default_backend(mode: str, model: str | None, effort: str | None) ->
         print(
             f"Note: default backend '{default}' for {mode} review is unavailable; "
             f"using '{candidate}'{with_model}. "
-            f"Pass --backend to choose explicitly and silence this.",
+            f"Pass --backend to choose explicitly and silence this.{origin}",
             file=sys.stderr,
         )
         return candidate
     return default
+
+
+def where_set(settings: config.Settings, key: str, label: str | None = None) -> str:
+    """Name the config file a value came from, for a message the user typed no flag for.
+
+    A label carries keys whose spelling in the file may differ from the setting they
+    settled — `backends.default` names a mode's backend just as `backends.diff` does.
+    """
+    origin = settings.from_file(key)
+    return f" ({label or key} is set in {origin})" if origin else ""
 
 
 def stdin_has_input() -> bool:
@@ -446,7 +684,9 @@ def _run():
     )
     parser.add_argument(
         "--mode",
-        choices=["plan", "code", "diff"],
+        # The same set the per-mode default backend table is keyed by; a mode outside it
+        # would have no default to resolve.
+        choices=list(config.MODES),
         help="Review mode (auto-detected if omitted)",
     )
     parser.add_argument("--prompt", help="Additional review instructions")
@@ -467,8 +707,10 @@ def _run():
              "followed one level. With no PATH, auto-discovers llms.txt / AGENTS.md / CLAUDE.md.",
     )
     parser.add_argument(
-        "--llms", nargs="?", const="llms.txt", metavar="PATH",
-        help="Alias for --docs llms.txt (kept for compatibility)",
+        "--llms", nargs="?", const=LLMS_DISCOVER, metavar="PATH",
+        help="Alias for --docs llms.txt (kept for compatibility). Bare, it takes the "
+             "project's llms.txt if the repository carries one; with a PATH it reads what "
+             "you name, exactly as --docs does.",
     )
     parser.add_argument(
         "--api",
@@ -476,8 +718,10 @@ def _run():
         help="Alias for --backend api: OpenAI API directly, no project navigation "
              "(auto-extracts referenced files)",
     )
+    # store_true with default=None so an absent flag is distinguishable from an explicit
+    # false, which is what lets a config file supply the value without overriding the flag.
     parser.add_argument(
-        "--json", action="store_true",
+        "--json", action="store_true", default=None,
         help="Emit findings as a JSON envelope instead of prose",
     )
     parser.add_argument(
@@ -485,21 +729,39 @@ def _run():
         help="Exit 2 if any finding is at or above this severity (requires --json)",
     )
     parser.add_argument(
-        "--full", action="store_true",
+        "--full", action="store_true", default=None,
         help="Inline full backend output in the --json envelope (skip truncation)",
+    )
+    parser.add_argument(
+        "--no-config", action="store_true",
+        help="Ignore .rocket-review.toml and ~/.config/rocket-review/config.toml",
     )
 
     args = parser.parse_args()
 
-    if args.fail_on and not args.json:
+    # Settled before anything else runs: a bad config must fail before any git, gh, or
+    # backend work, and every check below judges the effective value, not just the flag.
+    try:
+        layers = config.load(no_config=args.no_config, cwd=Path.cwd())
+        settings = config.resolve({key: getattr(args, key) for key in config.FLAG_KEYS}, layers)
+    except config.ConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if settings.fail_on and not settings.json:
         print(
-            "Error: --fail-on requires --json (findings must be parsed to be gated).",
+            "Error: --fail-on requires --json (findings must be parsed to be gated)."
+            + where_set(settings, "fail_on") + where_set(settings, "json"),
             file=sys.stderr,
         )
         sys.exit(1)
 
-    if args.full and not args.json:
-        print("Error: --full requires --json (text mode never truncates).", file=sys.stderr)
+    if settings.full and not settings.json:
+        print(
+            "Error: --full requires --json (text mode never truncates)."
+            + where_set(settings, "full") + where_set(settings, "json"),
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if args.repo and not args.pr:
@@ -551,18 +813,33 @@ def _run():
     if args.mode:
         mode = args.mode
 
+    # Empty when --backend was passed: the config's table did not decide this run's backend,
+    # so naming the file that holds it would misdirect.
+    backend_origin = ""
     if specs is None:
-        default_backend = resolve_default_backend(mode, args.model, args.effort)
+        backend_origin = where_set(settings, f"backends.{mode}", f"the {mode} backend")
+        default_backend = resolve_default_backend(
+            settings.backends[mode], mode, args.model, settings.effort, origin=backend_origin,
+        )
         specs = parse_backend_arg(default_backend, args.model)
 
-    if args.effort and any(name == "opencode" for name, _ in specs):
+    # A model pinned on the command line (--backend name:model, or --model) stays as pinned;
+    # [models] fills in the rest, exactly as writing the suffix out would have.
+    specs = [(name, model or settings.models.get(name)) for name, model in specs]
+
+    if settings.effort and any(name == "opencode" for name, _ in specs):
         # opencode has no reasoning-effort flag; drop nothing silently.
-        print("Error: --effort is not supported by the opencode backend.", file=sys.stderr)
+        print(
+            "Error: --effort is not supported by the opencode backend."
+            + where_set(settings, "effort"),
+            file=sys.stderr,
+        )
         sys.exit(1)
     for name, _ in specs:
         hint = missing_binary(name)
         if hint:
-            print(f"Error: backend '{name}' unavailable — {hint}", file=sys.stderr)
+            print(f"Error: backend '{name}' unavailable — {hint}{backend_origin}",
+                  file=sys.stderr)
             sys.exit(1)
     # api has no repo to navigate, and opencode's read-only `plan` agent may be denied the
     # tools it would need to run git itself in non-interactive mode — so if either is
@@ -610,7 +887,7 @@ def _run():
             sys.exit(1)
 
     # Read project standards docs
-    docs_content = collect_docs(args.docs, args.llms)
+    docs_content = collect_docs(settings.docs, args.llms, source=docs_source(settings, layers))
 
     # Per-backend model is injected by run_one; the template leaves it unset.
     job = ReviewJob(
@@ -622,9 +899,9 @@ def _run():
         pr=bool(args.pr),
         git_cmd=git_cmd,
         model=None,
-        json_output=args.json,
-        effort=args.effort,
-        timeout=args.timeout,
+        json_output=settings.json,
+        effort=settings.effort,
+        timeout=settings.timeout,
     )
 
     base.begin_fanout()
@@ -661,15 +938,15 @@ def _run():
     for name, model, raw, error in outputs:
         if error is not None:
             results.append(BackendResult(backend=name, model=model, error=error))
-        elif args.json:
+        elif settings.json:
             results.append(parse_backend_output(raw, name, model))
         else:
             results.append(BackendResult(backend=name, model=model, raw=raw))
 
-    if args.json:
-        if not args.full:
+    if settings.json:
+        if not settings.full:
             truncate_raw(results)
-        print(json.dumps(to_envelope(results, fail_on=args.fail_on), indent=2))
+        print(json.dumps(to_envelope(results, fail_on=settings.fail_on), indent=2))
     else:
         for r in results:
             # A failed backend's block (header + error) goes to stderr so piping stdout
@@ -695,5 +972,5 @@ def _run():
         sys.exit(1)
     if any(r.error for r in results):
         print("Warning: some backends failed; findings above are partial.", file=sys.stderr)
-    if args.fail_on and should_fail(results, args.fail_on):
+    if settings.fail_on and should_fail(results, settings.fail_on):
         sys.exit(2)

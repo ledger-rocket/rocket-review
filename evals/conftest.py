@@ -79,6 +79,20 @@ class StubBackend:
         return env
 
 
+@pytest.fixture(autouse=True)
+def isolate_config(monkeypatch, tmp_path):
+    """Keep the config of whoever runs the suite out of every eval test.
+
+    The runners pass --no-config, so a real sweep is hermetic by argv; this covers the
+    tests that launch rr themselves without it. XDG_CONFIG_HOME redirects the user file,
+    and it reaches subprocesses because they inherit the environment. The project file
+    needs nothing: every test launches rr inside a repo it built under tmp_path.
+    """
+    home = tmp_path / "config-home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home))
+
+
 @pytest.fixture
 def stub_backend(tmp_path: Path) -> StubBackend:
     bin_dir = tmp_path / "stub-bin"
