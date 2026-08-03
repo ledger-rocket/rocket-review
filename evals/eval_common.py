@@ -61,8 +61,8 @@ def tool_version(command: list[str]) -> str | None:
 
 def harness_rr_version() -> str | None:
     # The rocket-review importable *here*, which is also where REVIEW_SCHEMA comes from.
-    # rr has no --version flag, so an --rr pointing at another environment cannot be
-    # interrogated: for those runs this names the harness, not the thing under test.
+    # An --rr pointing at another environment is never interrogated for its own version,
+    # so for those runs this names the harness, not the thing under test.
     try:
         return version("rocket-review")
     except PackageNotFoundError:

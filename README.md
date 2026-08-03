@@ -77,8 +77,8 @@ pipx install git+https://github.com/ledger-rocket/rocket-review.git
 
 Requires Python 3.13+ and at least one backend:
 
-- [Codex CLI](https://github.com/openai/codex) (default backend)
-- [Claude Code](https://claude.com/claude-code) (`--backend claude`)
+- [Codex CLI](https://github.com/openai/codex) (default for plan reviews)
+- [Claude Code](https://claude.com/claude-code) (default for code and diff reviews)
 - [opencode](https://opencode.ai) (`--backend opencode` — any provider, including local models; **experimental**, see below)
 - or none of the above: `--backend api` (or the `--api` shorthand) calls the OpenAI API directly — set `OPENAI_API_KEY` and install the SDK extra: `pipx install 'rocket-review[api]'` (or `pipx inject rocket-review openai` into an existing install)
 
@@ -95,7 +95,36 @@ rr --pr 123                       # review a GitHub PR (number, URL, or branch)
 rr --pr 123 --repo acme/api-server  # ...from outside that repo's checkout
 git diff HEAD~3 | rr              # pipe anything
 rr src/auth.py --docs             # review files against your documented standards
+rr --version                      # print the installed version
 ```
+
+### Default backends by mode
+
+With no `--backend`, the reviewer follows the review mode:
+
+| Mode | Default | Why |
+| --- | --- | --- |
+| `plan` | `codex` | focused plan reviews, the fastest runs, schema-enforced JSON |
+| `code` | `claude` | deeper findings on source files, with fewer false alarms |
+| `diff` | `claude` | deeper findings on changes, with fewer false alarms |
+
+These come from measuring the backends against each other on rocket-review's own
+eval corpus, not from a preference between vendors — and they are only defaults.
+
+- **Overriding** — an explicit `--backend` always wins, in any mode, single
+  (`--backend codex`) or as a list (`--backend codex,claude`). `--mode` is applied
+  before the backend is chosen, so `rr plan.md --mode code` reviews as code *and*
+  uses the code default.
+- **Missing backend** — if the mode's default isn't available, `rr` uses the next
+  available one (the other agentic CLI first, then `opencode`, then `api` when
+  `OPENAI_API_KEY` is set) and says so in a single line on stderr; pass `--backend`
+  to choose explicitly and silence it. The fallback is never silent. If nothing is
+  available, `rr` errors with the install hint for the backend the mode wanted.
+- **Two opinions at once** — `--backend codex,claude` runs both and prints each
+  review under its own heading. Some teams do this on pre-merge changes and read the
+  disagreements; others keep the single per-mode default and spend the time
+  elsewhere. Both are reasonable — it is a choice about your pipeline, not a
+  recommendation.
 
 ### Pick your reviewer
 
@@ -164,7 +193,8 @@ backend errors fail the gate closed.
 - `code` — source files: correctness, security, performance, maintainability.
 - `diff` — for `--diff`/`--staged`/`--commit`/`--pr`/stdin: bugs introduced, missing changes, contract breaks.
 
-Override with `--mode`, add focus with `--prompt "check the locking"`.
+Override with `--mode`, add focus with `--prompt "check the locking"`. The mode also
+picks the reviewer — see [Default backends by mode](#default-backends-by-mode).
 
 ## Project standards (`--docs`)
 
