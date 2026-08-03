@@ -388,6 +388,162 @@ def test_a_binary_change_is_a_changed_path(monkeypatch):
     assert job.changed_paths == ["src/a.py", "src/blob.bin"]
 
 
+def _conflicted_merge_repo(tmp_path):
+    """A repository whose HEAD is a merge that resolved a conflict in shared.py."""
+    repo = new_repo(tmp_path)
+    (repo / "shared.py").write_text("a\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "init")
+    git(repo, "checkout", "-qb", "side")
+    (repo / "shared.py").write_text("a\nside\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "side")
+    git(repo, "checkout", "-q", "-")
+    (repo / "shared.py").write_text("a\nmain\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "main")
+    subprocess.run(["git", "merge", "--no-ff", "side", "-m", "merge"],
+                   cwd=repo, capture_output=True)  # conflicts, by construction
+    (repo / "shared.py").write_text("a\nboth\n")
+    git(repo, "add", "shared.py")
+    git(repo, "commit", "-qm", "merge")
+    return repo
+
+
+def test_a_piped_combined_diff_reports_the_file_the_merge_resolved(tmp_path, monkeypatch):
+    repo = _conflicted_merge_repo(tmp_path)
+    shown = subprocess.run(["git", "show", "HEAD"], cwd=repo, capture_output=True,
+                           text=True).stdout
+    assert "diff --cc shared.py" in shown  # the route under test really is a combined diff
+    monkeypatch.chdir(repo)
+
+    job = run_with_backend(monkeypatch, [], stdin_text=shown)
+
+    # `git show <merge> | rr` is a supported route. A combined diff is not a patch anything
+    # can apply, so the parser that reads every other patch refuses it — and refusing it is
+    # not the same as there being nothing there.
+    assert job.changed_paths == ["shared.py"]
+
+
+COMBINED_PATCH = (
+    "diff --cc src/resolved.py\n"
+    "index 04237e6,fbd67fd..1d26729\n"
+    "--- a/src/resolved.py\n"
+    "+++ b/src/resolved.py\n"
+    "@@@ -1,3 -1,3 +1,3 @@@\n"
+    "  a\n"
+    "- main\n"
+    "- diff --cc invented-from-main.py\n"
+    " -side\n"
+    " -diff --combined invented-from-side.py\n"
+    "++both\n"
+    "++diff --cc invented-from-the-resolution.py\n"
+    'diff --cc "caf\\303\\251.py"\n'
+    "index 1111111,2222222..3333333\n"
+    "@@@ -1,1 -1,1 +1,1 @@@\n"
+    "++x\n"
+)
+
+
+def test_a_combined_diff_reads_only_its_own_headers(monkeypatch):
+    job = run_with_backend(monkeypatch, [], stdin_text=COMBINED_PATCH)
+
+    # Every line of a combined diff's body carries one prefix column per parent, so a
+    # header spelling can never reach column 0 from inside a hunk however hard the content
+    # tries. A C-quoted name is left out rather than reported as its own rendering: this
+    # reader does not decode quoting, and a wrong path is worse than a missing one.
+    assert job.changed_paths == ["src/resolved.py"]
+
+
+ADDITION_FIRST_PATCH = "--- /dev/null\n+++ src/new.py\n@@ -0,0 +1 @@\n+added\n"
+
+
+def test_a_unified_diff_that_opens_with_an_addition_keeps_its_whole_path(monkeypatch):
+    job = run_with_backend(monkeypatch, [], stdin_text=ADDITION_FIRST_PATCH)
+
+    # /dev/null names no file, so it cannot say whether this patch carries prefixes. The
+    # other side of the same header can, and guessing instead reports a path one directory
+    # up from the file that changed — a path that is in no patch and on no disk.
+    assert job.changed_paths == ["src/new.py"]
+
+
+NO_PREFIX_UNDER_A_PATCH = (
+    "diff --git a/x.py a/x.py\n--- a/x.py\n+++ a/x.py\n@@ -1 +1 @@\n-x\n+y\n"
+)
+
+
+def test_a_no_prefix_patch_under_a_top_level_a_directory_keeps_its_path(monkeypatch):
+    job = run_with_backend(monkeypatch, [], stdin_text=NO_PREFIX_UNDER_A_PATCH)
+
+    # `a/` at the front is only a prefix when `b/` answers it on the other side. A project
+    # with a top-level a/ directory writes the same first component with --no-prefix.
+    assert job.changed_paths == ["a/x.py"]
+
+
+# The whitespace-bearing line is deliberately not the last: stdin is read with .strip(),
+# which would remove the very trailing whitespace this is about.
+WHITESPACE_PATCH = (
+    "diff --git a/src/ws.py b/src/ws.py\n"
+    "--- a/src/ws.py\n"
+    "+++ b/src/ws.py\n"
+    "@@ -1 +1,2 @@\n x\n+trailing   \n"
+    "diff --git a/src/plain.py b/src/plain.py\n"
+    "--- a/src/plain.py\n"
+    "+++ b/src/plain.py\n"
+    "@@ -1 +1 @@\n-x\n+y\n"
+)
+
+
+def test_a_whitespace_config_cannot_hide_the_paths(tmp_path, monkeypatch):
+    repo = new_repo(tmp_path)
+    (repo / "f.txt").write_text("x\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "init")
+    git(repo, "config", "apply.whitespace", "error")
+    monkeypatch.chdir(repo)
+
+    job = run_with_backend(monkeypatch, [], stdin_text=WHITESPACE_PATCH)
+
+    # A user's apply.whitespace makes git report the files and *then* exit non-zero, so a
+    # patch that adds trailing whitespace would silently name nothing. What this reads is
+    # the patch, not the reader's opinion of its hygiene.
+    assert job.changed_paths == ["src/ws.py", "src/plain.py"]
+
+
+def test_diff_paths_are_repo_relative_under_a_relative_diff_config(tmp_path, monkeypatch):
+    repo = new_repo(tmp_path)
+    (repo / "sub").mkdir()
+    (repo / "sub/deep.py").write_text("a\n")
+    (repo / "top.py").write_text("b\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "init")
+    git(repo, "config", "diff.relative", "true")
+    (repo / "sub/deep.py").write_text("a2\n")
+    (repo / "top.py").write_text("b2\n")
+    monkeypatch.chdir(repo / "sub")
+
+    job = run_with_backend(monkeypatch, ["--diff"])
+
+    # diff.relative would root these at the directory the user happens to stand in *and*
+    # drop everything outside it — two different lies in one setting.
+    assert job.changed_paths == ["sub/deep.py", "top.py"]
+
+
+def test_a_staged_rename_reports_both_of_its_names(tmp_path, monkeypatch):
+    repo = new_repo(tmp_path)
+    (repo / "old.py").write_text("a\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "init")
+    git(repo, "mv", "old.py", "new.py")
+    monkeypatch.chdir(repo)
+
+    job = run_with_backend(monkeypatch, ["--staged"])
+
+    # Both names, whatever diff.renames says locally — the same answer --commit gives for
+    # the same change, and both names are paths this review touches.
+    assert job.changed_paths == ["new.py", "old.py"]
+
+
 BACKSLASH_NAME_PATCH = (
     'diff --git "a/weird\\\\" "b/weird\\\\"\n'
     '--- "a/weird\\\\"\n'
