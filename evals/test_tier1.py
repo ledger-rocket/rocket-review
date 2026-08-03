@@ -350,10 +350,10 @@ def test_a_seeded_plan_citation_is_exempt_rather_than_unresolved():
     # A plan file exists at no commit, so resolving its citations against the object
     # database would mark every one a hallucination and drag the pooled rate down forever.
     rows = [row(
-        case_id="p-001", mode="plan", source="seeded-plan",
+        case_id="p-101", mode="plan", source="seeded-plan",
         raw=review([
-            finding(file="cases/p-001-plan.md", line=12),
-            finding(file="cases/p-001-plan.md", line=9999),
+            finding(file="cases/p-101-plan.md", line=12),
+            finding(file="cases/p-101-plan.md", line=9999),
         ]),
     )]
     metrics = only(rows, lines={"sample.py": 5})
@@ -365,8 +365,8 @@ def test_a_seeded_plan_citation_is_exempt_rather_than_unresolved():
 def test_a_diff_case_in_the_same_sweep_is_still_resolved():
     # The exemption is scoped to the plan rows, not to the whole file.
     rows = [
-        row(case_id="p-001", mode="plan", source="seeded-plan", rep=1,
-            raw=review([finding(file="cases/p-001-plan.md", line=12)])),
+        row(case_id="p-101", mode="plan", source="seeded-plan", rep=1,
+            raw=review([finding(file="cases/p-101-plan.md", line=12)])),
         row(case_id="b-001", source="mutant", rep=1,
             raw=review([finding(file="sample.py", line=3)])),
     ]

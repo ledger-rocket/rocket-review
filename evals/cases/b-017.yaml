@@ -8,6 +8,13 @@
 # that promise; citing it is having the defect right, so the span covers it through to the
 # sibling check the deleted guard sat beside. Rule 3's human read is what still separates
 # that from a finding that merely lands in the same region.
+#
+# This is the hard end of the `dropped-guard` class. In a seven-repetition paired sweep
+# neither arm found it reliably — control 0/7, treatment 1/7, against 6-7 of 7 in both arms
+# on each of its four siblings. That follows from how it is evidenced: the deletion site
+# still reads as a complete block, and the giveaway is the stale help string far from it,
+# which a reviewer has to go looking for. A mutant good reviewers usually miss is where the
+# ceiling actually is, so it stays rather than being retired as noise.
 id: b-017
 mode: diff
 source: mutant

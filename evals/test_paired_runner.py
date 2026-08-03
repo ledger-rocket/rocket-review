@@ -530,8 +530,8 @@ def stance_smoke_corpus(corpus, head_oid) -> Path:
         "2. Backfill it from the primary.\n3. Cut reads over to it.\n",
         encoding="utf-8",
     )
-    (corpus / "p-001.yaml").write_text(
-        f"id: p-001\nmode: plan\nsource: seeded-plan\npath: plans/cache.md\n"
+    (corpus / "p-101.yaml").write_text(
+        f"id: p-101\nmode: plan\nsource: seeded-plan\npath: plans/cache.md\n"
         f"repo_commit: {head_oid}\n",
         encoding="utf-8",
     )
