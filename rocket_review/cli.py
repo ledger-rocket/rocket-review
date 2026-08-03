@@ -344,7 +344,12 @@ def git_diff_changed_paths(staged: bool) -> list[str]:
     yields no paths and no error; the review's own git calls are the ones that must fail
     loudly.
     """
-    cmd = ["git", "diff", "--name-only", "-z"]
+    # Two diff settings silently change what this call reports, so both are pinned here and
+    # discovery answers the same way in every checkout: diff.relative would root the paths
+    # at wherever the user stands and drop everything outside it, and diff.renames decides
+    # whether a rename is one path or two. diff-tree ignores both, so only this call pins.
+    cmd = ["git", "-c", "diff.relative=false", "-c", "diff.renames=false",
+           "diff", "--name-only", "-z"]
     cmd.append("--staged" if staged else "HEAD")
     result = _discover(cmd)
     if result is None or result.returncode != 0:
@@ -371,18 +376,57 @@ def patch_prefix(patch: str) -> int:
     """How many leading components `git apply --numstat` must strip: -p1 for a patch that
     carries the standard `a/`/`b/` prefixes, -p0 for one written with --no-prefix.
 
-    The first file header of the patch says which it is. A `diff --git ` header whose first
-    path opens with `a/` (or its C-quoted spelling `\"a/`) is the standard form; a plain
-    unified diff has no such line, so its first `--- ` header that is not /dev/null decides.
-    Getting this wrong renames a file to the one a directory up, silently.
+    Which form a patch uses is decided from a header that carries a real name — never
+    /dev/null, which names no file and cannot say. Prefer a `diff --git ` line; fall back to
+    the first `--- ` line that is not /dev/null (`a/` means -p1), then the first `+++ ` line
+    that is not /dev/null (`b/` means -p1). On the diff --git line, `a/` at the front is only
+    a prefix when `b/` answers it on the other side of the same line — a project with a
+    top-level `a/` directory writes the same first component under --no-prefix. Getting this
+    wrong renames a file to the one a directory up, silently.
     """
     for line in patch.splitlines():
         if line.startswith("diff --git "):
-            first = line[len("diff --git "):]
-            return 1 if first.startswith("a/") or first.startswith('"a/') else 0
+            rest = line[len("diff --git "):]
+            first = rest.split(" ", 1)[0]
+            if (first.startswith("a/") or first.startswith('"a/')) and (
+                " b/" in rest or ' "b/' in rest
+            ):
+                return 1
+            return 0
+    for line in patch.splitlines():
         if line.startswith("--- ") and not line.startswith("--- /dev/null"):
             return 1 if line[len("--- "):].startswith("a/") else 0
+    for line in patch.splitlines():
+        if line.startswith("+++ ") and not line.startswith("+++ /dev/null"):
+            return 1 if line[len("+++ "):].startswith("b/") else 0
     return 1
+
+
+def changed_paths_from_combined(patch: str) -> list[str]:
+    """The files a combined diff (a merge's) lists, or [] when it carries none.
+
+    A combined diff is not a patch anything can apply, so numstat refuses it and falls back
+    here. Only a `diff --cc `/`diff --combined ` line at column 0 names a file, because every
+    line of a combined diff's body carries one prefix column per parent — a header spelling
+    can never reach column 0 from inside a hunk. A name git C-quoted in that header (the
+    value opens with `\"`) is skipped: decoding it means re-implementing git's quoting, and
+    a missing path is better than an invented one.
+    """
+    paths: list[str] = []
+    seen: set[str] = set()
+    for line in patch.splitlines():
+        if line.startswith("diff --cc "):
+            name = line[len("diff --cc "):].strip()
+        elif line.startswith("diff --combined "):
+            name = line[len("diff --combined "):].strip()
+        else:
+            continue
+        if not name or name.startswith('"'):
+            continue
+        if name not in seen:
+            seen.add(name)
+            paths.append(name)
+    return paths
 
 
 def changed_paths_from_patch(patch: str) -> list[str]:
@@ -402,12 +446,20 @@ def changed_paths_from_patch(patch: str) -> list[str]:
     # strip trailing whitespace when they read, so restore the terminator before parsing.
     if not patch.endswith("\n"):
         patch += "\n"
+    # --whitespace=nowarn is pinned here: a user's apply.whitespace=error would make git
+    # report the records and *then* exit non-zero, so a patch that adds trailing whitespace
+    # would silently name nothing. Reading a patch is not the place to hold an opinion about
+    # its hygiene.
     result = _discover(
-        ["git", "apply", "--numstat", "-z", f"-p{patch_prefix(patch)}", "-"],
+        ["git", "apply", "--numstat", "-z", "--whitespace=nowarn",
+         f"-p{patch_prefix(patch)}", "-"],
         input_text=patch,
     )
     if result is None or result.returncode != 0:
-        return []
+        # numstat is the parser for every ordinary patch; only when it refuses does the
+        # patch get a second chance from its own combined headers. A combined diff cannot be
+        # applied, so this is the one input numstat cannot represent.
+        return changed_paths_from_combined(patch)
     paths: list[str] = []
     seen: set[str] = set()
     for record in result.stdout.split("\0"):
