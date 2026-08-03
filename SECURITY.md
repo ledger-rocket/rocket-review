@@ -54,18 +54,23 @@ exfiltrating**:
   emitting misleading findings. This risk is highest with `--pr` run on a developer
   machine, where real credentials are present.
 - **Repo-supplied configuration.** A `.rocket-review.toml` in the repo you run `rr` from
-  sets that project's defaults. It can only select backends you have installed, and the
-  docs it names are confined to the repo and excluded from `.git/` — a doc is copied into
-  the prompt verbatim, so without that a clone could have your local git config,
-  credentialed remote URLs and all, sent upstream. What it *can* decide is worth knowing,
-  because it is input the repo's author controls, and on a fork's PR that is the
-  contributor:
+  sets that project's defaults. It is input the repo's author controls — on a fork's PR,
+  the contributor — and four things it decides are worth knowing:
   - **Where your code goes** — `[backends]` picks the backend and therefore the provider.
   - **What it costs** — `[models]` can name an expensive model and `timeout` a long run,
-    on your account or your CI minutes.
+    on your account or your CI minutes. A hostile *short* `timeout` fails closed: the
+    backend is killed and the run reports a backend error rather than a clean review.
   - **What reviews a gated change** — a PR that only edits the config file can downgrade
     the model your gate depends on. Pass `--no-config`, or an explicit `--backend`, in
     gated jobs.
+  - **Which files from your working tree are copied into the prompt** — `docs` paths are
+    read in full and sent to the backend, so this is a direct exfiltration path and the
+    one place `rr` enforces limits on the config rather than documenting them. A project
+    config's docs, the docs it auto-discovers, and the markdown links those reach must be
+    inside its own directory, outside `.git/`, and tracked by the repository: an untracked
+    `.env`, key, or private note in your checkout is yours, not the project's. Outside a
+    git repository there is nothing to track, so only the first two rules apply. What
+    *you* name — `--docs`, `--llms`, or your own user config — is unrestricted.
 
   Read it as you would any tooling config a clone brings with it, or run with
   `--no-config`, which ignores both config files.

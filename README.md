@@ -270,15 +270,38 @@ config change alone can downgrade the reviewer your gate depends on. `--fail-on`
 one direction that is safe either way — a file can only tighten a gate the job did not
 set, never loosen the one it did, since your flag outranks it.
 
-`docs = true` means "use this project's standards doc if it has one": unlike a typed
-`--docs`, a project with no `llms.txt` / `AGENTS.md` / `CLAUDE.md` is not an error, it
-just has no standards doc. Explicit `docs` paths are relative to the config file that
-names them. A project file may only name docs inside its own directory, and never inside
-`.git`: it comes from the repository rather than from you, so it must not be able to have
-a file elsewhere on your machine — or your local git config, with whatever credentials a
-remote URL carries — read and sent to a backend. Treat `.rocket-review.toml` in a repo
-you cloned like any other tooling config it ships: it can pick the backend your review is
-sent to. `--no-config` opts out.
+### `docs` in a config file
+
+`docs = true` means "use this project's standards doc if it has one" — `llms.txt` /
+`AGENTS.md` / `CLAUDE.md`, and a project without one is not an error the way a typed
+`--docs` is. Which project depends on which file asked:
+
+- **Project file** — looks in the directory holding the `.rocket-review.toml`, so
+  everyone gets the same standards wherever in the repo they run from.
+- **User file** — looks in the checkout you are in (its git root, or the current
+  directory outside a repo), never beside `~/.config/rocket-review/config.toml`, which
+  is nobody's project.
+
+Explicit `docs` paths are relative to the config file that names them.
+
+**What a project file may reach.** It is repository content — on a fork's PR, a
+contributor's — so `rr` enforces three rules on the paths it supplies, and on the
+markdown links those docs reach:
+
+1. inside the config file's own directory,
+2. never inside `.git` (that is your local machine state, credentialed remote URLs
+   included), and
+3. only files the repository tracks — an untracked or ignored `.env`, key, or note in
+   your working tree is yours, not the project's.
+
+A named path that is untracked is refused by name; an auto-discovered or linked one is
+skipped with a warning, since discovery is a standing "if there is one". Outside a git
+repository nothing is tracked, so rules 1 and 2 are all that apply there. Rule 3 also
+covers auto-discovery asked for by your *own* config — the repo still chooses which file
+that is, and therefore what it links to.
+
+What you name yourself — `--docs`, `--llms`, or a path in your own user config — is
+unrestricted, exactly as before: those paths are your instruction, not the repo's.
 
 ## How it works
 
@@ -307,10 +330,11 @@ read-only is not the same as safe:
 - Untrusted input can prompt-inject the reviewer — a hostile PR body, diff, comment,
   or `AGENTS.md` can try to steer an agentic backend. Be especially careful with `--pr`
   on a dev machine.
-- A repo's `.rocket-review.toml` configures the runs you make inside it — including
-  which backend, and therefore which provider, gets your code. It can only name docs
-  inside the repo, and only backends you have installed, but it is repo-supplied input:
-  read it like any other tooling config a clone brings with it, or use `--no-config`.
+- A repo's `.rocket-review.toml` configures the runs you make inside it — including which
+  backend, and therefore which provider, gets your code, and which model at what cost. The
+  docs it can name are bounded (see [`docs` in a config file](#docs-in-a-config-file)) and
+  it can only select backends you have installed, but it is repo-supplied input: read it
+  like any other tooling config a clone brings with it, or use `--no-config`.
 
 **Don't run agentic backends against untrusted repos or PRs on a machine where readable
 secrets exist.** See [SECURITY.md](SECURITY.md) for the full threat model and how to

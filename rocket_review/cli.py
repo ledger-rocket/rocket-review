@@ -7,7 +7,7 @@ import stat
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from urllib.parse import unquote, urldefrag
@@ -96,8 +96,82 @@ def read_files(paths: list[str]) -> str:
     return "\n\n".join(parts)
 
 
-def read_doc_with_links(doc_path: Path) -> str:
-    """Read a doc and follow all relative markdown links to build full project context."""
+@dataclass(frozen=True)
+class DocsSource:
+    """A config file's `docs` value: where discovery looks, and how far its paths are trusted.
+
+    The trust boundary is who chose the path, not which file it names. A flag or a user
+    config is the user's own word and is unrestricted. A project config is repository
+    content — on a fork's PR, a contributor's — so inside a checkout it may only reach files
+    the repository tracks: an untracked .env or key beside the working tree is the
+    developer's, not the project's, and a doc is copied into the prompt verbatim.
+    """
+
+    #: The config file itself, so a refusal can name what asked for the path.
+    config_file: Path
+    #: The project the file speaks for: the directory holding a project config, or the
+    #: checkout a user config is being used in — never ~/.config, which is no project.
+    discovery_root: Path
+    #: The checkout whose tracked files bound every doc the *repository* chose: each
+    #: auto-discovered doc, whichever layer asked for discovery, since the repo decides
+    #: which file that is and therefore what it links to. None outside a checkout.
+    repo_root: Path | None
+    #: Whether this config file is itself repository content, which is what extends that
+    #: bound to the paths it names outright.
+    repo_supplied: bool
+
+    @property
+    def named_paths_root(self) -> Path | None:
+        """The checkout bounding the paths this file names, or None when the user named them."""
+        return self.repo_root if self.repo_supplied else None
+
+
+def docs_source(settings: config.Settings, layers: list[config.Layer]) -> DocsSource | None:
+    """The config file that supplied `docs`, or None when the flag did — or nothing did."""
+    origin = settings.from_file("docs")
+    if origin is None:
+        return None
+    layer = next(item for item in layers if str(item.path) == origin)
+    if not layer.repo_supplied:
+        # A user config speaks for whatever project it is used in, so discovery follows the
+        # checkout rather than ~/.config, where no project's standards live.
+        cwd = Path.cwd()
+        root = config.find_git_root(cwd)
+        return DocsSource(layer.path, root or cwd, root, repo_supplied=False)
+    directory = layer.path.parent
+    return DocsSource(
+        layer.path, directory, config.find_git_root(directory), repo_supplied=True
+    )
+
+
+def relative_to_root(path: Path, root: Path) -> str:
+    """A path as the repository names it, for a message about that repository's files."""
+    resolved = path.resolve()
+    return str(resolved.relative_to(root) if resolved.is_relative_to(root) else resolved)
+
+
+def tracked_paths(root: Path, paths: list[Path]) -> set[Path]:
+    """Which of `paths` the repository at `root` tracks, in one call.
+
+    Fails closed: if git cannot answer, nothing counts as tracked. `--full-name` pins the
+    output to repo-relative paths whatever the working directory, and -z keeps a filename
+    with a quote or a newline in it from being re-encoded.
+    """
+    result = run_capture(
+        ["git", "-C", str(root), "ls-files", "-z", "--full-name", "--", *(str(p) for p in paths)]
+    )
+    if result.returncode != 0:
+        return set()
+    return {(root / entry).resolve() for entry in result.stdout.split("\0") if entry}
+
+
+def read_doc_with_links(doc_path: Path, *, tracked_root: Path | None = None) -> str:
+    """Read a doc and follow all relative markdown links to build full project context.
+
+    tracked_root restricts the links followed to files the repository tracks; it is set when
+    a project config chose this doc, so repo-supplied content cannot reach past the repo
+    into the working tree it happens to sit in.
+    """
     if not doc_path.is_file():
         print(f"Error: {doc_path} not found.", file=sys.stderr)
         sys.exit(1)
@@ -111,6 +185,7 @@ def read_doc_with_links(doc_path: Path) -> str:
     parts = [f"--- {doc_path.name} ---\n{doc_text}"]
 
     links = re.findall(r"\[[^\]]*\]\(([^)]+)\)", doc_text)
+    candidates: list[tuple[str, Path]] = []
     for raw_link in links:
         if raw_link.startswith(("http://", "https://", "#")):
             continue
@@ -136,11 +211,27 @@ def read_doc_with_links(doc_path: Path) -> str:
             print(f"Warning: skipping link into repository metadata: {raw_link}", file=sys.stderr)
             continue
         if linked_path.is_file():
-            try:
-                text = linked_path.read_text(encoding="utf-8")
-                parts.append(f"--- {link} ---\n{text}")
-            except (OSError, UnicodeDecodeError) as e:
-                print(f"Warning: could not read {link}: {e}", file=sys.stderr)
+            candidates.append((link, linked_path))
+
+    if tracked_root is not None and candidates:
+        tracked = tracked_paths(tracked_root, [path for _, path in candidates])
+        kept = []
+        for link, path in candidates:
+            if path.resolve() in tracked:
+                kept.append((link, path))
+            else:
+                print(
+                    f"Warning: skipping link to a file the repository does not track: {link}",
+                    file=sys.stderr,
+                )
+        candidates = kept
+
+    for link, linked_path in candidates:
+        try:
+            text = linked_path.read_text(encoding="utf-8")
+            parts.append(f"--- {link} ---\n{text}")
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"Warning: could not read {link}: {e}", file=sys.stderr)
 
     return "\n\n".join(parts)
 
@@ -149,42 +240,88 @@ DISCOVERY_CANDIDATES = ["llms.txt", "AGENTS.md", "CLAUDE.md"]
 
 
 def collect_docs(
-    docs_args: list[str] | None, llms_arg: str | None, *, config_file: Path | None = None
+    docs_args: list[str] | None, llms_arg: str | None, *, source: DocsSource | None = None
 ) -> str | None:
     """Assemble standards context from --docs (explicit or auto-discovered) and --llms.
 
-    config_file names the config that supplied `docs`, when a file did rather than the flag.
-    Both differences follow from it being a standing preference rather than this run's
-    instruction: auto-discovery looks beside that file — the project's root, not wherever
-    the user happens to be standing — and a project with no standards doc is simply a
-    project without one, where the typed flag asked for something specific and errors.
+    `source` is set when a config file supplied `docs` rather than the flag. Being a
+    standing preference rather than this run's instruction changes two things: discovery
+    looks at the project the file speaks for instead of wherever the user is standing, and
+    a project with no standards doc is simply a project without one, where the typed flag
+    asked for something specific and errors. A project config is additionally bounded to
+    what the repository tracks — see DocsSource.
     """
-    paths: list[Path] = []
+    # Kept apart by who chose them: only the config's own paths carry its restriction into
+    # the links they reach. A --llms path in the same run was the user's own choice.
+    flag_paths: list[Path] = []
+    from_config: list[Path] = []
+    paths = from_config if source else flag_paths
     if llms_arg:
-        paths.append(Path(llms_arg))
+        flag_paths.append(Path(llms_arg))
     if docs_args is not None and len(docs_args) == 0:
-        root = config_file.parent if config_file else Path.cwd()
-        found = [root / c for c in DISCOVERY_CANDIDATES if (root / c).is_file()]
-        if not found and config_file is None:
+        search_root = source.discovery_root if source else Path.cwd()
+        found = [search_root / c for c in DISCOVERY_CANDIDATES if (search_root / c).is_file()]
+        if not found and source is None:
             print(
                 "Error: --docs given without paths and none of "
                 f"{', '.join(DISCOVERY_CANDIDATES)} found in the current directory.",
                 file=sys.stderr,
             )
             sys.exit(1)
+        if source is not None and source.repo_root is not None:
+            # Skipped rather than refused: discovery is a standing "if this project has
+            # one", and an untracked CLAUDE.md in someone's working tree is common and is
+            # not the project's standards doc.
+            tracked = tracked_paths(source.repo_root, found)
+            for candidate in found:
+                if candidate.resolve() not in tracked:
+                    print(
+                        f"Warning: skipping {candidate.name}, which the repository does not "
+                        f"track ({source.config_file} asked for auto-discovery).",
+                        file=sys.stderr,
+                    )
+            found = [c for c in found if c.resolve() in tracked]
         paths.extend(found)
     elif docs_args:
-        paths.extend(Path(p) for p in docs_args)
-    if not paths:
-        return None
+        named = [Path(p) for p in docs_args]
+        if source is not None and source.named_paths_root is not None:
+            refuse_untracked_docs(source, named)
+        paths.extend(named)
+    # A doc the repository chose — auto-discovered, or named by a project config — reaches
+    # only what the repository tracks; one the user named keeps the user's own reach.
+    links_root: Path | None = None
+    if source is not None:
+        discovered = docs_args is not None and len(docs_args) == 0
+        links_root = source.repo_root if discovered else source.named_paths_root
+    reach: list[tuple[Path, Path | None]] = [(p, None) for p in flag_paths]
+    reach += [(p, links_root) for p in from_config]
     seen: set[Path] = set()
-    unique: list[Path] = []
-    for p in paths:
-        rp = p.resolve()
-        if rp not in seen:
-            seen.add(rp)
-            unique.append(p)
-    return "\n\n".join(read_doc_with_links(p) for p in unique)
+    parts: list[str] = []
+    for path, bounded_by in reach:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        parts.append(read_doc_with_links(path, tracked_root=bounded_by))
+    return "\n\n".join(parts) if parts else None
+
+
+def refuse_untracked_docs(source: DocsSource, paths: list[Path]) -> None:
+    """Stop before reading anything a project config named that the repository does not track."""
+    root = source.named_paths_root
+    assert root is not None
+    tracked = tracked_paths(root, paths)
+    untracked = [p for p in paths if p.resolve() not in tracked]
+    if not untracked:
+        return
+    named = ", ".join(repr(relative_to_root(p, root)) for p in untracked)
+    print(
+        f"Error: {source.config_file}: docs path {named} is not tracked by the repository — "
+        "a project config may only name files the repo carries, since an untracked file is "
+        "the developer's and not the project's.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def get_diff(staged: bool) -> str:
@@ -531,10 +668,8 @@ def _run():
     # Settled before anything else runs: a bad config must fail before any git, gh, or
     # backend work, and every check below judges the effective value, not just the flag.
     try:
-        settings = config.resolve(
-            {key: getattr(args, key) for key in config.FLAG_KEYS},
-            config.load(no_config=args.no_config, cwd=Path.cwd()),
-        )
+        layers = config.load(no_config=args.no_config, cwd=Path.cwd())
+        settings = config.resolve({key: getattr(args, key) for key in config.FLAG_KEYS}, layers)
     except config.ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -674,10 +809,7 @@ def _run():
             sys.exit(1)
 
     # Read project standards docs
-    docs_origin = settings.from_file("docs")
-    docs_content = collect_docs(
-        settings.docs, args.llms, config_file=Path(docs_origin) if docs_origin else None
-    )
+    docs_content = collect_docs(settings.docs, args.llms, source=docs_source(settings, layers))
 
     # Per-backend model is injected by run_one; the template leaves it unset.
     job = ReviewJob(

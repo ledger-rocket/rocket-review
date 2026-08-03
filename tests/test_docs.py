@@ -1,6 +1,9 @@
+import subprocess
+from pathlib import Path
+
 import pytest
 
-from rocket_review.cli import collect_docs, read_doc_with_links
+from rocket_review.cli import DocsSource, collect_docs, read_doc_with_links
 
 
 def test_read_doc_follows_relative_links(tmp_path):
@@ -114,6 +117,16 @@ def test_read_doc_skips_an_unusable_link(tmp_path, capsys):
     assert "unusable link" in capsys.readouterr().err
 
 
+def config_source(directory: Path, *, repo_root=None, repo_supplied=True) -> DocsSource:
+    """A `docs` value supplied by a config file in `directory`."""
+    return DocsSource(
+        config_file=directory / ".rocket-review.toml",
+        discovery_root=directory,
+        repo_root=repo_root,
+        repo_supplied=repo_supplied,
+    )
+
+
 def test_collect_docs_from_a_config_file_discovers_beside_that_file(tmp_path, monkeypatch):
     # A project standardising on `docs = true` must apply the same standards to everyone,
     # not only to whoever runs from the repo root.
@@ -121,13 +134,79 @@ def test_collect_docs_from_a_config_file_discovers_beside_that_file(tmp_path, mo
     nested = tmp_path / "src" / "deep"
     nested.mkdir(parents=True)
     monkeypatch.chdir(nested)
-    out = collect_docs([], None, config_file=tmp_path / ".rocket-review.toml")
+    out = collect_docs([], None, source=config_source(tmp_path))
     assert "project standards" in out
 
 
 def test_collect_docs_from_a_config_file_is_silent_when_it_finds_nothing(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    assert collect_docs([], None, config_file=tmp_path / ".rocket-review.toml") is None
+    assert collect_docs([], None, source=config_source(tmp_path)) is None
+
+
+ENV_SECRET = "SECRET-env-DEADBEEF"
+
+
+def repo_with_a_local_secret(tmp_path) -> Path:
+    """A checkout holding a gitignored .env — the developer's file, not the project's."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    (tmp_path / ".gitignore").write_text(".env\n")
+    (tmp_path / ".env").write_text(f"AWS_SECRET_ACCESS_KEY={ENV_SECRET}\n")
+    (tmp_path / "llms.txt").write_text("# llms\nno bare excepts\n[e](.env)\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", ".gitignore", "llms.txt"],
+                   check=True, capture_output=True)
+    return tmp_path
+
+
+def test_a_repo_chosen_doc_cannot_link_to_an_untracked_local_file(tmp_path, monkeypatch, capsys):
+    # The class the .git guard only covered one instance of: an untracked file in the
+    # working tree is the developer's, so repository content may not reach it.
+    repo = repo_with_a_local_secret(tmp_path)
+    monkeypatch.chdir(repo)
+    out = collect_docs([], None, source=config_source(repo, repo_root=repo))
+    assert ENV_SECRET not in out
+    assert "no bare excepts" in out  # the tracked doc itself is still read
+    assert "does not track" in capsys.readouterr().err
+
+
+def test_discovery_skips_a_standards_doc_the_repo_does_not_track(tmp_path, monkeypatch, capsys):
+    # An untracked CLAUDE.md is someone's local file, not the project's standards — and a
+    # config asked for it only by pattern, so it is skipped rather than refused.
+    repo = repo_with_a_local_secret(tmp_path)
+    (repo / "CLAUDE.md").write_text("LOCAL NOTES: staging password is hunter2\n")
+    (repo / "llms.txt").unlink()
+    monkeypatch.chdir(repo)
+    assert collect_docs([], None, source=config_source(repo, repo_root=repo)) is None
+    assert "skipping CLAUDE.md, which the repository does not track" in capsys.readouterr().err
+
+
+def test_the_user_still_reaches_their_own_files_through_a_flag(tmp_path, monkeypatch):
+    # No over-blocking: the restriction is about who chose the path, and here the user did.
+    repo = repo_with_a_local_secret(tmp_path)
+    monkeypatch.chdir(repo)
+    assert ENV_SECRET in collect_docs([".env"], None)
+    assert ENV_SECRET in collect_docs(["llms.txt"], None)  # links followed as before
+    assert ENV_SECRET in collect_docs([], ".env")  # --llms, alongside a config-supplied docs
+    assert ENV_SECRET in collect_docs(
+        [], ".env", source=config_source(repo, repo_root=repo)
+    )
+
+
+def test_a_user_configs_own_paths_are_not_bounded_by_the_repo(tmp_path, monkeypatch):
+    repo = repo_with_a_local_secret(tmp_path)
+    monkeypatch.chdir(repo)
+    source = config_source(repo, repo_root=repo, repo_supplied=False)
+    assert ENV_SECRET in collect_docs([str(repo / ".env")], None, source=source)
+
+
+def test_discovery_is_bounded_by_the_repo_for_a_user_config_too(tmp_path, monkeypatch, capsys):
+    # A user config's `docs = true` does not name a file — the repository does, and it
+    # decides what that file links to.
+    repo = repo_with_a_local_secret(tmp_path)
+    monkeypatch.chdir(repo)
+    out = collect_docs([], None, source=config_source(repo, repo_root=repo, repo_supplied=False))
+    assert ENV_SECRET not in out
+    assert "no bare excepts" in out
+    assert "does not track" in capsys.readouterr().err
 
 
 def test_read_doc_blocks_sibling_prefix_escape(tmp_path, capsys):

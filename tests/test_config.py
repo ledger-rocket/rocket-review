@@ -12,7 +12,7 @@ USER = Path("/home/u/.config/rocket-review/config.toml")
 
 
 def layer(path, **values):
-    return config.Layer(path=path, values=values)
+    return config.Layer(path=path, values=values, repo_supplied=path == PROJECT)
 
 
 def write(directory: Path, body: str, name: str = config.PROJECT_CONFIG_NAME) -> Path:
@@ -31,9 +31,14 @@ def write_user_config(body: str) -> Path:
 
 
 def make_repo(tmp_path: Path, body: str | None = None, subdir: str = "") -> Path:
-    """A git repo with an optional project config; returns the directory to run from."""
+    """A real git repo with an optional project config; returns the directory to run from.
+
+    Real rather than a bare .git directory: what a project config may name is bounded by
+    what the repository tracks, and only git can answer that.
+    """
     repo = tmp_path / "repo"
-    (repo / ".git").mkdir(parents=True)
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
     if body is not None:
         write(repo, body)
     if not subdir:
@@ -43,14 +48,19 @@ def make_repo(tmp_path: Path, body: str | None = None, subdir: str = "") -> Path
     return nested
 
 
-def loaded(path: Path, *, confine_docs: bool = False) -> dict:
-    return config.load_file(path, confine_docs=confine_docs).values
+def loaded(path: Path, *, repo_supplied: bool = False) -> dict:
+    return config.load_file(path, repo_supplied=repo_supplied).values
 
 
-def error_from(path: Path, *, confine_docs: bool = False) -> str:
+def error_from(path: Path, *, repo_supplied: bool = False) -> str:
     with pytest.raises(config.ConfigError) as e:
-        config.load_file(path, confine_docs=confine_docs)
+        config.load_file(path, repo_supplied=repo_supplied)
     return str(e.value)
+
+
+def track(repo: Path, *names: str) -> None:
+    """Stage files so the repository tracks them; the index is what `git ls-files` reads."""
+    subprocess.run(["git", "-C", str(repo), "add", "--", *names], check=True, capture_output=True)
 
 
 # --- discovery -----------------------------------------------------------------------
@@ -372,7 +382,7 @@ def test_every_key_rejects_a_wrong_type_as_a_config_error(tmp_path):
         for value in values:
             body = assignment.format(v=value)
             try:
-                config.load_file(write(tmp_path, body + "\n"), confine_docs=True)
+                config.load_file(write(tmp_path, body + "\n"), repo_supplied=True)
             except config.ConfigError:
                 pass  # the accepted outcome; the valid combinations simply load
             except Exception as e:
@@ -389,9 +399,26 @@ def test_a_project_config_may_not_name_docs_outside_itself(tmp_path):
     # The project file comes from the repository, so an absolute or escaping path would let
     # a cloned repo have any file on the machine read and sent to a backend.
     path = write(tmp_path / "repo", "docs = ['../../../etc/passwd']\n")
-    message = error_from(path, confine_docs=True)
+    message = error_from(path, repo_supplied=True)
     assert "resolves outside" in message
     assert "may only name docs inside its own directory" in message
+
+
+@pytest.mark.parametrize("path", [
+    "/repo/.git/config", "/repo/.GIT/config", "/repo/.Git/hooks/x",
+    # Win32 strips trailing dots and spaces while resolving, so these reach .git there.
+    "/repo/.git./config", "/repo/.git /config", "/repo/.GIT. /config", "/repo/.git/",
+])
+def test_inside_dot_git_covers_every_spelling_that_reaches_metadata(path):
+    assert config.inside_dot_git(Path(path))
+
+
+@pytest.mark.parametrize("path", [
+    "/repo/.github/workflows/ci.yml", "/repo/.gitignore", "/repo/git/config",
+    "/repo/docs/git.md", "/repo/agit/x",
+])
+def test_inside_dot_git_leaves_ordinary_paths_alone(path):
+    assert not config.inside_dot_git(Path(path))
 
 
 @pytest.mark.parametrize(
@@ -403,7 +430,7 @@ def test_a_project_config_may_not_name_docs_inside_dot_git(tmp_path, item):
     # resolve() does not canonicalise case, and on a case-insensitive filesystem '.GIT'
     # opens the real .git.
     path = write(tmp_path / "repo", f"docs = ['{item}']\n")
-    assert "is inside .git" in error_from(path, confine_docs=True)
+    assert "is inside .git" in error_from(path, repo_supplied=True)
 
 
 def test_confinement_is_wired_to_the_project_file_and_only_it(tmp_path):
@@ -609,6 +636,7 @@ def test_a_flag_conflict_the_user_typed_names_no_file(monkeypatch, tmp_path, cap
 def test_config_docs_true_auto_discovers(monkeypatch, tmp_path):
     run_from = make_repo(tmp_path, "docs = true\n")
     (run_from / "llms.txt").write_text("project standards: no bare excepts\n")
+    track(run_from, "llms.txt")
     monkeypatch.chdir(run_from)
     jobs = fake_backends(monkeypatch)
     assert run_main(monkeypatch, ["--diff"]) == 0
@@ -620,6 +648,7 @@ def test_config_docs_paths_are_relative_to_the_config_file(monkeypatch, tmp_path
     run_from = make_repo(tmp_path, "docs = ['docs/standards.md']\n", subdir="src")
     (tmp_path / "repo" / "docs").mkdir()
     (tmp_path / "repo" / "docs" / "standards.md").write_text("standards: prefer small diffs\n")
+    track(tmp_path / "repo", "docs/standards.md")
     monkeypatch.chdir(run_from)
     jobs = fake_backends(monkeypatch)
     assert run_main(monkeypatch, ["--diff"]) == 0
@@ -717,6 +746,7 @@ def test_a_repo_standards_doc_cannot_link_git_metadata_into_the_payload(monkeypa
     # One markdown hop out of a committed doc: the doc is read, the link into .git is not.
     run_from = repo_with_a_credentialed_remote(tmp_path, "docs = true\n")
     (run_from / "llms.txt").write_text("# llms\nno bare excepts\n[cfg](.GIT/config)\n")
+    track(run_from, "llms.txt")
     monkeypatch.chdir(run_from)
     jobs = fake_backends(monkeypatch)
     assert run_main(monkeypatch, ["--diff"]) == 0
@@ -724,11 +754,95 @@ def test_a_repo_standards_doc_cannot_link_git_metadata_into_the_payload(monkeypa
     assert "no bare excepts" in jobs["claude"].docs_content
 
 
+ENV_SECRET = "SECRET-env-DEADBEEF"
+PEM_SECRET = "SECRET-pem-DEADBEEF"
+
+
+def repo_with_local_secrets(tmp_path, body):
+    """A repo carrying the project config under test, plus gitignored local secrets.
+
+    Tracked: .gitignore, STANDARDS.md, llms.txt — the last two linking to the secrets, the
+    way a hostile repo would. Untracked: .env and id.pem, which are the developer's.
+    """
+    run_from = make_repo(tmp_path, body)
+    (run_from / ".gitignore").write_text(".env\n*.pem\n")
+    (run_from / ".env").write_text(f"AWS_SECRET_ACCESS_KEY={ENV_SECRET}\n")
+    (run_from / "id.pem").write_text(f"-----BEGIN KEY-----\n{PEM_SECRET}\n")
+    (run_from / "STANDARDS.md").write_text("# Standards\nsmall diffs\n[a](.env) [b](id.pem)\n")
+    (run_from / "llms.txt").write_text("# llms\nno bare excepts\n[a](.env) [b](id.pem)\n")
+    track(run_from, ".gitignore", "STANDARDS.md", "llms.txt")
+    return run_from
+
+
+@pytest.mark.parametrize("value", ["['.env']", "['id.pem']", "['.env', 'id.pem']"])
+def test_a_repo_config_cannot_name_an_untracked_local_file(monkeypatch, tmp_path, capsys, value):
+    monkeypatch.chdir(repo_with_local_secrets(tmp_path, f"docs = {value}\n"))
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 1
+    err = capsys.readouterr().err
+    assert "is not tracked by the repository" in err
+    assert "may only name files the repo carries" in err
+    assert jobs == {}  # refused before any backend ran
+
+
+@pytest.mark.parametrize("body", ["docs = true\n", "docs = ['STANDARDS.md']\n"])
+def test_a_repo_chosen_doc_cannot_link_an_untracked_local_file_into_the_payload(
+    monkeypatch, tmp_path, body
+):
+    monkeypatch.chdir(repo_with_local_secrets(tmp_path, body))
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 0
+    docs = jobs["claude"].docs_content
+    assert ENV_SECRET not in docs and PEM_SECRET not in docs
+    assert "small diffs" in docs or "no bare excepts" in docs  # the doc itself still applies
+
+
+def test_a_user_config_docs_true_applies_the_projects_standards(monkeypatch, tmp_path):
+    # Not the doc sitting beside ~/.config/rocket-review/config.toml, which is no project's
+    # standards and would otherwise ride into every repo the user reviews.
+    run_from = repo_with_local_secrets(tmp_path, None)
+    write_user_config("docs = true\n")
+    beside_the_user_config = config.user_config_path().parent / "llms.txt"
+    beside_the_user_config.write_text("STANDARDS FROM THE HOME DIRECTORY\n")
+    monkeypatch.chdir(run_from)
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 0
+    docs = jobs["claude"].docs_content
+    assert "no bare excepts" in docs
+    assert "HOME DIRECTORY" not in docs
+    assert ENV_SECRET not in docs and PEM_SECRET not in docs
+
+
+def test_a_user_config_docs_true_applies_them_from_a_subdirectory_too(monkeypatch, tmp_path):
+    run_from = repo_with_local_secrets(tmp_path, None)
+    nested = run_from / "src" / "deep"
+    nested.mkdir(parents=True)
+    write_user_config("docs = true\n")
+    monkeypatch.chdir(nested)
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 0
+    assert "no bare excepts" in jobs["claude"].docs_content
+
+
+def test_outside_a_repo_a_project_config_keeps_confinement_alone(monkeypatch, tmp_path):
+    # No repository, so nothing is tracked and the tracked rule cannot apply; the
+    # directory confinement and the .git guard are what remain.
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    write(loose, "docs = ['standards.md']\n")
+    (loose / "standards.md").write_text("loose standards\n")
+    monkeypatch.chdir(loose)
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 0
+    assert "loose standards" in jobs["claude"].docs_content
+
+
 def test_config_docs_true_discovers_beside_the_config_not_the_cwd(monkeypatch, tmp_path):
     # A project standardising on `docs = true` applies to everyone who runs rr in it, not
     # only to whoever happens to be standing at the repo root.
     run_from = make_repo(tmp_path, "docs = true\n", subdir="src/deep")
     (tmp_path / "repo" / "llms.txt").write_text("project standards: small diffs\n")
+    track(tmp_path / "repo", "llms.txt")
     monkeypatch.chdir(run_from)
     jobs = fake_backends(monkeypatch)
     assert run_main(monkeypatch, ["--diff"]) == 0
@@ -758,6 +872,7 @@ def test_config_docs_and_the_llms_alias_combine(monkeypatch, tmp_path):
     run_from = make_repo(tmp_path, "docs = ['standards.md']\n")
     (run_from / "standards.md").write_text("standards: prefer small diffs\n")
     (run_from / "llms.txt").write_text("llms: no bare excepts\n")
+    track(run_from, "standards.md")
     monkeypatch.chdir(run_from)
     jobs = fake_backends(monkeypatch)
     assert run_main(monkeypatch, ["--diff", "--llms"]) == 0

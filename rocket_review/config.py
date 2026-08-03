@@ -56,6 +56,9 @@ class Layer:
 
     path: Path
     values: dict[str, Any]
+    #: True for the project file, which the repository supplies rather than the user. It is
+    #: the layer's trust level, and it decides what the file's paths may reach.
+    repo_supplied: bool
 
 
 @dataclass(frozen=True)
@@ -85,15 +88,16 @@ class Settings:
 
 
 def inside_dot_git(path: Path) -> bool:
-    """Whether a path enters a .git directory, compared case-insensitively.
+    """Whether a path enters a .git directory, under the spellings that reach the same file.
 
     Path.resolve() does not canonicalise case, so an exact ".git" comparison is bypassed by
     ".GIT/config" on the case-insensitive filesystems macOS and Windows default to — where
-    the file that then opens is the real one. Repository metadata is never a standards doc:
-    it is local machine state a clone does not control, credentialed remote URLs above all,
-    and a doc is copied into the prompt verbatim.
+    the file that then opens is the real one. Win32 additionally strips trailing dots and
+    spaces while resolving, so ".git." and ".git " land there too. Repository metadata is
+    never a standards doc: it is local machine state a clone does not control, credentialed
+    remote URLs above all, and a doc is copied into the prompt verbatim.
     """
-    return any(part.lower() == ".git" for part in path.parts)
+    return any(part.lower().rstrip(". ") == ".git" for part in path.parts)
 
 
 def user_config_path() -> Path:
@@ -103,17 +107,27 @@ def user_config_path() -> Path:
     return base / USER_CONFIG_RELPATH
 
 
+def find_git_root(start: Path) -> Path | None:
+    """The checkout `start` is in, or None outside one.
+
+    A worktree's or submodule's .git is a file rather than a directory, hence exists()
+    over is_dir().
+    """
+    start = start.resolve()
+    return next((d for d in [start, *start.parents] if (d / ".git").exists()), None)
+
+
 def find_project_config(start: Path) -> Path | None:
     """The nearest .rocket-review.toml from `start` up to and including the git root.
 
     Bounded by the repository so a stray file in $HOME or / can never be adopted as some
     project's config; outside a repository only `start` itself is considered, for the same
-    reason. A worktree's .git is a file rather than a directory, hence exists() over is_dir().
+    reason.
     """
     start = start.resolve()
     chain = [start, *start.parents]
-    root = next((i for i, directory in enumerate(chain) if (directory / ".git").exists()), None)
-    searched = chain[: root + 1] if root is not None else chain[:1]
+    root = find_git_root(start)
+    searched = chain[: chain.index(root) + 1] if root is not None else chain[:1]
     for directory in searched:
         candidate = directory / PROJECT_CONFIG_NAME
         if candidate.is_file():
@@ -121,12 +135,12 @@ def find_project_config(start: Path) -> Path | None:
     return None
 
 
-def load_file(path: Path, *, confine_docs: bool) -> Layer:
+def load_file(path: Path, *, repo_supplied: bool) -> Layer:
     """Parse and validate one config file.
 
-    confine_docs bounds `docs` paths to the file's own directory. It is set for the project
-    file, which comes from the repository rather than from the user: without it, a cloned
-    repo could name any file on the machine and have it read and sent to a backend.
+    repo_supplied marks the project file, which comes from the repository rather than from
+    the user. Here it bounds `docs` paths to the file's own directory and keeps them out of
+    .git; the caller applies the rest of that trust level (see cli.DocsSource).
     """
     try:
         raw = path.read_bytes()
@@ -138,7 +152,11 @@ def load_file(path: Path, *, confine_docs: bool) -> Layer:
         raise ConfigError(f"{path} is not valid UTF-8: {e}") from e
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"invalid TOML in {path}: {e}") from e
-    return Layer(path=path, values=_validate(path, data, confine_docs=confine_docs))
+    return Layer(
+        path=path,
+        values=_validate(path, data, confine_docs=repo_supplied),
+        repo_supplied=repo_supplied,
+    )
 
 
 def load(*, no_config: bool, cwd: Path) -> list[Layer]:
@@ -148,10 +166,10 @@ def load(*, no_config: bool, cwd: Path) -> list[Layer]:
     layers = []
     project = find_project_config(cwd)
     if project is not None:
-        layers.append(load_file(project, confine_docs=True))
+        layers.append(load_file(project, repo_supplied=True))
     user = user_config_path()
     if user.is_file():
-        layers.append(load_file(user, confine_docs=False))
+        layers.append(load_file(user, repo_supplied=False))
     return layers
 
 
