@@ -217,6 +217,12 @@ Relative markdown links inside the docs are followed one level, so an index file
 paths when your standards live elsewhere. `--llms [PATH]` is kept as a compatibility
 alias for `--docs [PATH]`, defaulting to `llms.txt`.
 
+Inside a git repository, an auto-discovered doc and every link followed out of any doc
+must be a file the repository tracks — the repo, not you, chose those, and a standards
+doc is copied into the prompt verbatim. Name a path directly (`--docs CLAUDE.md`) to
+read one the repository does not carry. The full rule is under
+[What rr will read as a standards doc](#what-rr-will-read-as-a-standards-doc).
+
 ## Config file
 
 Two optional TOML files hold the defaults you would otherwise retype:
@@ -284,24 +290,39 @@ set, never loosen the one it did, since your flag outranks it.
 
 Explicit `docs` paths are relative to the config file that names them.
 
-**What a project file may reach.** It is repository content — on a fork's PR, a
-contributor's — so `rr` enforces three rules on the paths it supplies, and on the
-markdown links those docs reach:
+### What rr will read as a standards doc
 
-1. inside the config file's own directory,
-2. never inside `.git` (that is your local machine state, credentialed remote URLs
-   included), and
-3. only files the repository tracks — an untracked or ignored `.env`, key, or note in
-   your working tree is yours, not the project's.
+One rule decides every docs path, whether a config named it, discovery found it, or a
+markdown link inside another doc points at it:
 
-A named path that is untracked is refused by name; an auto-discovered or linked one is
-skipped with a warning, since discovery is a standing "if there is one". Outside a git
-repository nothing is tracked, so rules 1 and 2 are all that apply there. Rule 3 also
-covers auto-discovery asked for by your *own* config — the repo still chooses which file
-that is, and therefore what it links to.
+> **A doc the repository chose is read only if the repository tracks it (at `HEAD`), it
+> resolves inside the directory it came from, and it is not inside `.git`. A doc *you*
+> name is read as-is.**
 
-What you name yourself — `--docs`, `--llms`, or a path in your own user config — is
-unrestricted, exactly as before: those paths are your instruction, not the repo's.
+"The repository chose it" covers three cases:
+
+- **a path in a project's `.rocket-review.toml`** — that file is repository content, and
+  on a fork's PR it is a contributor's;
+- **anything auto-discovered** (`docs = true`, or `--docs` with no path) — the repo
+  decides which file answers the pattern, whoever asked for the pattern;
+- **every markdown link followed out of a doc that resolves inside a repository** — the
+  link was written by whoever wrote that doc. This holds even for a doc you named
+  yourself: naming `--docs STANDARDS.md` vouches for that file, not for what it points at.
+
+Everything is decided on the *resolved* path, so a tracked symlink is judged by the file
+it actually opens — the repository carries the link, not its target. Untracked and ignored
+files are yours, not the project's: a `.env`, a key, a private note. A named path that is
+refused stops the run and says so; a discovered or linked one is skipped with a warning,
+since discovery is a standing "if there is one".
+
+**Outside a git repository** nothing is tracked, so what remains is the directory
+confinement and the `.git` guard: a config's docs must stay inside the config's own
+directory, and a link inside the doc's.
+
+**What you name is yours** — `--docs PATH`, `--llms PATH`, or a path in your own
+`~/.config/rocket-review/config.toml` — and is read wherever it points, including files
+no repository tracks. The single exception is `.git`, which `rr` never reads into a
+review, as a footgun check.
 
 ## How it works
 

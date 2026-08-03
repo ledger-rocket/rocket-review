@@ -65,12 +65,17 @@ exfiltrating**:
     gated jobs.
   - **Which files from your working tree are copied into the prompt** — `docs` paths are
     read in full and sent to the backend, so this is a direct exfiltration path and the
-    one place `rr` enforces limits on the config rather than documenting them. A project
-    config's docs, the docs it auto-discovers, and the markdown links those reach must be
-    inside its own directory, outside `.git/`, and tracked by the repository: an untracked
-    `.env`, key, or private note in your checkout is yours, not the project's. Outside a
-    git repository there is nothing to track, so only the first two rules apply. What
-    *you* name — `--docs`, `--llms`, or your own user config — is unrestricted.
+    one place `rr` enforces limits on the config rather than documenting them. One rule
+    covers every route: a doc the *repository* chose is read only if the repository tracks
+    it at `HEAD`, it resolves inside the directory it came from, and it is not inside
+    `.git`. The repository chose it when a project config named it, when auto-discovery
+    found it (`docs = true` or a bare `--docs` — the repo decides which file matches),
+    or when a markdown link inside a repo-resident doc points at it, *including links out
+    of a doc you named yourself*. Decided on the resolved path, so a tracked symlink is
+    judged by what it opens rather than by the name the repository carries. Outside a git
+    repository nothing is tracked, so the directory confinement and the `.git` guard are
+    what remain. What you name directly — `--docs`, `--llms`, or your own user config —
+    is read as-is, `.git` excepted.
 
   Read it as you would any tooling config a clone brings with it, or run with
   `--no-config`, which ignores both config files.

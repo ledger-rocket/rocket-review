@@ -8,6 +8,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from urllib.parse import unquote, urldefrag
@@ -59,6 +60,11 @@ def run_capture(cmd: list[str]) -> subprocess.CompletedProcess:
     except FileNotFoundError:
         print(f"Error: {cmd[0]} not found on PATH", file=sys.stderr)
         sys.exit(1)
+    except OSError as e:
+        # E2BIG above all: a command line built from user data can outgrow ARG_MAX, and an
+        # OSError here would otherwise surface as a traceback rather than a refusal.
+        print(f"Error: could not run {cmd[0]}: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def truncate_raw(results: list[BackendResult]) -> None:
@@ -98,32 +104,15 @@ def read_files(paths: list[str]) -> str:
 
 @dataclass(frozen=True)
 class DocsSource:
-    """A config file's `docs` value: where discovery looks, and how far its paths are trusted.
-
-    The trust boundary is who chose the path, not which file it names. A flag or a user
-    config is the user's own word and is unrestricted. A project config is repository
-    content — on a fork's PR, a contributor's — so inside a checkout it may only reach files
-    the repository tracks: an untracked .env or key beside the working tree is the
-    developer's, not the project's, and a doc is copied into the prompt verbatim.
-    """
+    """A config file's `docs` value: where discovery looks, and whose word its paths are."""
 
     #: The config file itself, so a refusal can name what asked for the path.
     config_file: Path
     #: The project the file speaks for: the directory holding a project config, or the
     #: checkout a user config is being used in — never ~/.config, which is no project.
     discovery_root: Path
-    #: The checkout whose tracked files bound every doc the *repository* chose: each
-    #: auto-discovered doc, whichever layer asked for discovery, since the repo decides
-    #: which file that is and therefore what it links to. None outside a checkout.
-    repo_root: Path | None
-    #: Whether this config file is itself repository content, which is what extends that
-    #: bound to the paths it names outright.
+    #: Whether this file is repository content rather than the user's own.
     repo_supplied: bool
-
-    @property
-    def named_paths_root(self) -> Path | None:
-        """The checkout bounding the paths this file names, or None when the user named them."""
-        return self.repo_root if self.repo_supplied else None
 
 
 def docs_source(settings: config.Settings, layers: list[config.Layer]) -> DocsSource | None:
@@ -132,45 +121,84 @@ def docs_source(settings: config.Settings, layers: list[config.Layer]) -> DocsSo
     if origin is None:
         return None
     layer = next(item for item in layers if str(item.path) == origin)
-    if not layer.repo_supplied:
-        # A user config speaks for whatever project it is used in, so discovery follows the
-        # checkout rather than ~/.config, where no project's standards live.
-        cwd = Path.cwd()
-        root = config.find_git_root(cwd)
-        return DocsSource(layer.path, root or cwd, root, repo_supplied=False)
-    directory = layer.path.parent
-    return DocsSource(
-        layer.path, directory, config.find_git_root(directory), repo_supplied=True
-    )
+    if layer.repo_supplied:
+        return DocsSource(layer.path, layer.path.parent, repo_supplied=True)
+    # A user config speaks for whatever project it is used in, so discovery follows the
+    # checkout rather than ~/.config, where no project's standards live.
+    cwd = Path.cwd()
+    return DocsSource(layer.path, config.find_git_root(cwd) or cwd, repo_supplied=False)
 
 
-def relative_to_root(path: Path, root: Path) -> str:
-    """A path as the repository names it, for a message about that repository's files."""
-    resolved = path.resolve()
-    return str(resolved.relative_to(root) if resolved.is_relative_to(root) else resolved)
+# What a refused doc path is told, and what the README states: one rule, one wording.
+DOC_RULE = (
+    "rr reads a doc the repository chose only when the repository tracks it, it resolves "
+    "inside the repository, and it is not repository metadata (.git). Name a path yourself "
+    "with --docs to read anything else"
+)
 
 
-def tracked_paths(root: Path, paths: list[Path]) -> set[Path]:
-    """Which of `paths` the repository at `root` tracks, in one call.
+@lru_cache(maxsize=None)
+def tracked_files(root: Path) -> frozenset[Path]:
+    """Every path the repository at `root` carries at HEAD, resolved.
 
-    Fails closed: if git cannot answer, nothing counts as tracked. `--full-name` pins the
-    output to repo-relative paths whatever the working directory, and -z keeps a filename
-    with a quote or a newline in it from being re-encoded.
+    `ls-tree HEAD`, not `ls-files`: the index would let a stray `git add .env` widen what a
+    repository may offer, while HEAD is what the repository actually carries. A repo with no
+    commits has no HEAD, git fails, and nothing is tracked — which refuses, as it should.
+
+    Listing the whole tree once, rather than asking about each path, is also what keeps a doc
+    with thousands of links from ever building a command line: no path is passed to git at
+    all. Cached per checkout because every route consults it.
     """
-    result = run_capture(
-        ["git", "-C", str(root), "ls-files", "-z", "--full-name", "--", *(str(p) for p in paths)]
-    )
+    result = run_capture(["git", "-C", str(root), "ls-tree", "-r", "-z", "--name-only", "HEAD"])
     if result.returncode != 0:
-        return set()
-    return {(root / entry).resolve() for entry in result.stdout.split("\0") if entry}
+        return frozenset()
+    # The root is resolved, the entries are not: a tracked symlink is the file the repository
+    # carries, and its target is a different file that the repository may not carry at all.
+    # Resolving both sides would collapse `llms.txt -> .env` into "`.env` is tracked".
+    inside = root.resolve()
+    return frozenset(inside / entry for entry in result.stdout.split("\0") if entry)
 
 
-def read_doc_with_links(doc_path: Path, *, tracked_root: Path | None = None) -> str:
-    """Read a doc and follow all relative markdown links to build full project context.
+def resolve_doc_path(path: Path, *, user_named: bool, base: Path) -> Path | None:
+    """The one gate every docs path passes: the resolved path, or None if rr must not read it.
 
-    tracked_root restricts the links followed to files the repository tracks; it is set when
-    a project config chose this doc, so repo-supplied content cannot reach past the repo
-    into the working tree it happens to sit in.
+    Every route — a path a config named, an auto-discovered doc, a markdown link out of any
+    doc, a path typed on the command line — comes through here, and every rule is applied to
+    the *resolved* path, so a symlink is judged by the file it actually opens rather than by
+    the name it wears.
+
+    `user_named` is the user's own word: a --docs/--llms path, or one written in their own
+    user config. It reads whatever it points at, with .git kept as a footgun check.
+
+    Everything else was chosen by a repository — a project config is repository content, an
+    auto-discovered doc is whichever file the repo put in the pattern's way, and a link out
+    of a doc is written by whoever wrote that doc. Those must be tracked by the repository,
+    inside `base` (the directory they came from), and outside .git. Outside a checkout there
+    is nothing to track, so confinement to `base` is what remains.
+    """
+    try:
+        resolved = path.resolve()
+    except (OSError, ValueError):
+        return None
+    if config.inside_dot_git(resolved):
+        return None
+    if user_named:
+        return resolved
+    base_dir = base.resolve()
+    if not resolved.is_relative_to(base_dir):
+        return None
+    root = config.find_git_root(base_dir)
+    if root is None:
+        return resolved
+    return resolved if resolved in tracked_files(root) else None
+
+
+def read_doc_with_links(doc_path: Path) -> str:
+    """Read a doc and follow its relative markdown links to build full project context.
+
+    A link is written by whoever wrote the doc, so every one of them goes through
+    resolve_doc_path as repository-chosen — including out of a doc the user named, since
+    what a doc points at is not what the user vouched for.
     """
     if not doc_path.is_file():
         print(f"Error: {doc_path} not found.", file=sys.stderr)
@@ -184,52 +212,20 @@ def read_doc_with_links(doc_path: Path, *, tracked_root: Path | None = None) -> 
         sys.exit(1)
     parts = [f"--- {doc_path.name} ---\n{doc_text}"]
 
-    links = re.findall(r"\[[^\]]*\]\(([^)]+)\)", doc_text)
-    candidates: list[tuple[str, Path]] = []
-    for raw_link in links:
+    for raw_link in re.findall(r"\[[^\]]*\]\(([^)]+)\)", doc_text):
         if raw_link.startswith(("http://", "https://", "#")):
             continue
         link, _ = urldefrag(unquote(raw_link))
         if not link:
             continue
+        linked_path = resolve_doc_path(base_dir / link, user_named=False, base=base_dir)
+        if linked_path is None:
+            print(f"Warning: skipping link {link}: {DOC_RULE}.", file=sys.stderr)
+            continue
+        if not linked_path.is_file():
+            continue
         try:
-            linked_path = (base_dir / link).resolve()
-        except (OSError, ValueError):
-            print(f"Warning: skipping unusable link: {raw_link}", file=sys.stderr)
-            continue
-        # Prevent path traversal outside the doc's directory. is_relative_to, not a
-        # string-prefix check: /a/b-sibling must not pass as inside /a/b.
-        if not linked_path.is_relative_to(base_dir):
-            print(f"Warning: skipping link outside project: {raw_link}", file=sys.stderr)
-            continue
-        # A doc at the repo root has the whole repo inside its base_dir, .git included, and
-        # its links are followed and appended verbatim — so a committed standards doc could
-        # otherwise exfiltrate repository metadata in one hop. Checked here rather than only
-        # where config paths are validated: the same hop works from a --docs on the command
-        # line, where the user vouched for the doc and not for what it links to.
-        if config.inside_dot_git(linked_path):
-            print(f"Warning: skipping link into repository metadata: {raw_link}", file=sys.stderr)
-            continue
-        if linked_path.is_file():
-            candidates.append((link, linked_path))
-
-    if tracked_root is not None and candidates:
-        tracked = tracked_paths(tracked_root, [path for _, path in candidates])
-        kept = []
-        for link, path in candidates:
-            if path.resolve() in tracked:
-                kept.append((link, path))
-            else:
-                print(
-                    f"Warning: skipping link to a file the repository does not track: {link}",
-                    file=sys.stderr,
-                )
-        candidates = kept
-
-    for link, linked_path in candidates:
-        try:
-            text = linked_path.read_text(encoding="utf-8")
-            parts.append(f"--- {link} ---\n{text}")
+            parts.append(f"--- {link} ---\n{linked_path.read_text(encoding='utf-8')}")
         except (OSError, UnicodeDecodeError) as e:
             print(f"Warning: could not read {link}: {e}", file=sys.stderr)
 
@@ -244,84 +240,61 @@ def collect_docs(
 ) -> str | None:
     """Assemble standards context from --docs (explicit or auto-discovered) and --llms.
 
-    `source` is set when a config file supplied `docs` rather than the flag. Being a
-    standing preference rather than this run's instruction changes two things: discovery
-    looks at the project the file speaks for instead of wherever the user is standing, and
-    a project with no standards doc is simply a project without one, where the typed flag
-    asked for something specific and errors. A project config is additionally bounded to
-    what the repository tracks — see DocsSource.
+    `source` is set when a config file supplied `docs` rather than the flag. Being a standing
+    preference rather than this run's instruction changes two things: discovery looks at the
+    project the file speaks for instead of wherever the user is standing, and a project with
+    no standards doc is simply a project without one, where the typed flag asked for
+    something specific and errors.
+
+    Which paths are the user's own word and which the repository chose is decided here and
+    settled by resolve_doc_path; nothing downstream re-decides it.
     """
-    # Kept apart by who chose them: only the config's own paths carry its restriction into
-    # the links they reach. A --llms path in the same run was the user's own choice.
-    flag_paths: list[Path] = []
-    from_config: list[Path] = []
-    paths = from_config if source else flag_paths
+    paths: list[Path] = []
     if llms_arg:
-        flag_paths.append(Path(llms_arg))
+        paths.append(Path(llms_arg))  # flag-supplied, so the user's own word
     if docs_args is not None and len(docs_args) == 0:
         search_root = source.discovery_root if source else Path.cwd()
         found = [search_root / c for c in DISCOVERY_CANDIDATES if (search_root / c).is_file()]
-        if not found and source is None:
+        kept = []
+        for candidate in found:
+            # Whoever asked for auto-discovery, the repository decides which file answers
+            # it — so a discovered doc is never the user's own word.
+            if resolve_doc_path(candidate, user_named=False, base=search_root) is not None:
+                kept.append(candidate)
+            else:
+                print(
+                    f"Warning: skipping {candidate.name}: {DOC_RULE}.",
+                    file=sys.stderr,
+                )
+        if not kept and source is None:
+            refused = " (" + ", ".join(c.name for c in found) + " refused)" if found else ""
             print(
                 "Error: --docs given without paths and none of "
-                f"{', '.join(DISCOVERY_CANDIDATES)} found in the current directory.",
+                f"{', '.join(DISCOVERY_CANDIDATES)} can be read here{refused}.",
                 file=sys.stderr,
             )
             sys.exit(1)
-        if source is not None and source.repo_root is not None:
-            # Skipped rather than refused: discovery is a standing "if this project has
-            # one", and an untracked CLAUDE.md in someone's working tree is common and is
-            # not the project's standards doc.
-            tracked = tracked_paths(source.repo_root, found)
-            for candidate in found:
-                if candidate.resolve() not in tracked:
-                    print(
-                        f"Warning: skipping {candidate.name}, which the repository does not "
-                        f"track ({source.config_file} asked for auto-discovery).",
-                        file=sys.stderr,
-                    )
-            found = [c for c in found if c.resolve() in tracked]
-        paths.extend(found)
+        paths.extend(kept)
     elif docs_args:
-        named = [Path(p) for p in docs_args]
-        if source is not None and source.named_paths_root is not None:
-            refuse_untracked_docs(source, named)
-        paths.extend(named)
-    # A doc the repository chose — auto-discovered, or named by a project config — reaches
-    # only what the repository tracks; one the user named keeps the user's own reach.
-    links_root: Path | None = None
-    if source is not None:
-        discovered = docs_args is not None and len(docs_args) == 0
-        links_root = source.repo_root if discovered else source.named_paths_root
-    reach: list[tuple[Path, Path | None]] = [(p, None) for p in flag_paths]
-    reach += [(p, links_root) for p in from_config]
+        # A project config is repository content; the user's own config is not.
+        user_named = source is None or not source.repo_supplied
+        base = source.config_file.parent if source else Path.cwd()
+        for raw in docs_args:
+            if resolve_doc_path(Path(raw), user_named=user_named, base=base) is None:
+                named_by = f"{source.config_file}: " if source else ""
+                print(f"Error: {named_by}refusing docs path {raw!r} — {DOC_RULE}.",
+                      file=sys.stderr)
+                sys.exit(1)
+            paths.append(Path(raw))
     seen: set[Path] = set()
     parts: list[str] = []
-    for path, bounded_by in reach:
+    for path in paths:
         resolved = path.resolve()
         if resolved in seen:
             continue
         seen.add(resolved)
-        parts.append(read_doc_with_links(path, tracked_root=bounded_by))
+        parts.append(read_doc_with_links(path))
     return "\n\n".join(parts) if parts else None
-
-
-def refuse_untracked_docs(source: DocsSource, paths: list[Path]) -> None:
-    """Stop before reading anything a project config named that the repository does not track."""
-    root = source.named_paths_root
-    assert root is not None
-    tracked = tracked_paths(root, paths)
-    untracked = [p for p in paths if p.resolve() not in tracked]
-    if not untracked:
-        return
-    named = ", ".join(repr(relative_to_root(p, root)) for p in untracked)
-    print(
-        f"Error: {source.config_file}: docs path {named} is not tracked by the repository — "
-        "a project config may only name files the repo carries, since an untracked file is "
-        "the developer's and not the project's.",
-        file=sys.stderr,
-    )
-    sys.exit(1)
 
 
 def get_diff(staged: bool) -> str:

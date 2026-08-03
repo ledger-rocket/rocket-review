@@ -139,8 +139,8 @@ def load_file(path: Path, *, repo_supplied: bool) -> Layer:
     """Parse and validate one config file.
 
     repo_supplied marks the project file, which comes from the repository rather than from
-    the user. Here it bounds `docs` paths to the file's own directory and keeps them out of
-    .git; the caller applies the rest of that trust level (see cli.DocsSource).
+    the user. It is recorded on the layer rather than acted on here: what a path may reach
+    is decided in one place for every route (see cli.resolve_doc_path).
     """
     try:
         raw = path.read_bytes()
@@ -154,7 +154,7 @@ def load_file(path: Path, *, repo_supplied: bool) -> Layer:
         raise ConfigError(f"invalid TOML in {path}: {e}") from e
     return Layer(
         path=path,
-        values=_validate(path, data, confine_docs=repo_supplied),
+        values=_validate(path, data),
         repo_supplied=repo_supplied,
     )
 
@@ -219,7 +219,7 @@ def _names(items: list[str]) -> str:
     return ", ".join(repr(item) for item in items)
 
 
-def _validate(path: Path, data: dict[str, Any], *, confine_docs: bool) -> dict[str, Any]:
+def _validate(path: Path, data: dict[str, Any]) -> dict[str, Any]:
     """Every accepted key, checked. An unknown or invalid one is an error, never an ignore."""
     unknown = sorted(set(data) - set(ACCEPTED_KEYS))
     if unknown:
@@ -240,7 +240,7 @@ def _validate(path: Path, data: dict[str, Any], *, confine_docs: bool) -> dict[s
         if key in data:
             values[key] = _bool(path, key, data[key])
     if "docs" in data:
-        values["docs"] = _docs(path, data["docs"], confine=confine_docs)
+        values["docs"] = _docs(path, data["docs"])
     if "backends" in data:
         values["backends"] = _backends(path, data["backends"])
     if "models" in data:
@@ -288,7 +288,7 @@ def _severity(path: Path, value: Any) -> str:
     return str(value)
 
 
-def _docs(path: Path, value: Any, *, confine: bool) -> list[str] | bool:
+def _docs(path: Path, value: Any) -> list[str] | bool:
     """true -> auto-discovery, false -> no docs, a list -> those paths.
 
     Paths are relative to the config file, the way every other tool reads its own config;
@@ -302,27 +302,17 @@ def _docs(path: Path, value: Any, *, confine: bool) -> list[str] | bool:
         raise ConfigError(
             f"{path}: docs must be true, false, or a list of paths, got {value!r}."
         )
+    # Resolved against the config file, and no further: what a path may reach is one
+    # decision, taken for every route at once in cli.resolve_doc_path.
     root = path.parent.resolve()
     resolved = []
     for item in value:
         try:
-            doc = (root / item).resolve()
+            resolved.append(str((root / item).resolve()))
         except (OSError, ValueError) as e:
             # An embedded null byte and the like: the path never reaches a stat, so this has
             # to come back as rr's error rather than as a traceback.
             raise ConfigError(f"{path}: docs path {item!r} is not a usable path: {e}") from e
-        if confine:
-            if not doc.is_relative_to(root):
-                raise ConfigError(
-                    f"{path}: docs path {item!r} resolves outside {root} — a project config "
-                    "may only name docs inside its own directory."
-                )
-            if inside_dot_git(doc):
-                raise ConfigError(
-                    f"{path}: docs path {item!r} is inside .git — a project config may not "
-                    "name repository metadata."
-                )
-        resolved.append(str(doc))
     return resolved
 
 

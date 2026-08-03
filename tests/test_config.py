@@ -39,6 +39,9 @@ def make_repo(tmp_path: Path, body: str | None = None, subdir: str = "") -> Path
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    for key, value in (("user.email", "t@t"), ("user.name", "t")):
+        subprocess.run(["git", "-C", str(repo), "config", key, value],
+                       check=True, capture_output=True)
     if body is not None:
         write(repo, body)
     if not subdir:
@@ -59,8 +62,11 @@ def error_from(path: Path, *, repo_supplied: bool = False) -> str:
 
 
 def track(repo: Path, *names: str) -> None:
-    """Stage files so the repository tracks them; the index is what `git ls-files` reads."""
-    subprocess.run(["git", "-C", str(repo), "add", "--", *names], check=True, capture_output=True)
+    """Commit files so the repository carries them: HEAD is what decides what rr may read."""
+    subprocess.run(["git", "-C", str(repo), "add", "-f", "--", *names],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "carry"],
+                   check=True, capture_output=True)
 
 
 # --- discovery -----------------------------------------------------------------------
@@ -395,13 +401,49 @@ def test_docs_paths_resolve_against_the_config_file(tmp_path):
     assert loaded(path)["docs"] == [str(tmp_path.resolve() / "standards" / "llms.txt")]
 
 
-def test_a_project_config_may_not_name_docs_outside_itself(tmp_path):
-    # The project file comes from the repository, so an absolute or escaping path would let
-    # a cloned repo have any file on the machine read and sent to a backend.
-    path = write(tmp_path / "repo", "docs = ['../../../etc/passwd']\n")
-    message = error_from(path, repo_supplied=True)
-    assert "resolves outside" in message
-    assert "may only name docs inside its own directory" in message
+def test_who_named_the_path_is_what_the_funnel_is_wired_to(tmp_path):
+    # The whole boundary in one place, and the only place: the same path refused for the
+    # repository and read for the user. Flipping either call site's user_named fails here.
+    outside = tmp_path / "outside.md"
+    outside.write_text("OUTSIDE-SECRET\n")
+    run_from = make_repo(tmp_path)
+    assert cli.resolve_doc_path(outside, user_named=False, base=run_from) is None
+    assert cli.resolve_doc_path(outside, user_named=True, base=run_from) == outside.resolve()
+
+    local = run_from / "local.md"
+    local.write_text("local notes\n")
+    assert cli.resolve_doc_path(local, user_named=False, base=run_from) is None
+    track(run_from, "local.md")
+    cli.tracked_files.cache_clear()
+    assert cli.resolve_doc_path(local, user_named=False, base=run_from) == local.resolve()
+
+    # The footgun check survives even the user's own word.
+    assert cli.resolve_doc_path(run_from / ".git" / "config", user_named=True,
+                                base=run_from) is None
+
+
+def test_a_repo_with_no_commits_carries_nothing(tmp_path):
+    # No HEAD, so git cannot answer: nothing is tracked and the funnel refuses rather than
+    # falling open.
+    run_from = make_repo(tmp_path)
+    doc = run_from / "std.md"
+    doc.write_text("rules\n")
+    subprocess.run(["git", "-C", str(run_from), "add", "std.md"], check=True, capture_output=True)
+    cli.tracked_files.cache_clear()
+    assert cli.resolve_doc_path(doc, user_named=False, base=run_from) is None
+
+
+def test_the_index_does_not_widen_what_a_repository_offers(tmp_path):
+    # A stray `git add .env` stages a file the repository does not carry; HEAD decides.
+    run_from = make_repo(tmp_path)
+    (run_from / "std.md").write_text("rules\n")
+    track(run_from, "std.md")
+    secret = run_from / ".env"
+    secret.write_text("AWS_KEY=SECRET\n")
+    subprocess.run(["git", "-C", str(run_from), "add", "-f", ".env"], check=True,
+                   capture_output=True)
+    cli.tracked_files.cache_clear()
+    assert cli.resolve_doc_path(secret, user_named=False, base=run_from) is None
 
 
 @pytest.mark.parametrize("path", [
@@ -424,28 +466,38 @@ def test_inside_dot_git_leaves_ordinary_paths_alone(path):
 @pytest.mark.parametrize(
     "item", [".git/config", ".GIT/config", "./.Git/config", "src/../.GIT/config"]
 )
-def test_a_project_config_may_not_name_docs_inside_dot_git(tmp_path, item):
+def test_a_project_config_may_not_name_docs_inside_dot_git(tmp_path, monkeypatch, item):
     # Inside the repo but not of it: .git holds local state a clone does not control, and a
     # named doc is copied into the prompt verbatim. Compared case-insensitively because
     # resolve() does not canonicalise case, and on a case-insensitive filesystem '.GIT'
     # opens the real .git.
-    path = write(tmp_path / "repo", f"docs = ['{item}']\n")
-    assert "is inside .git" in error_from(path, repo_supplied=True)
+    run_from = make_repo(tmp_path, f"docs = ['{item}']\n")
+    (run_from / "src").mkdir(exist_ok=True)
+    monkeypatch.chdir(run_from)
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 1
+    assert jobs == {}
 
 
-def test_confinement_is_wired_to_the_project_file_and_only_it(tmp_path):
-    # The whole point of the confinement, exercised through discovery rather than by
-    # passing the flag by hand: swapping the two call sites has to fail here.
+def test_a_project_config_may_not_name_docs_outside_itself(tmp_path, monkeypatch):
     outside = tmp_path / "outside.md"
-    outside.write_text("secrets\n")
+    outside.write_text("OUTSIDE-SECRET\n")
     run_from = make_repo(tmp_path, f"docs = ['{outside}']\n")
-    with pytest.raises(config.ConfigError, match="resolves outside"):
-        config.load(no_config=False, cwd=run_from)
+    monkeypatch.chdir(run_from)
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 1
+    assert jobs == {}
 
-    (run_from / config.PROJECT_CONFIG_NAME).unlink()
+
+def test_a_user_config_may_still_name_docs_anywhere(tmp_path, monkeypatch):
+    outside = tmp_path / "outside.md"
+    outside.write_text("MY OWN STANDARDS\n")
+    run_from = make_repo(tmp_path)
     write_user_config(f"docs = ['{outside}']\n")
-    layers = config.load(no_config=False, cwd=run_from)
-    assert layers[0].values["docs"] == [str(outside)]  # the user's own file may name it
+    monkeypatch.chdir(run_from)
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 0
+    assert "MY OWN STANDARDS" in jobs["claude"].docs_content
 
 
 def test_an_unusable_docs_path_is_a_config_error_not_a_traceback(tmp_path):
@@ -780,8 +832,8 @@ def test_a_repo_config_cannot_name_an_untracked_local_file(monkeypatch, tmp_path
     jobs = fake_backends(monkeypatch)
     assert run_main(monkeypatch, ["--diff"]) == 1
     err = capsys.readouterr().err
-    assert "is not tracked by the repository" in err
-    assert "may only name files the repo carries" in err
+    assert "refusing docs path" in err
+    assert "the repository tracks it" in err
     assert jobs == {}  # refused before any backend ran
 
 
@@ -835,6 +887,29 @@ def test_outside_a_repo_a_project_config_keeps_confinement_alone(monkeypatch, tm
     jobs = fake_backends(monkeypatch)
     assert run_main(monkeypatch, ["--diff"]) == 0
     assert "loose standards" in jobs["claude"].docs_content
+
+
+@pytest.mark.parametrize("target,secret", [(".env", ENV_SECRET), (".git/config", "GIT-SECRET")])
+@pytest.mark.parametrize("layer_body", [("project", "docs = true\n"), ("user", "docs = true\n")])
+def test_a_tracked_symlink_never_reaches_the_payload(
+    monkeypatch, tmp_path, target, secret, layer_body
+):
+    # The route that had no payload-level test is where the fourth bypass lived: a symlink
+    # the repository tracks is not a licence to read whatever it points at.
+    which, body = layer_body
+    run_from = repo_with_local_secrets(tmp_path, body if which == "project" else None)
+    (run_from / ".git" / "config").write_text(
+        '[remote "o"]\n\turl = https://x:GIT-SECRET@h/r\n'
+    )
+    if which == "user":
+        write_user_config(body)
+    (run_from / "llms.txt").unlink()
+    (run_from / "llms.txt").symlink_to(target)
+    track(run_from, "llms.txt")
+    monkeypatch.chdir(run_from)
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 0
+    assert jobs["claude"].docs_content is None or secret not in jobs["claude"].docs_content
 
 
 def test_config_docs_true_discovers_beside_the_config_not_the_cwd(monkeypatch, tmp_path):

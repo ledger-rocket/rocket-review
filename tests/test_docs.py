@@ -24,7 +24,7 @@ def test_read_doc_skips_traversal_outside_base(tmp_path, capsys):
     llms.write_text("[up](../secret.md)")
     out = read_doc_with_links(llms)
     assert "s3cret" not in out
-    assert "outside project" in capsys.readouterr().err
+    assert "skipping link ../secret.md" in capsys.readouterr().err
 
 
 def test_read_doc_missing_file_exits(tmp_path):
@@ -76,13 +76,24 @@ def test_collect_docs_nothing_given_is_none():
 SECRET = "SECRET-ghp-DEADBEEF"
 
 
-def repo_with_a_credentialed_remote(tmp_path):
+def repo_with_a_credentialed_remote(tmp_path, *, real=False):
     """A checkout whose .git/config holds the kind of secret a real one does."""
-    git_dir = tmp_path / ".git"
-    git_dir.mkdir()
-    (git_dir / "config").write_text(
-        f'[remote "origin"]\n\turl = https://x-token:{SECRET}@github.com/acme/private.git\n'
-    )
+    if real:
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+        for key, value in (("user.email", "t@t"), ("user.name", "t")):
+            subprocess.run(["git", "-C", str(tmp_path), "config", key, value],
+                           check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "remote", "add", "origin",
+             f"https://x-token:{SECRET}@github.com/acme/private.git"],
+            check=True, capture_output=True,
+        )
+    else:
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".git" / "config").write_text(
+            f'[remote "origin"]\n\turl = https://x-token:{SECRET}@github.com/acme/private.git\n'
+        )
+    assert SECRET in (tmp_path / ".git" / "config").read_text()  # the setup itself, pinned
     return tmp_path
 
 
@@ -102,8 +113,9 @@ def test_read_doc_never_follows_a_link_into_repository_metadata(tmp_path, capsys
 
 
 def test_collect_docs_discovery_never_carries_metadata_into_the_payload(tmp_path, monkeypatch):
-    repo = repo_with_a_credentialed_remote(tmp_path)
+    repo = repo_with_a_credentialed_remote(tmp_path, real=True)
     (repo / "llms.txt").write_text("# llms\nno bare excepts\n[cfg](.git/config)\n")
+    carry(repo, "llms.txt")
     monkeypatch.chdir(repo)
     out = collect_docs([], None)
     assert SECRET not in out
@@ -114,15 +126,14 @@ def test_read_doc_skips_an_unusable_link(tmp_path, capsys):
     (tmp_path / "llms.txt").write_text("[bad](a\x00b.md)\nkeep me\n")
     out = read_doc_with_links(tmp_path / "llms.txt")
     assert "keep me" in out
-    assert "unusable link" in capsys.readouterr().err
+    assert "skipping link" in capsys.readouterr().err
 
 
-def config_source(directory: Path, *, repo_root=None, repo_supplied=True) -> DocsSource:
+def config_source(directory: Path, *, repo_supplied=True) -> DocsSource:
     """A `docs` value supplied by a config file in `directory`."""
     return DocsSource(
         config_file=directory / ".rocket-review.toml",
         discovery_root=directory,
-        repo_root=repo_root,
         repo_supplied=repo_supplied,
     )
 
@@ -147,14 +158,24 @@ ENV_SECRET = "SECRET-env-DEADBEEF"
 
 
 def repo_with_a_local_secret(tmp_path) -> Path:
-    """A checkout holding a gitignored .env — the developer's file, not the project's."""
+    """A checkout carrying a standards doc, plus a gitignored .env that is not its content."""
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    for key, value in (("user.email", "t@t"), ("user.name", "t")):
+        subprocess.run(["git", "-C", str(tmp_path), "config", key, value],
+                       check=True, capture_output=True)
     (tmp_path / ".gitignore").write_text(".env\n")
     (tmp_path / ".env").write_text(f"AWS_SECRET_ACCESS_KEY={ENV_SECRET}\n")
     (tmp_path / "llms.txt").write_text("# llms\nno bare excepts\n[e](.env)\n")
-    subprocess.run(["git", "-C", str(tmp_path), "add", ".gitignore", "llms.txt"],
-                   check=True, capture_output=True)
+    carry(tmp_path, ".gitignore", "llms.txt")
     return tmp_path
+
+
+def carry(repo: Path, *names: str) -> None:
+    """Commit files, so the repository carries them at HEAD."""
+    subprocess.run(["git", "-C", str(repo), "add", "-f", "--", *names],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "carry"],
+                   check=True, capture_output=True)
 
 
 def test_a_repo_chosen_doc_cannot_link_to_an_untracked_local_file(tmp_path, monkeypatch, capsys):
@@ -162,10 +183,10 @@ def test_a_repo_chosen_doc_cannot_link_to_an_untracked_local_file(tmp_path, monk
     # working tree is the developer's, so repository content may not reach it.
     repo = repo_with_a_local_secret(tmp_path)
     monkeypatch.chdir(repo)
-    out = collect_docs([], None, source=config_source(repo, repo_root=repo))
+    out = collect_docs([], None, source=config_source(repo))
     assert ENV_SECRET not in out
     assert "no bare excepts" in out  # the tracked doc itself is still read
-    assert "does not track" in capsys.readouterr().err
+    assert "repository tracks it" in capsys.readouterr().err
 
 
 def test_discovery_skips_a_standards_doc_the_repo_does_not_track(tmp_path, monkeypatch, capsys):
@@ -175,8 +196,56 @@ def test_discovery_skips_a_standards_doc_the_repo_does_not_track(tmp_path, monke
     (repo / "CLAUDE.md").write_text("LOCAL NOTES: staging password is hunter2\n")
     (repo / "llms.txt").unlink()
     monkeypatch.chdir(repo)
-    assert collect_docs([], None, source=config_source(repo, repo_root=repo)) is None
-    assert "skipping CLAUDE.md, which the repository does not track" in capsys.readouterr().err
+    assert collect_docs([], None, source=config_source(repo)) is None
+    err = capsys.readouterr().err
+    assert "skipping CLAUDE.md" in err and "repository tracks it" in err
+
+
+@pytest.mark.parametrize("name", ["llms.txt", "AGENTS.md", "CLAUDE.md"])
+def test_a_tracked_symlink_does_not_make_its_target_repo_content(tmp_path, monkeypatch, name):
+    # The repository carries the *link*; what it points at is a different file, and here not
+    # one the repo carries at all. Tracking is decided on the resolved path, and the tracked
+    # set keeps the repository's own names — resolving both sides would collapse the two.
+    repo = repo_with_a_local_secret(tmp_path)
+    (repo / "llms.txt").unlink()
+    (repo / name).symlink_to(".env")
+    carry(repo, name)
+    monkeypatch.chdir(repo)
+    assert collect_docs([], None, source=config_source(repo)) is None
+    assert collect_docs([], None, source=config_source(repo, repo_supplied=False)) is None
+
+
+def test_a_tracked_symlink_out_of_the_repo_is_refused(tmp_path, monkeypatch):
+    outside = tmp_path / "outside.md"
+    outside.write_text("OUTSIDE-SECRET\n")
+    repo = repo_with_a_local_secret(tmp_path / "repo")
+    (repo / "llms.txt").unlink()
+    (repo / "llms.txt").symlink_to("../outside.md")
+    carry(repo, "llms.txt")
+    monkeypatch.chdir(repo)
+    assert collect_docs([], None, source=config_source(repo)) is None
+
+
+def test_a_link_to_a_tracked_symlink_is_judged_by_its_target(tmp_path, monkeypatch, capsys):
+    repo = repo_with_a_local_secret(tmp_path)
+    (repo / "llms.txt").write_text("# llms\nno bare excepts\n[note](note.md)\n")
+    (repo / "note.md").symlink_to(".env")
+    carry(repo, "llms.txt", "note.md")
+    monkeypatch.chdir(repo)
+    out = collect_docs([], None, source=config_source(repo))
+    assert ENV_SECRET not in out
+    assert "no bare excepts" in out
+    assert "skipping link note.md" in capsys.readouterr().err
+
+
+def test_outside_a_repo_discovery_still_cannot_escape_its_directory(tmp_path, monkeypatch):
+    outside = tmp_path / "outside.md"
+    outside.write_text("OUTSIDE-SECRET\n")
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    (loose / "llms.txt").symlink_to("../outside.md")
+    monkeypatch.chdir(loose)
+    assert collect_docs([], None, source=config_source(loose)) is None
 
 
 def test_the_user_still_reaches_their_own_files_through_a_flag(tmp_path, monkeypatch):
@@ -184,17 +253,25 @@ def test_the_user_still_reaches_their_own_files_through_a_flag(tmp_path, monkeyp
     repo = repo_with_a_local_secret(tmp_path)
     monkeypatch.chdir(repo)
     assert ENV_SECRET in collect_docs([".env"], None)
-    assert ENV_SECRET in collect_docs(["llms.txt"], None)  # links followed as before
-    assert ENV_SECRET in collect_docs([], ".env")  # --llms, alongside a config-supplied docs
-    assert ENV_SECRET in collect_docs(
-        [], ".env", source=config_source(repo, repo_root=repo)
-    )
+    assert ENV_SECRET in collect_docs(None, ".env")
+    assert ENV_SECRET in collect_docs([], ".env", source=config_source(repo))
+
+
+def test_a_doc_the_user_named_still_does_not_vouch_for_its_links(tmp_path, monkeypatch, capsys):
+    # What the user named is read; what that doc points at is written by whoever wrote the
+    # doc, so inside a repository it is repository content and the same rule applies.
+    repo = repo_with_a_local_secret(tmp_path)
+    monkeypatch.chdir(repo)
+    out = collect_docs(["llms.txt"], None)
+    assert "no bare excepts" in out
+    assert ENV_SECRET not in out
+    assert "skipping link .env" in capsys.readouterr().err
 
 
 def test_a_user_configs_own_paths_are_not_bounded_by_the_repo(tmp_path, monkeypatch):
     repo = repo_with_a_local_secret(tmp_path)
     monkeypatch.chdir(repo)
-    source = config_source(repo, repo_root=repo, repo_supplied=False)
+    source = config_source(repo, repo_supplied=False)
     assert ENV_SECRET in collect_docs([str(repo / ".env")], None, source=source)
 
 
@@ -203,10 +280,10 @@ def test_discovery_is_bounded_by_the_repo_for_a_user_config_too(tmp_path, monkey
     # decides what that file links to.
     repo = repo_with_a_local_secret(tmp_path)
     monkeypatch.chdir(repo)
-    out = collect_docs([], None, source=config_source(repo, repo_root=repo, repo_supplied=False))
+    out = collect_docs([], None, source=config_source(repo, repo_supplied=False))
     assert ENV_SECRET not in out
     assert "no bare excepts" in out
-    assert "does not track" in capsys.readouterr().err
+    assert "repository tracks it" in capsys.readouterr().err
 
 
 def test_read_doc_blocks_sibling_prefix_escape(tmp_path, capsys):
@@ -219,4 +296,4 @@ def test_read_doc_blocks_sibling_prefix_escape(tmp_path, capsys):
     llms.write_text("[x](../proj-secret/leak.md)")
     out = read_doc_with_links(llms)
     assert "s3cret" not in out  # /proj-secret must not pass as inside /proj
-    assert "outside project" in capsys.readouterr().err
+    assert "skipping link" in capsys.readouterr().err

@@ -1,5 +1,6 @@
 import pytest
 
+from rocket_review import cli
 from rocket_review.backends import base
 
 
@@ -18,6 +19,11 @@ def isolate_config(monkeypatch, tmp_path):
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     monkeypatch.chdir(cwd)
+    # Production reads each checkout's tracked set once per process; a test that commits
+    # between two reads must not be answered from the previous test's — or its own — cache.
+    cli.tracked_files.cache_clear()
+    yield
+    cli.tracked_files.cache_clear()
 
 
 @pytest.fixture(autouse=True)
