@@ -12,6 +12,7 @@ import time
 from collections import Counter
 from pathlib import Path
 from threading import Lock
+from types import SimpleNamespace
 
 import pytest
 import rocket_review.prompts as rr_prompts
@@ -30,6 +31,7 @@ from paired_runner import (
     MAX_ATTEMPTS,
     TREATMENT,
     RepGroup,
+    build_command,
     build_tasks,
     main,
     resolve_interpreter,
@@ -184,6 +186,28 @@ def test_arms_alternate_within_each_case(tmp_path, arms):
     assert [t.rep for t in tasks] == [1, 1, 2, 2, 3, 3]
     # Both arms get exactly the same work on the same case.
     assert sum(t.role == CONTROL for t in tasks) == sum(t.role == TREATMENT for t in tasks)
+
+
+def test_the_runner_launches_rr_hermetically(tmp_path, arms):
+    # Without --no-config, an rr config file on the machine running the sweep would decide
+    # part of what is measured: `docs` changes the prompt an arm is supposed to be the only
+    # variable in, `effort` the reasoning budget, `fail_on` the exit code run_attempt treats
+    # as authoritative.
+    from cases import load_cases
+
+    control, treatment = (load_arm(p) for p in arms)
+    directory = tmp_path / "corpus" / "cases"
+    directory.mkdir(parents=True)
+    (directory / "c-001.yaml").write_text(
+        f"id: c-001\nmode: diff\nsource: merged-pr\nrepo_commit: {FAKE_OID}\n",
+        encoding="utf-8",
+    )
+    materialized = SimpleNamespace(cwd=tmp_path, rr_args=["--commit", FAKE_OID])
+    tasks = build_tasks(
+        load_cases(directory), {"c-001": materialized}, [("codex", "m")],
+        control, treatment, runs=1,
+    )
+    assert "--no-config" in build_command(tasks[0], sys.executable, 60)
 
 
 def test_order_index_restarts_per_case_and_backend(tmp_path, arms):

@@ -92,6 +92,11 @@ def run_case(
         "--backend", f"{backend}:{requested_model}",
         "--json", "--full",
         "--timeout", str(timeout),
+        # Hermetic: whoever runs the sweep may have an rr config file, and `docs` would
+        # change the prompt, `effort` the reasoning budget, `fail_on` the exit code this
+        # sweep treats as authoritative. The results would still look clean and would
+        # quietly mean something else.
+        "--no-config",
     ]
     case_id = f"{backend}:{commit}:r{run}"
     invocation = invoke_rr(command, repo, timeout + SUBPROCESS_GRACE)

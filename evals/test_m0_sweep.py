@@ -141,6 +141,14 @@ def test_happy_path_is_classified(tmp_path):
     assert record.command[record.command.index("--backend") + 1] == "codex:gpt-5.6-sol"
 
 
+def test_the_sweep_runs_rr_hermetically(tmp_path):
+    # Without --no-config, an rr config file on the machine running the sweep would decide
+    # part of what is measured: `docs` changes the prompt, `effort` the reasoning budget,
+    # `fail_on` the exit code this sweep treats as authoritative.
+    record = stub_case(tmp_path, envelope({"backend": "codex", "raw": GOOD_REVIEW}))
+    assert "--no-config" in record.command
+
+
 def test_non_zero_exit_is_backend_error_even_with_a_complete_envelope(tmp_path):
     # rr prints its envelope before exiting 1, so stdout alone looks like a clean run;
     # exit status is what decides.

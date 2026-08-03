@@ -70,7 +70,7 @@ Two details worth knowing when reading results:
 
 ## Where the raw output comes from
 
-The sweep runs `rr --commit <sha> --backend <name>:<model> --json --full` and validates
+The sweep runs `rr --commit <sha> --backend <name>:<model> --json --full --no-config` and validates
 `results[].raw` from the envelope. That field is the exact string
 `parse_backend_output` was handed, which makes it the most faithful available view of what
 the backend produced — anything reconstructed from the parsed `findings` would already have
@@ -79,6 +79,12 @@ been normalised by the very leniency being measured.
 `--full` is what makes this work: without it `rr` truncates `raw` at 4000 characters, and a
 truncated review is unparsable by construction, so every long review would score as a
 `decode_failure` caused by the harness rather than the backend.
+
+`--no-config` is what keeps it hermetic: both runners pass it, so whoever runs a sweep
+cannot perturb the measurement through their own `.rocket-review.toml` or
+`~/.config/rocket-review/config.toml` — `docs` would change the prompt, `effort` the
+reasoning budget, `fail_on` the exit code the runners treat as authoritative, and the
+results would look clean while meaning something else.
 
 ## Running a sweep
 
@@ -260,6 +266,10 @@ Three properties make this the right seam:
   deliberately never used, so injecting into an installation the arm was not applied to is
   not merely unsupported, it is unrepresentable. `--python` selects the interpreter, and that
   choice selects both.
+
+The arguments the runner appends are the same contract as Part 1's sweep: `--json --full`
+for a measurable envelope, `--timeout`, and `--no-config` so the machine running the sweep
+cannot perturb what is measured (see [Where the raw output comes from](#where-the-raw-output-comes-from)).
 
 `test_paired_runner.py` proves it end to end: a stub executable named `codex`, first on
 PATH, records the exact prompt bytes `rr` hands it, and the test asserts the arm's marker
