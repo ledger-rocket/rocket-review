@@ -69,13 +69,14 @@ exfiltrating**:
     covers every route: a doc the *repository* chose is read only if the repository tracks
     it at `HEAD`, it resolves inside the directory it came from, and it is not inside
     `.git`. The repository chose it when a project config named it, when auto-discovery
-    found it (`docs = true` or a bare `--docs` — the repo decides which file matches),
-    or when a markdown link inside a repo-resident doc points at it, *including links out
-    of a doc you named yourself*. Decided on the resolved path, so a tracked symlink is
-    judged by what it opens rather than by the name the repository carries. Outside a git
-    repository nothing is tracked, so the directory confinement and the `.git` guard are
-    what remain. What you name directly — `--docs`, `--llms`, or your own user config —
-    is read as-is, `.git` excepted.
+    found it (`docs = true`, or a bare `--docs` or `--llms` — the repo decides which file
+    matches), or when a markdown link inside a repo-resident doc points at it, *including
+    links out of a doc you named yourself*. Decided on the resolved path, so a tracked
+    symlink is judged by what it opens rather than by the name the repository carries.
+    Outside a git repository nothing is tracked, so the directory confinement and the
+    `.git` guard are what remain. What you name directly — `--docs PATH`, `--llms PATH`,
+    or a path in your own user config — is read as-is, `.git` excepted. The bare flags are
+    not that: they ask the repository what it has.
 
   Read it as you would any tooling config a clone brings with it, or run with
   `--no-config`, which ignores both config files.

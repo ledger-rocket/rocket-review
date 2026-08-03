@@ -997,6 +997,34 @@ def test_llms_with_a_path_may_not_name_repository_metadata(monkeypatch, tmp_path
     assert jobs == {}
 
 
+def test_a_refusal_names_the_config_that_named_the_path(monkeypatch, tmp_path, capsys):
+    # The user's own config is still a file they have to go and edit, so a refusal has to
+    # say which one — attribution follows who named the path, not how far it was trusted.
+    run_from = make_repo(tmp_path)
+    user_config = write_user_config(f"docs = ['{run_from / '.git' / 'config'}']\n")
+    monkeypatch.chdir(run_from)
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 1
+    assert f"{user_config}: refusing docs path" in capsys.readouterr().err
+    assert jobs == {}
+
+
+def test_a_refusal_of_a_typed_path_blames_no_config(monkeypatch, tmp_path, capsys):
+    # A config supplies `docs` here, but the refused path came from the command line: the
+    # user must not be sent to edit a file that had nothing to do with it.
+    run_from = make_repo(tmp_path, "docs = true\n")
+    monkeypatch.chdir(run_from)
+    fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff", "--llms", ".git/config"]) == 1
+    err = capsys.readouterr().err
+    assert "refusing docs path" in err
+    assert config.PROJECT_CONFIG_NAME not in err
+    assert "config.toml" not in err
+    # And the reason fits the case: the tracked rule never applied to what the user named.
+    assert "never reads repository metadata" in err
+    assert "the repository tracks it" not in err
+
+
 def test_llms_with_a_path_is_still_the_users_own_word(monkeypatch, tmp_path):
     run_from = make_repo(tmp_path)
     (run_from / "notes.md").write_text("MY OWN NOTES, untracked\n")

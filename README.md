@@ -216,7 +216,9 @@ Relative markdown links inside the docs are followed one level, so an index file
 `llms.txt` / `AGENTS.md` / `CLAUDE.md` exist in the current directory — pass explicit
 paths when your standards live elsewhere. `--llms [PATH]` is kept as a compatibility
 alias for `--docs [PATH]`: bare, it takes the project's `llms.txt` if the repository
-carries one; with a path, it reads what you name.
+carries one and errors if it cannot — like a bare `--docs`, and unlike a config file's
+`docs = true`, which is a standing preference and stays silent; with a path, it reads
+what you name.
 
 Inside a git repository, an auto-discovered doc and every link followed out of any doc
 must be a file the repository tracks — the repo, not you, chose those, and a standards

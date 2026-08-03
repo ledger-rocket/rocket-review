@@ -133,7 +133,15 @@ def docs_source(settings: config.Settings, layers: list[config.Layer]) -> DocsSo
 DOC_RULE = (
     "rr reads a doc the repository chose only when the repository tracks it, it resolves "
     "inside the directory it came from, and it is not repository metadata (.git). Name a "
-    "path yourself with --docs to read anything else"
+    "path yourself with --docs/--llms to read anything else"
+)
+
+#: Why a path the *user* named was refused. Neither the tracked rule nor the confinement
+#: applies to their own word, so the only ways left to fail are the .git footgun check and
+#: a path that will not resolve at all — and a message reciting the rest would misdirect.
+NAMED_DOC_RULE = (
+    "rr never reads repository metadata (.git) into a review, and a path it cannot resolve "
+    "it cannot read"
 )
 
 #: `--llms` with no path. A distinct object, not the string "llms.txt", so the bare flag
@@ -267,11 +275,18 @@ def collect_docs(
     """
     cwd = Path.cwd()
 
-    def require(path: Path, *, user_named: bool, base: Path) -> Path:
-        """A path someone named outright: refusing it stops the run."""
+    def require(path: Path, *, user_named: bool, base: Path, named_by: Path | None) -> Path:
+        """A path someone named outright: refusing it stops the run.
+
+        named_by is the config file that named this path, or None when the command line
+        did. Carried explicitly rather than inferred: a config may be supplying `docs`
+        while the refused path came from a flag, and blaming the file for it would send
+        the user to edit something they did not write.
+        """
         if resolve_doc_path(path, user_named=user_named, base=base) is None:
-            named_by = f"{source.config_file}: " if source and not user_named else ""
-            print(f"Error: {named_by}refusing docs path {str(path)!r} — {DOC_RULE}.",
+            origin = f"{named_by}: " if named_by else ""
+            rule = NAMED_DOC_RULE if user_named else DOC_RULE
+            print(f"Error: {origin}refusing docs path {str(path)!r} — {rule}.",
                   file=sys.stderr)
             sys.exit(1)
         return path
@@ -299,7 +314,7 @@ def collect_docs(
             sys.exit(1)
         paths.append(kept)
     elif isinstance(llms_arg, str) and llms_arg:
-        paths.append(require(Path(llms_arg), user_named=True, base=cwd))
+        paths.append(require(Path(llms_arg), user_named=True, base=cwd, named_by=None))
 
     if docs_args is not None and len(docs_args) == 0:
         search_root = source.discovery_root if source else cwd
@@ -318,7 +333,11 @@ def collect_docs(
         # A project config is repository content; the user's own config is not.
         user_named = source is None or not source.repo_supplied
         base = source.config_file.parent if source else cwd
-        paths.extend(require(Path(raw), user_named=user_named, base=base) for raw in docs_args)
+        named_by = source.config_file if source else None
+        paths.extend(
+            require(Path(raw), user_named=user_named, base=base, named_by=named_by)
+            for raw in docs_args
+        )
 
     seen: set[Path] = set()
     parts: list[str] = []
