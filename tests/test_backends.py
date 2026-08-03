@@ -316,7 +316,7 @@ def test_api_review_prepends_docs_and_passes_model_extra(monkeypatch):
     captured = {}
 
     def fake_call(content, system_prompt, model, extra, effort=None, timeout=None,
-                  json_output=False):
+                  json_output=False, extract=True):
         captured.update(content=content, system_prompt=system_prompt, model=model, extra=extra)
         return "ok"
 
@@ -358,7 +358,7 @@ def test_api_json_mode_puts_the_json_format_in_the_system_prompt(monkeypatch):
     captured = {}
 
     def fake_call(content, system_prompt, model, extra, effort=None, timeout=None,
-                  json_output=False):
+                  json_output=False, extract=True):
         captured["system_prompt"] = system_prompt
         captured["json_output"] = json_output
         return "ok"

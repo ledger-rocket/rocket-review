@@ -89,9 +89,22 @@ exfiltrating**:
   PR description, or in a standards doc's prose ("never commit `id.pem`"). That text is
   repository content, so those paths pass the same rule the `docs` paths do: read only if
   the repository tracks the file at `HEAD`, it resolves inside the checkout, and it is not
-  inside `.git`. Outside a git repository the directory confinement is what remains. The
-  agentic backends read the checkout themselves, which is a different trust model and one
-  you opt into by choosing them.
+  inside `.git`. Outside a git repository the directory confinement is what remains, and
+  every path withheld is named on stderr rather than dropped silently. Four things follow
+  from *which* repository is being asked:
+  - **`--repo owner/name --pr N` attaches nothing at all.** The text is another
+    repository's, so "does the repository track this" would be answered by *your* checkout —
+    a path the remote PR happens to name and you happen to track would be read from here.
+    No gate fixes that, so extraction is off for the whole run.
+  - **Piped input is your own word**, not a repository's, and rr cannot tell what produced
+    it. Paths named in it resolve against the current checkout under the same tracked rule,
+    so piping a foreign diff into `rr` from inside a sensitive checkout is the `--repo` case
+    without the flag that detects it. Run it from a directory that has nothing to offer.
+  - **Submodule content is not attachable.** The tracked set comes from `ls-tree -r`, which
+    stops at a gitlink rather than descending into the submodule, so a path inside one is
+    never tracked *by this repository* and is refused. Same answer the docs gate gives.
+  - The agentic backends read the checkout themselves, which is a different trust model and
+    one you opt into by choosing them.
 - **Confused-deputy across checkouts.** `--repo <other>` reviews a PR from a *different*
   remote repository, but the agent still runs with read access to your **local current
   working directory**. Do not run it from inside an unrelated sensitive checkout — the

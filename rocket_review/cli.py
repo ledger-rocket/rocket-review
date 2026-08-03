@@ -23,6 +23,7 @@ from rocket_review.models import (
 from rocket_review.repo import (
     case_folds as case_folds,
     resolve_doc_path,
+    resolve_doc_paths,
     run_capture,
     tracked_files as tracked_files,
 )
@@ -146,13 +147,19 @@ def read_doc_with_links(doc_path: Path) -> str:
         sys.exit(1)
     parts = [f"--- {doc_path.name} ---\n{doc_text}"]
 
+    links = []
     for raw_link in re.findall(r"\[[^\]]*\]\(([^)]+)\)", doc_text):
         if raw_link.startswith(("http://", "https://", "#")):
             continue
         link, _ = urldefrag(unquote(raw_link))
-        if not link:
-            continue
-        linked_path = resolve_doc_path(base_dir / link, user_named=False, base=base_dir)
+        if link:
+            links.append(link)
+
+    # Every link judged in one pass, so an index with hundreds of them asks git once.
+    allowed = resolve_doc_paths(
+        (base_dir / link for link in links), user_named=False, base=base_dir,
+    )
+    for link, linked_path in zip(links, allowed, strict=True):
         if linked_path is None:
             print(f"Warning: skipping link {link}: {DOC_RULE}.", file=sys.stderr)
             continue
@@ -776,6 +783,7 @@ def _run():
         json_output=settings.json,
         effort=settings.effort,
         timeout=settings.timeout,
+        foreign_repo=bool(args.repo),
     )
 
     base.begin_fanout()
