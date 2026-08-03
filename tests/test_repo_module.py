@@ -23,6 +23,8 @@ MODULE = "rocket_review.repo"
 #: tracked set is keyed by and `run_capture` is how it is read, so they belong beside it.
 PRIMITIVES = (
     "resolve_doc_path",
+    "resolve_doc_paths",
+    "tracked",
     "tracked_files",
     "is_repository_metadata",
     "inside_dot_git",
@@ -30,6 +32,8 @@ PRIMITIVES = (
     "case_folds",
     "tracked_key",
     "run_capture",
+    "capture",
+    "clear_caches",
 )
 
 

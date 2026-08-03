@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from rocket_review import cli
+from rocket_review import repo as repo_module
 from rocket_review.cli import (
     DocsSource,
     collect_docs,
@@ -363,7 +364,7 @@ def test_case_folds_reports_what_this_filesystem_actually_does(tmp_path):
     # covered by the monkeypatched test below.
     repo = repo_with_a_local_secret(tmp_path)
     (repo / "CaseProbe.tmp").write_text("x")
-    cli.case_folds.cache_clear()
+    repo_module.clear_caches()
     assert cli.case_folds(repo) is (repo / "caseprobe.tmp").exists()
 
 
@@ -376,8 +377,10 @@ def test_a_case_variant_is_refused_where_the_filesystem_does_not_fold(
     (repo / "README.md").write_text("the readme rules\n")
     (repo / "llms.txt").write_text("# llms\nstandards\n[r](README.MD)\n")
     carry(repo, "README.md", "llms.txt")
+    # Cleared before the probe is replaced: clear_caches() reaches the caches through the
+    # module's own names, and the stand-in going in here is a plain function.
+    repo_module.clear_caches()
     monkeypatch.setattr("rocket_review.repo.case_folds", lambda root: False)
-    cli.tracked_files.cache_clear()
     monkeypatch.chdir(repo)
     out = collect_docs([], None, source=config_source(repo))
     assert "the readme rules" not in out
