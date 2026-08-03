@@ -78,6 +78,17 @@ def test_collect_docs_nothing_given_is_none():
     assert collect_docs(None, None) is None
 
 
+# Identity on the command itself, not in the repository: a test that rewrites .git/config
+# to plant a remote drops whatever `git config` wrote there, and a CI runner has no global
+# identity to fall back on. gpgsign off for the same reason — a developer who signs by
+# default must not be signing test fixtures.
+GIT_IDENTITY = [
+    "-c", "user.email=tests@example.invalid",
+    "-c", "user.name=rocket-review tests",
+    "-c", "commit.gpgsign=false",
+]
+
+
 SECRET = "SECRET-ghp-DEADBEEF"
 
 
@@ -179,7 +190,7 @@ def carry(repo: Path, *names: str) -> None:
     """Commit files, so the repository carries them at HEAD."""
     subprocess.run(["git", "-C", str(repo), "add", "-f", "--", *names],
                    check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "carry"],
+    subprocess.run(["git", "-C", str(repo), *GIT_IDENTITY, "commit", "-qm", "carry"],
                    check=True, capture_output=True)
 
 
