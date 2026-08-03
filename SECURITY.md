@@ -100,6 +100,12 @@ exfiltrating**:
     it. Paths named in it resolve against the current checkout under the same tracked rule,
     so piping a foreign diff into `rr` from inside a sensitive checkout is the `--repo` case
     without the flag that detects it. Run it from a directory that has nothing to offer.
+  - **`--pr N` alone trusts `gh`'s default repository.** rr treats it as this checkout's own
+    PR, but `gh` resolves it — and `gh repo set-default`, or a fork whose parent `gh` prefers,
+    can point that somewhere else. The text is then another repository's while extraction is
+    still on, which is the `--repo` case reached without the flag rr keys on. Pass `--repo`
+    explicitly when you want the refusal, and check `gh repo set-default --view` if you are
+    unsure what `--pr` resolves to.
   - **Submodule content is not attachable.** The tracked set comes from `ls-tree -r`, which
     stops at a gitlink rather than descending into the submodule, so a path inside one is
     never tracked *by this repository* and is refused. Same answer the docs gate gives.

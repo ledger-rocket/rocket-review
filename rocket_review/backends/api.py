@@ -269,9 +269,15 @@ def _call_openai(
     # its own bound (repo.GATE_TIMEOUT), and none of them is subtracted from --timeout — so
     # a run with less than one call's worth left would spend the remainder deciding what to
     # attach and have nothing left to ask the model with. Under that line, attach nothing and
-    # go straight to the call. This bounds the common case, not the worst one: extraction can
-    # make up to three calls (repo root, the scoped query, and a case-fold fallback), so a
-    # deadline that must hold exactly needs one threaded through the gate itself.
+    # go straight to the call.
+    #
+    # This bounds the ordinary case, not the worst one, and the gap is linear rather than
+    # constant: extraction costs (1 + ceil(candidates / repo.QUERY_CHUNK) + a possible
+    # case-fold fallback) calls, so text naming enough paths can outlast --timeout several
+    # times over — measured at 70.8s against `--timeout 30` for a thousand candidates, never
+    # reaching the API. Still strictly better than an unbounded read, which is what the
+    # repo-root call was before it came through repo.capture. A deadline that holds exactly
+    # needs one threaded through the gate itself.
     if extract:
         remaining = None if timeout is None else timeout - (time.monotonic() - start)
         if remaining is not None and remaining < repo.GATE_TIMEOUT:

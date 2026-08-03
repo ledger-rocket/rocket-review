@@ -60,13 +60,17 @@ def capture(cmd: list[str], timeout: int = GATE_TIMEOUT) -> subprocess.Completed
     BaseException the fan-out's `except Exception` handlers do not catch. One slow ls-tree
     would surface out of `future.result()` and take down every backend's result, not just
     the one that asked. Returning None instead leaves the caller to fail closed.
+
+    ValueError alongside the OS errors because an argument carrying a NUL raises it, and
+    this promise should rest on what it catches rather than on the gate's resolve() having
+    rejected such a path first.
     """
     try:
         return subprocess.run(
             cmd, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=timeout,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
 
@@ -125,15 +129,23 @@ _tracked: dict[Path, dict[str, bool]] = {}
 def _tracked_exactly(root: Path, relatives: Sequence[str]) -> set[str]:
     """Which of `relatives` git reports at HEAD, matched byte-for-byte.
 
-    `--` so a path that looks like a revision is read as a path, and chunked so a doc with
-    thousands of links cannot outgrow ARG_MAX. A chunk git refuses answers for none of its
-    paths, which refuses — the same direction every other failure here takes.
+    These paths come out of repository-controlled text, so every way git could read one as
+    something other than a literal path has to be shut off. `--literal-pathspecs` because a
+    name beginning with `:` is otherwise pathspec magic — `:(exclude)a.md`, `:!a.md`, or the
+    unterminated `:(a.md` — and git rejects the *whole command* over one of them, so a single
+    such spelling would silently cost every other path in its chunk its attachment. `--` for
+    the other half of the same problem: a leading `-` reads as a switch. Both refuse rather
+    than leak, but blinding the reviewer is itself what this text might be trying to do.
+
+    Chunked so a doc with thousands of links cannot outgrow ARG_MAX. A chunk git refuses
+    answers for none of its paths, which refuses — the direction every failure here takes.
     """
     found: set[str] = set()
     for start in range(0, len(relatives), QUERY_CHUNK):
         chunk = relatives[start:start + QUERY_CHUNK]
         result = capture([
-            "git", "-C", str(root), "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", *chunk,
+            "git", "-C", str(root), "--literal-pathspecs",
+            "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", *chunk,
         ])
         if result is None or result.returncode != 0:
             continue

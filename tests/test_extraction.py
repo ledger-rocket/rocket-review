@@ -365,3 +365,50 @@ def test_submodule_content_is_not_this_repositorys_to_offer(tmp_path, monkeypatc
     out = api.extract_referenced_files("see `sub/secret.txt` and `kept.py`")
     assert OUTSIDE_SECRET not in out
     assert "KEPT = 1" in out
+
+
+# --- git must read these as paths and nothing else ------------------------------------
+
+
+def only_the_scoped_query(monkeypatch) -> None:
+    """Take the case-fold fallback out of the picture.
+
+    Where the filesystem folds, every path the scoped query misses is answered from the whole
+    HEAD tree instead — so a query that failed outright still returns the right answers, and a
+    test written without this passes on macOS while the behaviour it pins is broken on Linux.
+    """
+    repo.clear_caches()
+    monkeypatch.setattr(repo, "case_folds", lambda root: False)
+
+
+@pytest.mark.parametrize("spelling", [
+    ":(exclude)kept.py",   # valid magic ls-tree does not implement
+    ":(nomagic)kept.py",   # ditto
+    ":(kept.py",           # unterminated magic
+    ":!kept.py",           # the short spelling of exclude
+])
+def test_a_pathspec_spelling_does_not_cost_its_chunk_the_attachments(
+    tmp_path, monkeypatch, spelling
+):
+    # These paths come out of repository-controlled text. A name beginning with `:` is
+    # pathspec magic, and git rejects the whole command over one of them — so without
+    # --literal-pathspecs a single such spelling would take every other path in its chunk
+    # down with it. Fail-closed, but blinding the reviewer is a thing this text might want.
+    repo_dir = make_repo(tmp_path)
+    monkeypatch.chdir(repo_dir)
+    only_the_scoped_query(monkeypatch)
+    out = api.extract_referenced_files(f"see `{spelling}` and `kept.py`")
+    assert "KEPT = 1" in out
+
+
+def test_a_tracked_path_beginning_with_a_dash_is_read_as_a_path(tmp_path, monkeypatch):
+    # The other half of the same problem, and what the `--` separator is for: without it git
+    # reads `-dash.md` as a switch, fails the command, and the chunk answers for nothing.
+    repo_dir = make_repo(tmp_path)
+    (repo_dir / "-dash.md").write_text("DASHED = 1\n")
+    carry(repo_dir, "-dash.md")
+    monkeypatch.chdir(repo_dir)
+    only_the_scoped_query(monkeypatch)
+    out = api.extract_referenced_files("see `-dash.md` and `kept.py`")
+    assert "DASHED = 1" in out
+    assert "KEPT = 1" in out
