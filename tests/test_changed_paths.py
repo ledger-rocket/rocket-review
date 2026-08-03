@@ -364,6 +364,23 @@ def test_a_binary_change_is_a_changed_path(monkeypatch):
     assert job.changed_paths == ["src/a.py", "src/blob.bin"]
 
 
+TAB_IN_NAME_PATCH = (
+    'diff --git "a/we\\tird.py" "b/we\\tird.py"\n'
+    '--- "a/we\\tird.py"\n'
+    '+++ "b/we\\tird.py"\n'
+    "@@ -1 +1 @@\n-a\n+b\n"
+)
+
+
+def test_a_tab_in_a_filename_does_not_truncate_the_path(monkeypatch):
+    job = run_with_backend(monkeypatch, [], stdin_text=TAB_IN_NAME_PATCH)
+
+    # A tab is a legal character in a filename and the only separator the report has, so a
+    # path carrying one arrives in a field that still contains tabs. Cutting at the wrong
+    # one invents a path that was never in the patch.
+    assert job.changed_paths == ["we\tird.py"]
+
+
 NO_PREFIX_PATCH = """\
 diff --git src/deep/a.py src/deep/a.py
 --- src/deep/a.py
