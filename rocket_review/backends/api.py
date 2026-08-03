@@ -1,10 +1,11 @@
 import os
 import re
-import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
+from rocket_review import repo
 from rocket_review.backends.base import BackendError, ReviewJob, format_duration, interrupted
 from rocket_review.models import REVIEW_SCHEMA
 from rocket_review.prompts import get_prompt
@@ -24,9 +25,19 @@ def review(job: ReviewJob) -> str:
         content = (f"=== PROJECT STANDARDS ===\n{job.docs_content}\n"
                    f"=== END PROJECT STANDARDS ===\n\n{content}")
     system_prompt = get_prompt(job.mode, job.docs_content, job.json_output)
+    # Reviewing another repository's text against this checkout's files is not something a
+    # gate can make safe: "does the repository track it" would be asked of the wrong
+    # repository, so a path the remote PR names and this checkout happens to track would be
+    # attached from here. Nothing is attachable in that case.
+    if job.foreign_repo:
+        print(
+            "Note: not attaching files named in the review text — --repo names a different "
+            "repository than this checkout, so nothing here is that repository's content.",
+            file=sys.stderr,
+        )
     return _call_openai(
         content, system_prompt, job.model or DEFAULT_MODEL, job.extra, job.effort,
-        job.timeout, job.json_output,
+        job.timeout, job.json_output, extract=not job.foreign_repo,
     )
 
 
@@ -59,41 +70,80 @@ def _load_env_file() -> None:
 
 
 def _get_repo_root() -> Path | None:
-    """Get the git repo root, or None if not in a repo."""
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
-    if result.returncode == 0:
+    """The git repo root, or None outside one — and None rather than a wait, if git hangs.
+
+    Through repo.capture like every other git call on this path: it runs in a backend worker
+    with the user's --timeout ticking, so it is bounded, and it never exits the process.
+    """
+    result = repo.capture(["git", "rev-parse", "--show-toplevel"])
+    if result is not None and result.returncode == 0:
         return Path(result.stdout.strip()).resolve()
     return None
 
 
+def _is_local_file(candidate: str) -> bool:
+    """Whether the text named something that is actually here, however it was spelled."""
+    try:
+        return Path(candidate).is_file()
+    except (OSError, ValueError):
+        return False
+
+
 def extract_referenced_files(text: str, max_size: int = 100_000) -> str:
-    """Extract file paths from text and read their contents (repo-scoped only)."""
+    """Attach the local files the reviewed text names, under the repository's own rule.
+
+    The text is repository content — a diff, a PR description, a standards doc's prose — so
+    a path it mentions is the repository's word rather than the user's, and it is read only
+    when the repository tracks it at HEAD, it resolves inside the checkout, and it is not
+    repository metadata. Outside a checkout there is nothing to track, and confinement to
+    the working directory is what remains.
+    """
     repo_root = _get_repo_root()
     if not repo_root:
         repo_root = Path.cwd().resolve()
 
     backtick = re.findall(r"`([^`\s]+\.\w{1,10})`", text)
     bare = re.findall(r"(?<![`\w])([\w][\w./-]*\.\w{1,10})(?![\w`])", text)
-    candidates = set(backtick + bare)
+    candidates = sorted(set(backtick + bare))
+
+    # One gate call for the whole set: the tracked half is a single git query and the rest
+    # is pure path work. Unresolved paths go in, so a candidate carrying a NUL — a diff is
+    # decoded with errors="replace", and the pattern will match one — raises inside the
+    # gate's guarded resolve rather than out here, where it would cost every other candidate
+    # its attachment.
+    allowed = repo.resolve_doc_paths(
+        (Path(c) for c in candidates), user_named=False, base=repo_root,
+    )
 
     parts = []
     seen = set()
-    for c in sorted(candidates):
-        p = Path(c).resolve()
-        # Only include files within the repo/cwd. is_relative_to, not a string-prefix
-        # check: /repo-sibling must not pass as inside /repo.
-        if not p.is_relative_to(repo_root):
+    withheld = 0
+    for candidate, path in zip(candidates, allowed, strict=True):
+        if path is None:
+            # Only a file that is really here was withheld; a path the text merely mentions
+            # and this checkout does not have was never a candidate for attachment, and
+            # counting it would make the note fire on ordinary prose.
+            if _is_local_file(candidate):
+                withheld += 1
             continue
-        if p.is_file() and p not in seen:
+        if path.is_file() and path not in seen:
             try:
-                if p.stat().st_size <= max_size:
-                    parts.append(f"=== {c} ===\n{p.read_text(encoding='utf-8')}")
-                    seen.add(p)
+                if path.stat().st_size <= max_size:
+                    parts.append(f"=== {candidate} ===\n{path.read_text(encoding='utf-8')}")
+                    seen.add(path)
             except (OSError, UnicodeDecodeError):
                 continue
+    if withheld:
+        # Every docs route says why it skipped something; this one used to refuse in silence,
+        # which reads as "there was nothing there" rather than "the repository does not
+        # vouch for it". Aggregated, because a diff can name a great many paths.
+        named = "file named" if withheld == 1 else "files named"
+        print(
+            f"Note: {withheld} local {named} in the reviewed text not attached: rr reads one "
+            "only when the repository tracks it, it resolves inside the checkout, and it is "
+            "not repository metadata (.git).",
+            file=sys.stderr,
+        )
     return "\n\n".join(parts)
 
 
@@ -177,6 +227,7 @@ def _call_openai(
     effort: str | None = None,
     timeout: int | None = None,
     json_output: bool = False,
+    extract: bool = True,
 ) -> str:
     # Same gate the subprocess backends check before Popen: once an interrupt is under way
     # this worker must not open a billed call the teardown has no way to stop. Checked at
@@ -214,10 +265,30 @@ def _call_openai(
     # stay on for reliability.
     model = _resolve_model(client, model)
 
-    # Extract referenced files and append as context
-    referenced = extract_referenced_files(content)
-    if referenced:
-        content = f"{content}\n\n=== REFERENCED PROJECT FILES ===\n{referenced}\n=== END REFERENCED FILES ==="
+    # Extract referenced files and append as context. Each of the gate's git calls carries
+    # its own bound (repo.GATE_TIMEOUT), and none of them is subtracted from --timeout — so
+    # a run with less than one call's worth left would spend the remainder deciding what to
+    # attach and have nothing left to ask the model with. Under that line, attach nothing and
+    # go straight to the call.
+    #
+    # This bounds the ordinary case, not the worst one, and the gap is linear rather than
+    # constant: extraction costs (1 + ceil(candidates / repo.QUERY_CHUNK) + a possible
+    # case-fold fallback) calls, so text naming enough paths can outlast --timeout several
+    # times over — measured at 70.8s against `--timeout 30` for a thousand candidates, never
+    # reaching the API. Still strictly better than an unbounded read, which is what the
+    # repo-root call was before it came through repo.capture. A deadline that holds exactly
+    # needs one threaded through the gate itself.
+    if extract:
+        remaining = None if timeout is None else timeout - (time.monotonic() - start)
+        if remaining is not None and remaining < repo.GATE_TIMEOUT:
+            print(
+                f"Note: not attaching files named in the review text — under "
+                f"{repo.GATE_TIMEOUT}s of --timeout is left, which is the budget the "
+                f"tracked-file check alone may take.",
+                file=sys.stderr,
+            )
+        elif referenced := extract_referenced_files(content):
+            content = f"{content}\n\n=== REFERENCED PROJECT FILES ===\n{referenced}\n=== END REFERENCED FILES ==="
 
     user_message = content
     if extra:

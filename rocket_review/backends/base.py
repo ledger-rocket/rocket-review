@@ -106,6 +106,11 @@ class ReviewJob:
     # Per-backend subprocess timeout in seconds; None means the backend falls back
     # to base.TIMEOUT. High-effort reasoning models can outrun the 900s default.
     timeout: int | None = None
+    #: True when the text under review comes from a repository other than this checkout
+    #: (`--repo owner/name --pr N`). It decides whether local files may be attached at all:
+    #: the trust question is "does the repository that wrote this text carry the file", and
+    #: for a foreign repository there is no way to ask it from here.
+    foreign_repo: bool = False
 
 
 def format_duration(seconds: int) -> str:

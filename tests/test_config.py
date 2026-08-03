@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from rocket_review import cli, config
+from rocket_review import cli, config, repo
 from rocket_review.cli import main
 
 PROJECT = Path("/repo/.rocket-review.toml")
@@ -472,7 +472,7 @@ def test_who_named_the_path_is_what_the_funnel_is_wired_to(tmp_path):
     local.write_text("local notes\n")
     assert cli.resolve_doc_path(local, user_named=False, base=run_from) is None
     track(run_from, "local.md")
-    cli.tracked_files.cache_clear()
+    repo.clear_caches()
     assert cli.resolve_doc_path(local, user_named=False, base=run_from) == local.resolve()
 
     # The footgun check survives even the user's own word.
@@ -487,7 +487,7 @@ def test_a_repo_with_no_commits_carries_nothing(tmp_path):
     doc = run_from / "std.md"
     doc.write_text("rules\n")
     subprocess.run(["git", "-C", str(run_from), "add", "std.md"], check=True, capture_output=True)
-    cli.tracked_files.cache_clear()
+    repo.clear_caches()
     assert cli.resolve_doc_path(doc, user_named=False, base=run_from) is None
 
 
@@ -500,7 +500,7 @@ def test_the_index_does_not_widen_what_a_repository_offers(tmp_path):
     secret.write_text("AWS_KEY=SECRET\n")
     subprocess.run(["git", "-C", str(run_from), "add", "-f", ".env"], check=True,
                    capture_output=True)
-    cli.tracked_files.cache_clear()
+    repo.clear_caches()
     assert cli.resolve_doc_path(secret, user_named=False, base=run_from) is None
 
 
@@ -806,11 +806,16 @@ def test_a_broken_config_fails_before_any_git_or_backend_work(monkeypatch, tmp_p
     monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", cli.ensure_diff_exists)
     git = []
 
-    def spy(cmd):
+    def spy(cmd, *args, **kwargs):
         git.append(cmd)
         return subprocess.CompletedProcess(cmd, 1, "", "")
 
+    # Every name the git layer is reachable through, not just cli's: the primitives live in
+    # rocket_review.repo now, and a spy on one binding would let the other run git unwatched
+    # while this test still passed.
     monkeypatch.setattr("rocket_review.cli.run_capture", spy)
+    monkeypatch.setattr("rocket_review.repo.run_capture", spy)
+    monkeypatch.setattr("rocket_review.repo.capture", spy)
     assert run_main(monkeypatch, ["--diff"]) == 1
     assert "timeout must be a positive integer" in capsys.readouterr().err
     assert git == []
