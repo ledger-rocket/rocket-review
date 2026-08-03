@@ -155,6 +155,68 @@ def test_root_commit_source_lists_its_files(tmp_path, monkeypatch):
     assert other[0].endswith(".py")
 
 
+def test_a_merge_commit_lists_what_its_combined_diff_shows(tmp_path, monkeypatch):
+    repo = new_repo(tmp_path)
+    (repo / "shared.py").write_text("a\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "init")
+    git(repo, "checkout", "-qb", "side")
+    (repo / "side_only.py").write_text("s\n")
+    (repo / "shared.py").write_text("a\nside\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "side")
+    git(repo, "checkout", "-q", "-")
+    (repo / "main_only.py").write_text("m\n")
+    (repo / "shared.py").write_text("a\nmain\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "main")
+    subprocess.run(["git", "merge", "--no-ff", "side", "-m", "merge"],
+                   cwd=repo, capture_output=True)  # conflicts, by construction
+    (repo / "shared.py").write_text("a\nboth\n")
+    git(repo, "add", "shared.py")
+    git(repo, "commit", "-qm", "merge")
+    monkeypatch.chdir(repo)
+
+    job = run_with_backend(monkeypatch, ["--commit", "HEAD"])
+
+    # `git show` puts a merge's combined diff in front of the reviewer — what the merge
+    # settled differently from every parent. The paths are that same diff's, so the list
+    # and the review describe one thing. A merge that resolved nothing shows nothing and
+    # reports nothing, which is the honest pair.
+    assert job.changed_paths == ["shared.py"]
+
+
+def test_working_tree_paths_are_read_after_the_diff_they_describe(tmp_path, monkeypatch):
+    from rocket_review import cli
+
+    repo = new_repo(tmp_path)
+    (repo / "a.py").write_text("a\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "init")
+    (repo / "a.py").write_text("edited\n")
+    monkeypatch.chdir(repo)
+
+    calls: list[list[str]] = []
+    real_run = subprocess.run
+
+    def recording_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list):
+            calls.append(cmd)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(cli.subprocess, "run", recording_run)
+
+    job = run_with_backend(monkeypatch, ["--diff"], backend="opencode")
+
+    assert job.changed_paths == ["a.py"]
+    # A working tree moves under a review that is only ever a snapshot of it. Nothing here
+    # can freeze it, so the two reads are put next to each other and the paths are taken
+    # after the diff they claim to describe — the narrowest window available.
+    snapshot = next(i for i, c in enumerate(calls) if "diff" in c and "--name-only" not in c)
+    names = next(i for i, c in enumerate(calls) if "--name-only" in c)
+    assert names > snapshot
+
+
 STDIN_PATCH = """\
 diff --git a/src/added.py b/src/added.py
 new file mode 100644
@@ -180,10 +242,10 @@ deleted file mode 100644
 def test_stdin_patch_lists_each_touched_file(monkeypatch):
     job = run_with_backend(monkeypatch, [], stdin_text=STDIN_PATCH)
 
-    # A patch is read for the paths it carries, in the order it carries them. A deletion's
-    # post-image is /dev/null, which is not a path in the change and must not become one —
-    # in any spelling.
-    assert job.changed_paths == ["src/added.py", "src/modified.py"]
+    # A patch is read for the paths it carries, in the order it carries them — a deleted
+    # file among them, since deleting a file is touching it. /dev/null is the post-image of
+    # a deletion, not a path in the change, and must not become one in any spelling.
+    assert job.changed_paths == ["src/added.py", "src/modified.py", "src/deleted.py"]
     assert not any("dev/null" in p for p in job.changed_paths)
 
 
@@ -243,7 +305,7 @@ HUNK_BODY_PATCH = """\
 diff --git a/src/real.py b/src/real.py
 --- a/src/real.py
 +++ b/src/real.py
-@@ -1,3 +1,4 @@
+@@ -1,2 +1,3 @@
  context
 +++ b/not-a-file.py
  more context
@@ -256,6 +318,68 @@ def test_a_hunk_body_line_is_not_a_changed_path(monkeypatch):
     # Adding a line that itself begins "++ " renders as a "+++ " line inside the hunk. Only
     # the header pair names a file.
     assert job.changed_paths == ["src/real.py"]
+
+
+HEADER_SHAPED_HUNK_PATCH = """\
+diff --git a/src/real.py b/src/real.py
+--- a/src/real.py
++++ b/src/real.py
+@@ -1,3 +1,3 @@
+ context
+--- a/fake-old.py
++++ b/fake-new.py
+ trailing context
+"""
+
+
+def test_a_header_shaped_pair_inside_a_hunk_is_not_a_changed_path(monkeypatch):
+    job = run_with_backend(monkeypatch, [], stdin_text=HEADER_SHAPED_HUNK_PATCH)
+
+    # The adversarial shape: a removed line beginning "-- " and an added line beginning
+    # "++ " render as a complete "--- "/"+++ " header pair *inside* the hunk. Position in
+    # the line is not what makes a header, so nothing but the hunk's own arithmetic can
+    # tell these apart — and only what really changed may be reported.
+    assert job.changed_paths == ["src/real.py"]
+
+
+BINARY_PATCH = """\
+diff --git a/src/a.py b/src/a.py
+index 7898192..6178079 100644
+--- a/src/a.py
++++ b/src/a.py
+@@ -1 +1 @@
+-a
++b
+diff --git a/src/blob.bin b/src/blob.bin
+index 6772730..81442ca 100644
+Binary files a/src/blob.bin and b/src/blob.bin differ
+"""
+
+
+def test_a_binary_change_is_a_changed_path(monkeypatch):
+    job = run_with_backend(monkeypatch, [], stdin_text=BINARY_PATCH)
+
+    # A binary file's change carries no hunk and no "+++" line at all — it is announced in
+    # one prose sentence. It is still a file this review touches.
+    assert job.changed_paths == ["src/a.py", "src/blob.bin"]
+
+
+NO_PREFIX_PATCH = """\
+diff --git src/deep/a.py src/deep/a.py
+--- src/deep/a.py
++++ src/deep/a.py
+@@ -1 +1 @@
+-x
++y
+"""
+
+
+def test_a_no_prefix_patch_keeps_its_whole_path(monkeypatch):
+    job = run_with_backend(monkeypatch, [], stdin_text=NO_PREFIX_PATCH)
+
+    # `git diff --no-prefix` writes no a//b/, so stripping a leading component off these
+    # headers would silently rename the file to one a directory up.
+    assert job.changed_paths == ["src/deep/a.py"]
 
 
 DUPLICATE_PATCH = """\
@@ -294,7 +418,7 @@ def test_pr_source_lists_the_patch_paths_and_not_the_description(monkeypatch):
     job = run_with_backend(monkeypatch, ["--pr", "7"])
 
     # The patch is what is under review; prose quoting a patch is not part of the change.
-    assert job.changed_paths == ["src/added.py", "src/modified.py"]
+    assert job.changed_paths == ["src/added.py", "src/modified.py", "src/deleted.py"]
 
 
 def test_file_arguments_are_carried_as_given(tmp_path, monkeypatch):
@@ -303,24 +427,60 @@ def test_file_arguments_are_carried_as_given(tmp_path, monkeypatch):
     (tmp_path / "plan.md").write_text("# plan\n")
     monkeypatch.chdir(tmp_path)
 
+    def forbidden(*args, **kwargs):
+        raise AssertionError(f"unexpected subprocess call: {args}")
+
+    # File arguments are the user's own words about files that are simply there. Nothing
+    # about them is worth asking a process, and rr reviews files outside a checkout.
+    monkeypatch.setattr("rocket_review.cli.run_capture", forbidden)
+    monkeypatch.setattr("rocket_review.cli.subprocess.run", forbidden)
+
     job = run_with_backend(monkeypatch, ["src/a.py", "plan.md"])
 
     assert job.changed_paths == ["src/a.py", "plan.md"]
 
 
-def test_prose_on_stdin_yields_no_paths_and_no_git_call(monkeypatch):
-    def forbidden(cmd):
-        raise AssertionError(f"unexpected subprocess call: {cmd}")
-
-    monkeypatch.setattr("rocket_review.cli.run_capture", forbidden)
-
+def test_prose_on_stdin_yields_no_paths(monkeypatch):
     job = run_with_backend(
         monkeypatch, [], stdin_text="# Plan\n\nStep one: decide the thing.\n"
     )
 
-    # Nothing determinable is an empty list, never an error — and a source that asked git
-    # nothing before still asks it nothing.
+    # Text that is not a patch names no paths. Nothing determinable is an empty list,
+    # never an error and never a guess.
     assert job.changed_paths == []
+
+
+def test_a_review_survives_a_discovery_that_cannot_run(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "rocket_review.cli.get_pr_content",
+        lambda pr_ref, repo=None: ("PR #7: title", STDIN_PATCH),
+    )
+    monkeypatch.setenv("PATH", "")  # nothing to exec, so discovery cannot answer
+
+    job = run_with_backend(monkeypatch, ["--pr", "7"])
+
+    # Which paths a review touches is decoration on a review that is otherwise fine.
+    # Losing it costs the list and one note — never the review, and never the exit code.
+    assert job.changed_paths == []
+    assert "could not determine" in capsys.readouterr().err
+
+
+def test_path_discovery_never_exits_when_git_is_missing(tmp_path, monkeypatch):
+    from rocket_review import cli
+
+    repo = new_repo(tmp_path)
+    (repo / "a.py").write_text("a\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "init")
+    oid = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+                         text=True).stdout.strip()
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("PATH", "")
+
+    # SystemExit is what run_capture does for a missing binary, and it is not available to
+    # discovery: these answer with an empty list or they answer with nothing at all.
+    assert cli.git_diff_changed_paths(False) == []
+    assert cli.commit_changed_paths(oid) == []
 
 
 def _job(**kw):
