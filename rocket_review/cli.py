@@ -152,8 +152,24 @@ LLMS_DISCOVER = object()
 
 
 @lru_cache(maxsize=None)
-def tracked_files(root: Path) -> frozenset[Path]:
-    """Every path the repository at `root` carries at HEAD, resolved.
+def case_folds(root: Path) -> bool:
+    """Whether this filesystem folds case, asked of the checkout itself.
+
+    Every git root holds a .git, so a .GIT that also exists is the filesystem answering.
+    It matters because resolve() does not canonicalise case: on macOS a link to `readme.md`
+    opens the tracked `README.md` and has to count as tracked, while on Linux those are two
+    different files and only one of them is the repository's.
+    """
+    return (root / ".GIT").exists()
+
+
+def tracked_key(relative: str, folds: bool) -> str:
+    return relative.lower() if folds else relative
+
+
+@lru_cache(maxsize=None)
+def tracked_files(root: Path) -> frozenset[str]:
+    """Every path the repository at `root` carries at HEAD, repo-relative.
 
     `ls-tree HEAD`, not `ls-files`: the index would let a stray `git add .env` widen what a
     repository may offer, while HEAD is what the repository actually carries. A repo with no
@@ -161,29 +177,28 @@ def tracked_files(root: Path) -> frozenset[Path]:
 
     Listing the whole tree once, rather than asking about each path, is also what keeps a doc
     with thousands of links from ever building a command line: no path is passed to git at
-    all. Cached per checkout because every route consults it.
+    all. Strings rather than Paths because a monorepo's HEAD tree is large and this set only
+    ever answers "is this one in it".
+
+    Cached for the process, which is one rr run: HEAD cannot move under a run that never
+    writes, and a checkout replaced at the same path mid-run would need a second rr in the
+    same interpreter. An embedder calling main() twice around such a change would see the
+    first answer — cache_clear() is the release valve, and the test suite pulls it.
     """
-    # Cached for the process, which is one rr run: HEAD cannot move under a run that never
-    # writes, and a checkout replaced at the same path mid-run would need a second rr in the
-    # same interpreter. An embedder calling main() twice around such a change would see the
-    # first answer — cache_clear() is the release valve, and the test suite pulls it.
     result = run_capture(["git", "-C", str(root), "ls-tree", "-r", "-z", "--name-only", "HEAD"])
     if result.returncode != 0:
         return frozenset()
-    # The root is resolved, the entries are not: a tracked symlink is the file the repository
-    # carries, and its target is a different file that the repository may not carry at all.
-    # Resolving both sides would collapse `llms.txt -> .env` into "`.env` is tracked".
-    inside = root.resolve()
-    return frozenset(inside / entry for entry in result.stdout.split("\0") if entry)
+    folds = case_folds(root)
+    return frozenset(tracked_key(entry, folds) for entry in result.stdout.split("\0") if entry)
 
 
 def resolve_doc_path(path: Path, *, user_named: bool, base: Path) -> Path | None:
     """The one gate every docs path passes: the resolved path, or None if rr must not read it.
 
     Every route — a path a config named, an auto-discovered doc, a markdown link out of any
-    doc, a path typed on the command line — comes through here, and every rule is applied to
-    the *resolved* path, so a symlink is judged by the file it actually opens rather than by
-    the name it wears.
+    doc, a path typed on the command line — comes through here, and the answer is the
+    *resolved* path, which is what callers must carry onwards: a doc read through a symlink
+    has its links judged from where the file really is, not from where the link sat.
 
     `user_named` is the user's own word: a --docs/--llms path, or one written in their own
     user config. It reads whatever it points at, with .git kept as a footgun check.
@@ -194,6 +209,11 @@ def resolve_doc_path(path: Path, *, user_named: bool, base: Path) -> Path | None
     inside `base` (the directory they came from), and outside .git. Outside a checkout there
     is nothing to track, so confinement to `base` is what remains.
     """
+    # Both spellings, because either can be the one that reaches metadata: `.git/config`
+    # resolves away when .git is a symlink to an external gitdir, and a symlink elsewhere in
+    # the path resolves *into* .git without ever naming it.
+    if config.inside_dot_git(path if path.is_absolute() else base / path):
+        return None
     try:
         resolved = path.resolve()
     except (OSError, ValueError):
@@ -208,7 +228,11 @@ def resolve_doc_path(path: Path, *, user_named: bool, base: Path) -> Path | None
     root = config.find_git_root(base_dir)
     if root is None:
         return resolved
-    return resolved if resolved in tracked_files(root) else None
+    inside = root.resolve()
+    if not resolved.is_relative_to(inside):
+        return None
+    relative = resolved.relative_to(inside).as_posix()
+    return resolved if tracked_key(relative, case_folds(root)) in tracked_files(root) else None
 
 
 def read_doc_with_links(doc_path: Path) -> str:
@@ -283,13 +307,14 @@ def collect_docs(
         while the refused path came from a flag, and blaming the file for it would send
         the user to edit something they did not write.
         """
-        if resolve_doc_path(path, user_named=user_named, base=base) is None:
+        allowed = resolve_doc_path(path, user_named=user_named, base=base)
+        if allowed is None:
             origin = f"{named_by}: " if named_by else ""
             rule = NAMED_DOC_RULE if user_named else DOC_RULE
             print(f"Error: {origin}refusing docs path {str(path)!r} — {rule}.",
                   file=sys.stderr)
             sys.exit(1)
-        return path
+        return allowed
 
     def offer(path: Path, *, base: Path) -> Path | None:
         """A path discovery turned up: refusing it skips it, since discovery meant "if any".
@@ -297,10 +322,10 @@ def collect_docs(
         Never the user's own word — whoever asked for the pattern, the repository decides
         which file answers it.
         """
-        if resolve_doc_path(path, user_named=False, base=base) is not None:
-            return path
-        print(f"Warning: skipping {path.name}: {DOC_RULE}.", file=sys.stderr)
-        return None
+        allowed = resolve_doc_path(path, user_named=False, base=base)
+        if allowed is None:
+            print(f"Warning: skipping {path.name}: {DOC_RULE}.", file=sys.stderr)
+        return allowed
 
     paths: list[Path] = []
     if llms_arg is LLMS_DISCOVER:
@@ -705,7 +730,7 @@ def _run():
     if settings.fail_on and not settings.json:
         print(
             "Error: --fail-on requires --json (findings must be parsed to be gated)."
-            + where_set(settings, "fail_on"),
+            + where_set(settings, "fail_on") + where_set(settings, "json"),
             file=sys.stderr,
         )
         sys.exit(1)
@@ -713,7 +738,7 @@ def _run():
     if settings.full and not settings.json:
         print(
             "Error: --full requires --json (text mode never truncates)."
-            + where_set(settings, "full"),
+            + where_set(settings, "full") + where_set(settings, "json"),
             file=sys.stderr,
         )
         sys.exit(1)
@@ -767,10 +792,13 @@ def _run():
     if args.mode:
         mode = args.mode
 
+    # Empty when --backend was passed: the config's table did not decide this run's backend,
+    # so naming the file that holds it would misdirect.
+    backend_origin = ""
     if specs is None:
+        backend_origin = where_set(settings, f"backends.{mode}", f"the {mode} backend")
         default_backend = resolve_default_backend(
-            settings.backends[mode], mode, args.model, settings.effort,
-            origin=where_set(settings, f"backends.{mode}", f"the {mode} backend"),
+            settings.backends[mode], mode, args.model, settings.effort, origin=backend_origin,
         )
         specs = parse_backend_arg(default_backend, args.model)
 
@@ -789,7 +817,8 @@ def _run():
     for name, _ in specs:
         hint = missing_binary(name)
         if hint:
-            print(f"Error: backend '{name}' unavailable — {hint}", file=sys.stderr)
+            print(f"Error: backend '{name}' unavailable — {hint}{backend_origin}",
+                  file=sys.stderr)
             sys.exit(1)
     # api has no repo to navigate, and opencode's read-only `plan` agent may be denied the
     # tools it would need to run git itself in non-interactive mode — so if either is

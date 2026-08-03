@@ -21,9 +21,10 @@ def isolate_config(monkeypatch, tmp_path):
     monkeypatch.chdir(cwd)
     # Production reads each checkout's tracked set once per process; a test that commits
     # between two reads must not be answered from the previous test's — or its own — cache.
+    # Cleared on the way in only: on the way out monkeypatch may not have restored a patched
+    # probe yet, and the next test clears anyway.
     cli.tracked_files.cache_clear()
-    yield
-    cli.tracked_files.cache_clear()
+    cli.case_folds.cache_clear()
 
 
 @pytest.fixture(autouse=True)

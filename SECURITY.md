@@ -73,8 +73,10 @@ exfiltrating**:
     matches), or when a markdown link inside a repo-resident doc points at it, *including
     links out of a doc you named yourself*. Decided on the resolved path, so a tracked
     symlink is judged by what it opens rather than by the name the repository carries.
-    Outside a git repository nothing is tracked, so the directory confinement and the
-    `.git` guard are what remain. What you name directly — `--docs PATH`, `--llms PATH`,
+    Tracking decides the *path*, not the bytes: the file is then read from your working
+    tree, so uncommitted edits to a tracked doc — a `config/settings.yml` you filled in
+    locally — are what gets sent. Outside a git repository nothing is tracked, so the
+    directory confinement and the `.git` guard are what remain. What you name directly — `--docs PATH`, `--llms PATH`,
     or a path in your own user config — is read as-is, `.git` excepted. The bare flags are
     not that: they ask the repository what it has.
 

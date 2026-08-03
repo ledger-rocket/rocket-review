@@ -100,11 +100,21 @@ def inside_dot_git(path: Path) -> bool:
     return any(part.lower().rstrip(". ") == ".git" for part in path.parts)
 
 
-def user_config_path() -> Path:
-    """The user-level config path, honouring XDG_CONFIG_HOME when it is set."""
+def user_config_path() -> Path | None:
+    """The user-level config path, honouring XDG_CONFIG_HOME — or None when there is none.
+
+    Path.home() raises when HOME is unset and the uid has no passwd entry, which is an
+    ordinary container setup (`docker run -u 12345`, k8s runAsUser, OpenShift). No home
+    means no user config to read, not a run that cannot start.
+    """
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".config"
-    return base / USER_CONFIG_RELPATH
+    if xdg:
+        return Path(xdg) / USER_CONFIG_RELPATH
+    try:
+        home = Path.home()
+    except RuntimeError:
+        return None
+    return home / ".config" / USER_CONFIG_RELPATH
 
 
 def find_git_root(start: Path) -> Path | None:
@@ -168,7 +178,7 @@ def load(*, no_config: bool, cwd: Path) -> list[Layer]:
     if project is not None:
         layers.append(load_file(project, repo_supplied=True))
     user = user_config_path()
-    if user.is_file():
+    if user is not None and user.is_file():
         layers.append(load_file(user, repo_supplied=False))
     return layers
 
@@ -302,18 +312,18 @@ def _docs(path: Path, value: Any) -> list[str] | bool:
         raise ConfigError(
             f"{path}: docs must be true, false, or a list of paths, got {value!r}."
         )
-    # Resolved against the config file, and no further: what a path may reach is one
-    # decision, taken for every route at once in cli.resolve_doc_path.
+    if not value:
+        # An empty list encodes what `docs = true` encodes, so accepting it would make a
+        # config that names nothing turn auto-discovery on.
+        raise ConfigError(
+            f"{path}: docs = [] names no paths; use docs = true for auto-discovery, "
+            "or docs = false for none."
+        )
+    # Anchored to the config file, and deliberately not resolved: the spelling matters to
+    # the gate that judges it (a `.git` component survives here and is followed there), and
+    # what a path may reach is one decision, taken for every route in cli.resolve_doc_path.
     root = path.parent.resolve()
-    resolved = []
-    for item in value:
-        try:
-            resolved.append(str((root / item).resolve()))
-        except (OSError, ValueError) as e:
-            # An embedded null byte and the like: the path never reaches a stat, so this has
-            # to come back as rr's error rather than as a traceback.
-            raise ConfigError(f"{path}: docs path {item!r} is not a usable path: {e}") from e
-    return resolved
+    return [str(root / item) for item in value]
 
 
 def _backends(path: Path, value: Any) -> dict[str, str]:

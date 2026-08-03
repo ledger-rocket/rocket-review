@@ -121,6 +121,37 @@ def test_user_config_path_honours_xdg_config_home(tmp_path, monkeypatch):
     assert config.user_config_path() == tmp_path / "xdg" / "rocket-review" / "config.toml"
 
 
+def test_no_home_means_no_user_config_not_a_dead_run(monkeypatch, tmp_path):
+    # A container run as an unmapped uid has no HOME and no passwd entry, so Path.home()
+    # raises. There is no user config to read then — which is not a reason to refuse to run.
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("HOME", raising=False)
+
+    def no_home():
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "home", staticmethod(no_home))
+    assert config.user_config_path() is None
+    run_from = make_repo(tmp_path, "timeout = 60\n")
+    assert [layer.path for layer in config.load(no_config=False, cwd=run_from)] == [
+        run_from / config.PROJECT_CONFIG_NAME
+    ]
+
+
+def test_a_run_without_a_home_directory_still_works(monkeypatch, tmp_path):
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("HOME", raising=False)
+
+    def no_home():
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "home", staticmethod(no_home))
+    monkeypatch.chdir(make_repo(tmp_path))
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 0
+    assert list(jobs) == ["claude"]
+
+
 def test_user_config_path_defaults_to_dot_config(tmp_path, monkeypatch):
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -500,10 +531,31 @@ def test_a_user_config_may_still_name_docs_anywhere(tmp_path, monkeypatch):
     assert "MY OWN STANDARDS" in jobs["claude"].docs_content
 
 
-def test_an_unusable_docs_path_is_a_config_error_not_a_traceback(tmp_path):
-    # An embedded null byte makes resolve() raise ValueError before any stat; a value that
-    # validates as a string still has to come back as rr's error, not a traceback.
-    assert "is not a usable path" in error_from(write(tmp_path, 'docs = ["a\\u0000b"]\n'))
+def test_an_unusable_docs_path_is_refused_not_a_traceback(monkeypatch, tmp_path, capsys):
+    # An embedded null byte makes resolve() raise ValueError before any stat. The config
+    # layer no longer resolves — the gate does — so this comes back as a refusal there.
+    run_from = make_repo(tmp_path, 'docs = ["a\\u0000b"]\n')
+    monkeypatch.chdir(run_from)
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 1
+    assert "refusing docs path" in capsys.readouterr().err
+    assert jobs == {}
+
+
+@pytest.mark.parametrize("value", ["[]", "[ ]"])
+def test_an_empty_docs_list_is_rejected(tmp_path, value):
+    # It encodes exactly what `docs = true` encodes, so accepting it would turn discovery
+    # on for a config that named nothing.
+    message = error_from(write(tmp_path, f"docs = {value}\n"))
+    assert "docs = [] names no paths" in message
+    assert "docs = true" in message
+
+
+def test_docs_paths_keep_their_spelling_for_the_gate(tmp_path):
+    # Anchored, not resolved: the gate needs the .git component a resolve() would erase
+    # when .git is a symlink to an external gitdir.
+    path = write(tmp_path, "docs = ['.git/config']\n")
+    assert loaded(path)["docs"] == [str(tmp_path.resolve() / ".git" / "config")]
 
 
 # --- through the CLI -----------------------------------------------------------------
@@ -995,6 +1047,41 @@ def test_llms_with_a_path_may_not_name_repository_metadata(monkeypatch, tmp_path
     assert run_main(monkeypatch, ["--diff", "--docs", ".git/config"]) == 1
     assert "refusing docs path" in capsys.readouterr().err
     assert jobs == {}
+
+
+def test_an_unavailable_backend_names_the_config_that_chose_it(monkeypatch, tmp_path, capsys):
+    run_from = make_repo(tmp_path, "[backends]\ndiff = 'opencode'\n")
+    monkeypatch.chdir(run_from)
+    fake_backends(monkeypatch)
+    monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: "install it")
+    monkeypatch.setattr("rocket_review.cli.available", lambda name: False)
+    assert run_main(monkeypatch, ["--diff"]) == 1
+    err = capsys.readouterr().err
+    assert "backend 'opencode' unavailable" in err
+    assert f"the diff backend is set in {run_from / config.PROJECT_CONFIG_NAME}" in err
+
+
+def test_an_unavailable_backend_the_user_asked_for_names_no_config(monkeypatch, tmp_path, capsys):
+    run_from = make_repo(tmp_path, "[backends]\ndiff = 'codex'\n")
+    monkeypatch.chdir(run_from)
+    fake_backends(monkeypatch)
+    monkeypatch.setattr("rocket_review.cli.missing_binary",
+                        lambda name: "install it" if name == "opencode" else None)
+    assert run_main(monkeypatch, ["--diff", "--backend", "opencode"]) == 1
+    err = capsys.readouterr().err
+    assert "backend 'opencode' unavailable" in err
+    assert "is set in" not in err
+
+
+def test_a_gate_error_names_the_layer_that_turned_json_off(monkeypatch, tmp_path, capsys):
+    run_from = make_repo(tmp_path, "json = false\n")
+    write_user_config("fail_on = 'high'\n")
+    monkeypatch.chdir(run_from)
+    fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff"]) == 1
+    err = capsys.readouterr().err
+    assert f"fail_on is set in {config.user_config_path()}" in err
+    assert f"json is set in {run_from / config.PROJECT_CONFIG_NAME}" in err
 
 
 def test_a_refusal_names_the_config_that_named_the_path(monkeypatch, tmp_path, capsys):

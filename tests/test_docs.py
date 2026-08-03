@@ -3,7 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from rocket_review.cli import DocsSource, collect_docs, read_doc_with_links
+from rocket_review import cli
+from rocket_review.cli import (
+    DocsSource,
+    collect_docs,
+    read_doc_with_links,
+)
 
 
 def test_read_doc_follows_relative_links(tmp_path):
@@ -246,6 +251,89 @@ def test_outside_a_repo_discovery_still_cannot_escape_its_directory(tmp_path, mo
     (loose / "llms.txt").symlink_to("../outside.md")
     monkeypatch.chdir(loose)
     assert collect_docs([], None, source=config_source(loose)) is None
+
+
+def test_a_doc_reached_through_a_symlink_is_read_from_where_it_really_is(
+    tmp_path, monkeypatch, capsys
+):
+    # The gate resolves; the caller must carry that answer. Keeping the original path would
+    # base the doc's links on the symlink's directory — outside any repo, where nothing is
+    # tracked and a repo-authored link could name the user's own .env.
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".env").write_text("HOME-SECRET\n")
+    repo = repo_with_a_local_secret(tmp_path / "repo")
+    (repo / "STANDARDS.md").write_text("# Standards\nsmall diffs\n[secret](.env)\n")
+    carry(repo, "STANDARDS.md")
+    (home / "STANDARDS.md").symlink_to(repo / "STANDARDS.md")
+    monkeypatch.chdir(home)
+    out = collect_docs([str(home / "STANDARDS.md")], None)
+    assert "HOME-SECRET" not in out
+    assert ENV_SECRET not in out
+    assert "small diffs" in out  # the doc the user named is still read
+    assert "skipping link .env" in capsys.readouterr().err
+
+
+def test_a_git_symlinked_to_an_external_gitdir_is_still_metadata(tmp_path, monkeypatch):
+    # Resolving alone cannot see it: .git/config resolves to /elsewhere/config, which has no
+    # .git component left. The lexical spelling is the half that still does.
+    gitdir = tmp_path / "elsewhere"
+    gitdir.mkdir()
+    (gitdir / "config").write_text(f'[remote "o"]\n\turl = https://x:{SECRET}@h/r.git\n')
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").symlink_to(gitdir)
+    (repo / "doc.md").write_text("# doc\nrules\n[cfg](.git/config)\n")
+    monkeypatch.chdir(repo)
+    with pytest.raises(SystemExit):
+        collect_docs([".git/config"], None)
+    out = collect_docs(["doc.md"], None)
+    assert SECRET not in out
+    assert "rules" in out
+
+
+def test_a_tracked_doc_is_found_through_a_case_variant_link_where_the_filesystem_folds(
+    tmp_path, monkeypatch
+):
+    repo = repo_with_a_local_secret(tmp_path)
+    (repo / "README.md").write_text("the readme rules\n")
+    (repo / "llms.txt").write_text("# llms\nstandards\n[r](readme.md)\n")
+    carry(repo, "README.md", "llms.txt")
+    monkeypatch.chdir(repo)
+    out = collect_docs([], None, source=config_source(repo))
+    if (repo / ".GIT").exists():  # a folding filesystem: readme.md opens README.md
+        assert "the readme rules" in out
+    else:  # a case-sensitive one: they are two different files, and only one is tracked
+        assert "the readme rules" not in out
+    assert "standards" in out
+
+
+def test_case_folds_reports_what_this_filesystem_actually_does(tmp_path):
+    # The probe has to be an observation, not a constant. On CI (ext4) a constant True
+    # fails here; on a developer's macOS both agree, and the branch it would break is
+    # covered by the monkeypatched test below.
+    repo = repo_with_a_local_secret(tmp_path)
+    (repo / "CaseProbe.tmp").write_text("x")
+    cli.case_folds.cache_clear()
+    assert cli.case_folds(repo) is (repo / "caseprobe.tmp").exists()
+
+
+def test_a_case_variant_is_refused_where_the_filesystem_does_not_fold(
+    tmp_path, monkeypatch, capsys
+):
+    # The case-sensitive half of the same rule, pinned by answering the probe the way Linux
+    # would: a differently-cased name is a different file, and this one is not tracked.
+    repo = repo_with_a_local_secret(tmp_path)
+    (repo / "README.md").write_text("the readme rules\n")
+    (repo / "llms.txt").write_text("# llms\nstandards\n[r](README.MD)\n")
+    carry(repo, "README.md", "llms.txt")
+    monkeypatch.setattr("rocket_review.cli.case_folds", lambda root: False)
+    cli.tracked_files.cache_clear()
+    monkeypatch.chdir(repo)
+    out = collect_docs([], None, source=config_source(repo))
+    assert "the readme rules" not in out
+    assert "standards" in out
+    assert "skipping link README.MD" in capsys.readouterr().err
 
 
 def test_the_user_still_reaches_their_own_files_through_a_flag(tmp_path, monkeypatch):
