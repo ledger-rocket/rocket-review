@@ -708,6 +708,33 @@ def test_terminate_active_commands_signals_registered_groups(monkeypatch):
     assert (555, base.signal.SIGKILL) not in signals  # died on SIGTERM, no escalation
 
 
+def test_run_command_refuses_to_launch_once_interrupted(monkeypatch):
+    # The teardown only reaches processes that already exist, so a worker arriving at the
+    # gate afterwards has to give up rather than start one nobody is left to reap.
+    launched = []
+    monkeypatch.setattr(base.subprocess, "Popen", lambda *a, **k: launched.append(a))
+    base.request_interrupt()
+    with pytest.raises(BackendError, match="interrupted before launch"):
+        base.run_command(["echo", "hi"])
+    assert not launched
+
+
+def test_api_refuses_to_call_once_interrupted(monkeypatch):
+    # An HTTP request has no process group to signal, so refusing to start one is the only
+    # way the api backend can honour an interrupt.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    base.request_interrupt()
+    with pytest.raises(BackendError, match="interrupted before launch"):
+        api._call_openai("content", "instructions", "gpt-5.6-terra", None)
+
+
+def test_begin_fanout_reopens_the_gate():
+    base.request_interrupt()
+    assert base.interrupted()
+    base.begin_fanout()
+    assert not base.interrupted()
+
+
 def test_terminate_active_commands_escalates_to_sigkill(monkeypatch):
     # A group that survives SIGTERM must be SIGKILLed so it can't block the exit.
     monkeypatch.setattr(base, "_TERM_GRACE_SECONDS", 0.0)

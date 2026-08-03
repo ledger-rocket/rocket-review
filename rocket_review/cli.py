@@ -559,6 +559,7 @@ def _run():
         timeout=args.timeout,
     )
 
+    base.begin_fanout()
     with ThreadPoolExecutor(max_workers=len(specs)) as pool:
         try:
             futures = [
@@ -569,13 +570,22 @@ def _run():
             # SIGINT lands on the main thread, not in the workers blocked on their
             # subprocesses, so it can arrive anywhere in this block — including mid-submit,
             # once an earlier worker has already launched a billed backend. Both phases are
-            # therefore inside the same handler. Tear the backend process groups down before
-            # the executor's __exit__ waits on the workers, or Ctrl-C hangs until each
-            # backend times out.
+            # therefore inside the same handler.
+            #
+            # Order matters. Closing the gate first means every backend is accounted for:
+            # one already running is in terminate_active_commands()' snapshot, and one whose
+            # worker has not reached its launch yet gives up instead of starting a backend
+            # nothing is left to reap. Reversed, that second worker would launch after the
+            # snapshot and the executor's non-daemon threads would hold the CLI open for its
+            # full timeout. cancel_futures then drops any work item no thread has picked up
+            # yet, so those never reach the gate at all. The teardown itself unblocks the
+            # workers already in communicate(), before the executor's __exit__ waits on them.
+            #
             # Best-effort by design: this kills registered subprocess groups
             # (codex/claude/opencode); an in-flight `api` HTTP request has no process to
-            # signal and finishes or hits its own client timeout, and a subprocess launched
-            # during teardown may survive to its own timeout.
+            # signal and finishes or hits its own client timeout.
+            base.request_interrupt()
+            pool.shutdown(wait=False, cancel_futures=True)
             base.terminate_active_commands()
             raise
 
