@@ -111,23 +111,41 @@ class ReviewJob:
     #: the trust question is "does the repository that wrote this text carry the file", and
     #: for a foreign repository there is no way to ask it from here.
     foreign_repo: bool = False
-    # The paths this review touches, in the order git or the patch reports them,
-    # deduplicated, no empty strings. Repo-relative from every source that asks git or
-    # reads a patch; file arguments are the paths the user typed, which may be absolute
-    # or reach outside the checkout. Carried to every backend and read by none yet: it is
-    # what a prompt would need to select content from the languages a review actually
-    # touches.
-    #
-    # Three things it does not promise. It is a snapshot of a moving tree — for --diff the
-    # paths are read next to the diff they describe, but nothing freezes the working tree
-    # between the two reads. A merge commit reports its combined diff, so a merge that
-    # resolved nothing reports nothing, exactly as `git show` displays nothing for it. And
-    # a patch source names a rename only by its destination, where git's own diff of the
-    # same change names both sides.
-    #
-    # default_factory gives each ReviewJob its own list; the fan-out's per-backend jobs
-    # come from dataclasses.replace, which copies the reference, so every backend in one
-    # run shares this list. Nothing may mutate it.
+    #: What this review touches, in the order git or the patch reports it, deduplicated,
+    #: no empty strings. Carried to every backend and read by none yet: it is what a prompt
+    #: would need to select content from the languages a review actually touches.
+    #:
+    #: **These are strings, not paths, and most of them are not this checkout's.** What is
+    #: guaranteed depends entirely on where they came from:
+    #:
+    #: - `--diff`/`--staged` and `--commit` ask git about *this* repository, so those are
+    #:   repo-relative and name files that exist here. The two diff settings that would
+    #:   change that (diff.relative, diff.renames) are pinned on the command line.
+    #: - a patch — `--pr`, or anything piped in — is untrusted text, and its headers say
+    #:   whatever their author wrote. `/etc/shadow` and `../../../etc/passwd` are both
+    #:   things a patch can put here, verbatim. Nothing resolves, normalises or confines
+    #:   them, and for `--pr --repo other/project` they describe a repository that is not
+    #:   on this machine at all.
+    #: - file arguments are the paths the user typed, which may be absolute or relative to
+    #:   wherever they were standing.
+    #:
+    #: So: anything that later OPENS one of these must put it through
+    #: `repo.resolve_doc_path` first, exactly as the docs routes and the api backend's
+    #: extraction already do. A path that arrived in a review is not a path rr may read.
+    #:
+    #: It is also incomplete in ways worth knowing before trusting it as an inventory. It
+    #: is a snapshot of a moving tree — for --diff the paths are read next to the diff they
+    #: describe, but nothing freezes the working tree between the two reads. A merge commit
+    #: reports its combined diff, so a merge that resolved nothing reports nothing, exactly
+    #: as `git show` displays nothing for it; a combined diff piped in reports only the
+    #: files its own headers name, and not those whose names git had to quote. A patch
+    #: source names a rename only by its destination, where git names both sides. And a
+    #: patch is read whole or not at all: one header git will not parse costs every path in
+    #: it, not just its own.
+    #:
+    #: default_factory gives each ReviewJob its own list; the fan-out's per-backend jobs
+    #: come from dataclasses.replace, which copies the reference, so every backend in one
+    #: run shares this list. Nothing may mutate it.
     changed_paths: list[str] = field(default_factory=list)
 
 

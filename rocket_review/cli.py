@@ -437,7 +437,12 @@ def changed_paths_from_patch(patch: str) -> list[str]:
     destination, once), quoted paths, header-shaped lines inside a hunk. The `-z` output is
     one NUL-terminated record per file, `added\\tdeleted\\tpath`, the path verbatim and never
     quoted — which is why it is split on two tabs and not on every one: the path may carry
-    tabs of its own. Non-zero exit (text that is not a patch) is an empty list.
+    tabs of its own.
+
+    The parse is all or nothing, because git's is: anything it refuses — text that is no
+    patch at all, or one header it cannot read inside an otherwise good patch — costs every
+    path in that text, not only the entry that failed. A combined diff is the one refusal
+    with a second chance, below.
 
     `--numstat` only parses. The patch is untrusted text — a fork's pull request, a pipe
     from anywhere — so nothing here may reach a form of `git apply` that writes.
