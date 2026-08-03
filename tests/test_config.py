@@ -947,10 +947,60 @@ def test_config_docs_and_the_llms_alias_combine(monkeypatch, tmp_path):
     run_from = make_repo(tmp_path, "docs = ['standards.md']\n")
     (run_from / "standards.md").write_text("standards: prefer small diffs\n")
     (run_from / "llms.txt").write_text("llms: no bare excepts\n")
-    track(run_from, "standards.md")
+    # Both docs are the repository's, so the repository has to carry both: an earlier
+    # version of this test tracked only standards.md and passed, which is precisely how the
+    # bare --llms route stayed outside the gate.
+    track(run_from, "standards.md", "llms.txt")
     monkeypatch.chdir(run_from)
     jobs = fake_backends(monkeypatch)
     assert run_main(monkeypatch, ["--diff", "--llms"]) == 0
     docs = jobs["claude"].docs_content
     assert "prefer small diffs" in docs
     assert "no bare excepts" in docs
+
+
+def test_bare_llms_will_not_read_a_doc_the_repository_does_not_carry(monkeypatch, tmp_path):
+    run_from = make_repo(tmp_path)
+    (run_from / "llms.txt").write_text("local notes, never committed\n")
+    monkeypatch.chdir(run_from)
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff", "--llms"]) == 1
+    assert jobs == {}
+
+
+@pytest.mark.parametrize("target,secret", [(".env", ENV_SECRET), (".git/config", "GIT-SECRET")])
+def test_bare_llms_gets_the_same_gate_as_bare_docs(monkeypatch, tmp_path, target, secret):
+    # Row A's shape through the flag rr's own convention says to always pass.
+    run_from = repo_with_local_secrets(tmp_path, None)
+    (run_from / ".git" / "config").write_text(
+        '[remote "o"]\n\turl = https://x:GIT-SECRET@h/r\n'
+    )
+    (run_from / "llms.txt").unlink()
+    (run_from / "llms.txt").symlink_to(target)
+    track(run_from, "llms.txt")
+    monkeypatch.chdir(run_from)
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff", "--llms"]) == 1
+    assert jobs == {}
+
+
+def test_llms_with_a_path_may_not_name_repository_metadata(monkeypatch, tmp_path, capsys):
+    # --docs and --llms sit on the same boundary, which is what makes them the alias the
+    # README says they are: naming .git is refused through either.
+    run_from = make_repo(tmp_path)
+    (run_from / ".git" / "config").write_text('[remote "o"]\n\turl = https://x:GIT-SECRET@h/r\n')
+    monkeypatch.chdir(run_from)
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff", "--llms", ".git/config"]) == 1
+    assert run_main(monkeypatch, ["--diff", "--docs", ".git/config"]) == 1
+    assert "refusing docs path" in capsys.readouterr().err
+    assert jobs == {}
+
+
+def test_llms_with_a_path_is_still_the_users_own_word(monkeypatch, tmp_path):
+    run_from = make_repo(tmp_path)
+    (run_from / "notes.md").write_text("MY OWN NOTES, untracked\n")
+    monkeypatch.chdir(run_from)
+    jobs = fake_backends(monkeypatch)
+    assert run_main(monkeypatch, ["--diff", "--llms", "notes.md"]) == 0
+    assert "MY OWN NOTES" in jobs["claude"].docs_content

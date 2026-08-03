@@ -215,7 +215,8 @@ Relative markdown links inside the docs are followed one level, so an index file
 (like `llms.txt`) pulls in everything it references. Bare `--docs` errors if none of
 `llms.txt` / `AGENTS.md` / `CLAUDE.md` exist in the current directory — pass explicit
 paths when your standards live elsewhere. `--llms [PATH]` is kept as a compatibility
-alias for `--docs [PATH]`, defaulting to `llms.txt`.
+alias for `--docs [PATH]`: bare, it takes the project's `llms.txt` if the repository
+carries one; with a path, it reads what you name.
 
 Inside a git repository, an auto-discovered doc and every link followed out of any doc
 must be a file the repository tracks — the repo, not you, chose those, and a standards
@@ -303,8 +304,8 @@ markdown link inside another doc points at it:
 
 - **a path in a project's `.rocket-review.toml`** — that file is repository content, and
   on a fork's PR it is a contributor's;
-- **anything auto-discovered** (`docs = true`, or `--docs` with no path) — the repo
-  decides which file answers the pattern, whoever asked for the pattern;
+- **anything auto-discovered** (`docs = true`, or `--docs` / `--llms` with no path) — the
+  repo decides which file answers the pattern, whoever asked for the pattern;
 - **every markdown link followed out of a doc that resolves inside a repository** — the
   link was written by whoever wrote that doc. This holds even for a doc you named
   yourself: naming `--docs STANDARDS.md` vouches for that file, not for what it points at.
@@ -323,6 +324,10 @@ directory, and a link inside the doc's.
 `~/.config/rocket-review/config.toml` — and is read wherever it points, including files
 no repository tracks. The single exception is `.git`, which `rr` never reads into a
 review, as a footgun check.
+
+`--docs` and `--llms` sit on the same boundary in both forms, which is what makes them
+the alias this README calls them: bare, each takes what the repository offers; with a
+path, each reads what you named.
 
 ## How it works
 

@@ -132,9 +132,15 @@ def docs_source(settings: config.Settings, layers: list[config.Layer]) -> DocsSo
 # What a refused doc path is told, and what the README states: one rule, one wording.
 DOC_RULE = (
     "rr reads a doc the repository chose only when the repository tracks it, it resolves "
-    "inside the repository, and it is not repository metadata (.git). Name a path yourself "
-    "with --docs to read anything else"
+    "inside the directory it came from, and it is not repository metadata (.git). Name a "
+    "path yourself with --docs to read anything else"
 )
+
+#: `--llms` with no path. A distinct object, not the string "llms.txt", so the bare flag
+#: (the repository's llms.txt if it has one) stays distinguishable from `--llms llms.txt`
+#: (the user naming a file) — argparse cannot tell a const from a value otherwise, and the
+#: two sit on opposite sides of the trust boundary.
+LLMS_DISCOVER = object()
 
 
 @lru_cache(maxsize=None)
@@ -149,6 +155,10 @@ def tracked_files(root: Path) -> frozenset[Path]:
     with thousands of links from ever building a command line: no path is passed to git at
     all. Cached per checkout because every route consults it.
     """
+    # Cached for the process, which is one rr run: HEAD cannot move under a run that never
+    # writes, and a checkout replaced at the same path mid-run would need a second rr in the
+    # same interpreter. An embedder calling main() twice around such a change would see the
+    # first answer — cache_clear() is the release valve, and the test suite pulls it.
     result = run_capture(["git", "-C", str(root), "ls-tree", "-r", "-z", "--name-only", "HEAD"])
     if result.returncode != 0:
         return frozenset()
@@ -236,7 +246,10 @@ DISCOVERY_CANDIDATES = ["llms.txt", "AGENTS.md", "CLAUDE.md"]
 
 
 def collect_docs(
-    docs_args: list[str] | None, llms_arg: str | None, *, source: DocsSource | None = None
+    docs_args: list[str] | None,
+    llms_arg: str | object | None,
+    *,
+    source: DocsSource | None = None,
 ) -> str | None:
     """Assemble standards context from --docs (explicit or auto-discovered) and --llms.
 
@@ -246,27 +259,53 @@ def collect_docs(
     no standards doc is simply a project without one, where the typed flag asked for
     something specific and errors.
 
+    `--llms` is the compatibility alias for `--docs` and sits on the same boundary: a bare
+    flag is the repository's llms.txt if it carries one, a path is the user naming a file.
+
     Which paths are the user's own word and which the repository chose is decided here and
     settled by resolve_doc_path; nothing downstream re-decides it.
     """
+    cwd = Path.cwd()
+
+    def require(path: Path, *, user_named: bool, base: Path) -> Path:
+        """A path someone named outright: refusing it stops the run."""
+        if resolve_doc_path(path, user_named=user_named, base=base) is None:
+            named_by = f"{source.config_file}: " if source and not user_named else ""
+            print(f"Error: {named_by}refusing docs path {str(path)!r} — {DOC_RULE}.",
+                  file=sys.stderr)
+            sys.exit(1)
+        return path
+
+    def offer(path: Path, *, base: Path) -> Path | None:
+        """A path discovery turned up: refusing it skips it, since discovery meant "if any".
+
+        Never the user's own word — whoever asked for the pattern, the repository decides
+        which file answers it.
+        """
+        if resolve_doc_path(path, user_named=False, base=base) is not None:
+            return path
+        print(f"Warning: skipping {path.name}: {DOC_RULE}.", file=sys.stderr)
+        return None
+
     paths: list[Path] = []
-    if llms_arg:
-        paths.append(Path(llms_arg))  # flag-supplied, so the user's own word
+    if llms_arg is LLMS_DISCOVER:
+        # Bare --llms is bare --docs narrowed to llms.txt: the repository decides whether it
+        # has one, so the file it offers is not the user's own word.
+        candidate = cwd / "llms.txt"
+        kept = offer(candidate, base=cwd) if candidate.is_file() else None
+        if kept is None:
+            print("Error: --llms given without a path and llms.txt cannot be read here.",
+                  file=sys.stderr)
+            sys.exit(1)
+        paths.append(kept)
+    elif isinstance(llms_arg, str) and llms_arg:
+        paths.append(require(Path(llms_arg), user_named=True, base=cwd))
+
     if docs_args is not None and len(docs_args) == 0:
-        search_root = source.discovery_root if source else Path.cwd()
+        search_root = source.discovery_root if source else cwd
         found = [search_root / c for c in DISCOVERY_CANDIDATES if (search_root / c).is_file()]
-        kept = []
-        for candidate in found:
-            # Whoever asked for auto-discovery, the repository decides which file answers
-            # it — so a discovered doc is never the user's own word.
-            if resolve_doc_path(candidate, user_named=False, base=search_root) is not None:
-                kept.append(candidate)
-            else:
-                print(
-                    f"Warning: skipping {candidate.name}: {DOC_RULE}.",
-                    file=sys.stderr,
-                )
-        if not kept and source is None:
+        kept_docs = [p for p in found if offer(p, base=search_root) is not None]
+        if not kept_docs and source is None:
             refused = " (" + ", ".join(c.name for c in found) + " refused)" if found else ""
             print(
                 "Error: --docs given without paths and none of "
@@ -274,18 +313,13 @@ def collect_docs(
                 file=sys.stderr,
             )
             sys.exit(1)
-        paths.extend(kept)
+        paths.extend(kept_docs)
     elif docs_args:
         # A project config is repository content; the user's own config is not.
         user_named = source is None or not source.repo_supplied
-        base = source.config_file.parent if source else Path.cwd()
-        for raw in docs_args:
-            if resolve_doc_path(Path(raw), user_named=user_named, base=base) is None:
-                named_by = f"{source.config_file}: " if source else ""
-                print(f"Error: {named_by}refusing docs path {raw!r} — {DOC_RULE}.",
-                      file=sys.stderr)
-                sys.exit(1)
-            paths.append(Path(raw))
+        base = source.config_file.parent if source else cwd
+        paths.extend(require(Path(raw), user_named=user_named, base=base) for raw in docs_args)
+
     seen: set[Path] = set()
     parts: list[str] = []
     for path in paths:
@@ -608,8 +642,10 @@ def _run():
              "followed one level. With no PATH, auto-discovers llms.txt / AGENTS.md / CLAUDE.md.",
     )
     parser.add_argument(
-        "--llms", nargs="?", const="llms.txt", metavar="PATH",
-        help="Alias for --docs llms.txt (kept for compatibility)",
+        "--llms", nargs="?", const=LLMS_DISCOVER, metavar="PATH",
+        help="Alias for --docs llms.txt (kept for compatibility). Bare, it takes the "
+             "project's llms.txt if the repository carries one; with a PATH it reads what "
+             "you name, exactly as --docs does.",
     )
     parser.add_argument(
         "--api",
