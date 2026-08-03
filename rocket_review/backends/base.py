@@ -113,9 +113,9 @@ class ReviewJob:
     foreign_repo: bool = False
     # Repo-relative paths this review touches, in the order git or the patch reports
     # them, deduplicated, no empty strings. Carried to every backend, read by none
-    # yet: a later change will select prompt content from the languages a review
-    # actually touches, and this is only the data that change needs. Never shared
-    # between jobs (default_factory, not a bare list literal).
+    # yet: it is what a prompt would need to select content from the languages a
+    # review actually touches. Never shared between jobs (default_factory, not a
+    # bare list literal).
     changed_paths: list[str] = field(default_factory=list)
 
 
