@@ -122,10 +122,12 @@ def run_command(cmd: list[str], *, stdin: str | None = None, timeout: int = TIME
     # down as a whole. Without it, a Ctrl-C leaves the group orphaned and running until
     # the timeout while the ThreadPoolExecutor blocks on communicate().
     # Check the gate, launch, and register as one step under the lock that
-    # terminate_active_commands() snapshots under. That pairing is what makes the teardown
-    # total: either this process is already in the snapshot, or the gate was set first and
-    # it never starts. Split across two lock acquisitions, a launch could slip between the
-    # check and the snapshot and outlive the interrupt.
+    # terminate_active_commands() snapshots under. What the pairing buys is exclusion
+    # against the snapshot, not against the gate: request_interrupt() takes no lock, so an
+    # interrupt can still be raised mid-section — the teardown that follows it just blocks
+    # here until registration lands, and so it still sees this process. Every launch is
+    # therefore either refused at the check or present in the snapshot. Split across two
+    # acquisitions, one could slip between the two and outlive the interrupt.
     with _active_lock:
         if _interrupted.is_set():
             raise BackendError("interrupted before launch")
