@@ -297,6 +297,20 @@ killed_by:            # mutants only; written by verify_cases.py, never by hand
 
 A case with no `defect` is a **clean control**; that absence is the whole definition.
 
+**`defect.span` is the lines the mutation writes, and widening it past them takes a reason
+written into the manifest.** Every line inside the span is a line a finding may cite and still
+score under scoring rule 2, so an extra line nobody argued for is credit nobody argued for.
+Two widenings are legitimate, and each is stated where it is used:
+
+- a **deletion** mutant writes no lines at all, so its span is where the deleted code belonged
+  (`b-016`, `b-017`, `b-018`, `b-020`);
+- a mutation whose written lines are only wrong *in the light of* unchanged lines beside them
+  carries those lines too — `b-024`'s span opens at the `try` its handler now duplicates, and
+  `b-017`'s at the surviving help text still promising what the deleted check enforced.
+
+`b-001` predates the convention: it is the prior-work smoke case, and its span covers the
+four-line function rather than the one line it rewrites.
+
 How each source is materialized, and why:
 
 - **`mutant`** — a detached `git worktree` at `repo_commit` with the patch applied to the
@@ -797,6 +811,19 @@ Defect recall improves on at least one defect class that has **≥5 independent 
   `adjudicate.py` gives verdict-grade treatment — see *What this release can and cannot
   decide* above. Improving recall on **either** satisfies this criterion; the rule asks for
   at least one qualifying class, not for all of them.
+- **That OR is a loosening, and is recorded as one rather than left to be noticed later.** Two
+  eligible classes give a sweep two draws at the criterion instead of one, so the chance that
+  noise alone clears it on *some* class is roughly double what it was at one class — in a
+  ruleset whose whole point is that a threshold cannot be chosen once the numbers exist, a
+  bar that quietly slackens as the corpus grows is the same failure by a slower route. It is
+  left uncorrected at two: the conjunctive threshold (≥20% relative **and** ≥2 additional
+  defects) is what bounds a single draw, and dividing an error rate nobody has ever stated
+  would be inventing arithmetic to fit a case count. **A third certifying class is the point
+  at which this needs a correction rather than a note** — and that correction is a commit of
+  its own, argued before the sweep it governs, never in the same change as the results it
+  would reinterpret. An arm that names in its own pre-registration the single class it expects
+  to move narrows its draw back to one, and where an arm does that its designated class is the
+  one to read; this bullet governs the case where no class is designated.
 - **Independent** means a separate defect, not a separate encoding of one. The same seeded
   mutant reviewed in `diff` mode and again in `code` mode counts once.
 - A class whose control recall is zero uses the absolute condition alone (≥2 additional
