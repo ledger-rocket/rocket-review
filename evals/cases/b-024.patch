@@ -1,0 +1,17 @@
+diff --git a/rocket_review/cli.py b/rocket_review/cli.py
+index 36e06ba..e843471 100644
+--- a/rocket_review/cli.py
++++ b/rocket_review/cli.py
+@@ -793,9 +793,9 @@ def _run():
+     try:
+         layers = config.load(no_config=args.no_config, cwd=Path.cwd())
+         settings = config.resolve({key: getattr(args, key) for key in config.FLAG_KEYS}, layers)
+-    except config.ConfigError as e:
+-        print(f"Error: {e}", file=sys.stderr)
+-        sys.exit(1)
++    except config.ConfigError:
++        layers = []
++        settings = config.resolve({key: getattr(args, key) for key in config.FLAG_KEYS}, layers)
+ 
+     if settings.fail_on and not settings.json:
+         print(

@@ -1,0 +1,24 @@
+---
+# The handler stops raising and hands back a Layer that sets nothing, so `load()` cannot
+# tell a config file rr failed to read from one that set no keys. `load()` only calls
+# load_file on a path that already passed is_file(), so the OSError it swallows is never
+# "the file is not there" — it is a permission denial, an I/O error, or a directory in the
+# way. The other config layer, and the built-in defaults, then decide the run in silence.
+id: b-023
+mode: diff
+source: mutant
+diff: cases/b-023.patch
+repo_commit: 6f8ad789bc55b2367147bf27c052443fecad4ea9
+defect:
+  class: swallowed-error
+  file: rocket_review/config.py
+  span: [133, 136]
+  expected: >-
+    load_file returns an empty Layer instead of raising ConfigError, so a config file rr
+    cannot read is silently treated as one that sets nothing: the run continues under
+    whatever the other layer and the built-in defaults supply, without a word on stderr,
+    and a fail_on the unreadable file carried stops gating anything.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_config.py::test_unreadable_file_names_itself

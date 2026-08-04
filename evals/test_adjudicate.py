@@ -303,9 +303,9 @@ def test_two_cases_sharing_a_patch_are_one_mutation(tmp_path):
 
 
 def test_the_shipped_corpus_dedups_to_the_class_counts_the_gate_is_argued_from():
-    # The README's class table, and the ≥5 that makes `dropped-guard` the one certifying
-    # class, are counts of distinct mutants. This pins the scorer's own dedup to them, so a
-    # new twin or a re-labelled mutant cannot quietly move the bar.
+    # The README's class table, and the ≥5 that makes `dropped-guard` and `swallowed-error`
+    # the certifying classes, are counts of distinct mutants. This pins the scorer's own
+    # dedup to them, so a new twin or a re-labelled mutant cannot quietly move the bar.
     cases = [c for c in load_cases(CASES_DIR) if c.defect is not None]
     groups: dict[str, list] = {}
     for case in cases:
@@ -317,10 +317,11 @@ def test_the_shipped_corpus_dedups_to_the_class_counts_the_gate_is_argued_from()
     counts = Counter(
         c.defect.defect_class for c in cases if c.id in representatives
     )
-    assert [name for name, n in counts.items() if n >= CERTIFYING_CLASS_MIN_CASES] == [
-        "dropped-guard",
-    ]
+    assert sorted(
+        name for name, n in counts.items() if n >= CERTIFYING_CLASS_MIN_CASES
+    ) == ["dropped-guard", "swallowed-error"]
     assert counts["dropped-guard"] == 5
+    assert counts["swallowed-error"] == 6
 
 
 def twin_promotion_corpus(directory: Path) -> None:
