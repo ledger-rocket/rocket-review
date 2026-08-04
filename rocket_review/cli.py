@@ -293,10 +293,22 @@ def get_diff(staged: bool) -> str:
     # last changed line is part of the patch, and this snapshot must be byte-identical to
     # what every backend reviews.
     if not result.stdout.strip():
-        label = "staged changes" if staged else "uncommitted changes"
-        print(f"Error: no {label} found.", file=sys.stderr)
-        sys.exit(1)
+        _exit_no_changes(staged)
     return result.stdout
+
+
+def _exit_no_changes(staged: bool) -> None:
+    """An empty diff usually means the work was just committed — often in the
+    same compound command that called `rr`. Naming the flag that reviews it
+    saves the round trip of discovering `--commit` from `--help`."""
+    label = "staged changes" if staged else "uncommitted changes"
+    hint = "--commit HEAD" if not staged else "--diff"
+    print(
+        f"Error: no {label} found. If the work is already committed, "
+        f"review it with `rr {hint}`.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def ensure_diff_exists(staged: bool) -> None:
@@ -306,9 +318,7 @@ def ensure_diff_exists(staged: bool) -> None:
     cmd.append("--staged" if staged else "HEAD")
     result = run_capture(cmd)
     if result.returncode == 0:
-        label = "staged changes" if staged else "uncommitted changes"
-        print(f"Error: no {label} found.", file=sys.stderr)
-        sys.exit(1)
+        _exit_no_changes(staged)
     if result.returncode != 1:
         print(f"Error: {' '.join(cmd)} failed: {result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
