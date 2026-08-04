@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 from adjudicate import (
+    ARM_RULES,
     CASE_INVALIDATED,
     CERTIFIED,
     CERTIFYING_CLASS_MIN_CASES,
@@ -324,6 +325,32 @@ def test_the_shipped_corpus_dedups_to_the_class_counts_the_gate_is_argued_from()
     assert counts["swallowed-error"] == 6
 
 
+def test_a_designated_certifying_class_is_one_this_corpus_could_certify():
+    """An arm may narrow what certifies. It may not designate a class that never can.
+
+    A designation naming a class below the case bar reads as a rule and behaves as a ban:
+    no sweep could satisfy it, so the arm's only reachable verdicts would be NOT CERTIFIED
+    and VETOED. This is also the coupling between an arm's pre-registration and the corpus
+    it was written against — designate a class the corpus has not yet grown to five and
+    this fails until it has.
+    """
+    cases = [c for c in load_cases(CASES_DIR) if c.defect is not None]
+    groups: dict[str, list] = {}
+    for case in cases:
+        groups.setdefault(mutation_of(case), []).append(case)
+    counts = Counter(
+        certifying_representative(g).defect.defect_class for g in groups.values()
+    )
+    for arm, rules in ARM_RULES.items():
+        if rules.certifying_class is None:
+            continue
+        assert counts[rules.certifying_class] >= CERTIFYING_CLASS_MIN_CASES, (
+            f"{arm} designates {rules.certifying_class}, which the shipped corpus gives "
+            f"{counts[rules.certifying_class]} independent case(s) — below the "
+            f"{CERTIFYING_CLASS_MIN_CASES} a class needs to certify anything"
+        )
+
+
 def twin_promotion_corpus(directory: Path) -> None:
     """Five dropped-guard mutants, one of which is also expressed as a code-mode twin."""
     one_defect_class(directory, 5)
@@ -493,6 +520,121 @@ def test_a_medium_finding_on_a_control_is_outside_the_veto_entirely(tmp_path):
     cert = score(tmp_path, controls_only, rows, [])
     veto = cert.backends[0].veto
     assert (veto.treatment_total, veto.holds) == (0, True)
+
+
+# --- per-arm pre-registrations ---------------------------------------------------------
+
+LANG_PYTHON = "lang-python"
+
+
+def under_lang_python(rows: list[dict], decisions: list[dict]) -> None:
+    """Put the sweep's treatment arm under `lang-python`'s registered rules.
+
+    Nothing selects them but the arm's *name*, which is what these tests are about: the
+    same numbers have to be read one way for an arm that registered rules and another way
+    for an arm that did not.
+    """
+    for item in (*rows, *decisions):
+        if item["arm_role"] == "treatment":
+            item["arm"] = LANG_PYTHON
+
+
+def mixed_controls(directory: Path) -> None:
+    """Two controls this arm's block can reach, and one it cannot."""
+    for case_id in ("c-001", "c-003", "c-004"):
+        write_case(directory, case_id)
+
+
+def mixed_control_rows() -> list[dict]:
+    """c-001 much quieter under the treatment; c-003 and c-004 each half a finding noisier."""
+    rows = control_rows("c-001", 2, control_noise=2, treatment_noise=0)
+    for case_id in ("c-003", "c-004"):
+        rows += control_rows(case_id, 2, control_noise=0, treatment_noise=0)
+        first = next(
+            r for r in rows
+            if r["case_id"] == case_id and r["arm_role"] == "treatment" and r["rep"] == 1
+        )
+        first["raw"] = review([finding(title="noise")])
+    return rows
+
+
+def test_the_restricted_aggregate_refuses_what_the_pooled_one_would_pass(tmp_path):
+    # c-001 carries no Python, so the block cannot change what a reviewer says about it.
+    # Pooled, its improvement pays for the noise on the two controls the block does reach
+    # — and the form that ships only ever runs on those two.
+    rows = mixed_control_rows()
+    decisions = adjudicate_all(rows, FALSE_POSITIVE)
+    under_lang_python(rows, decisions)
+    cert = score(tmp_path, mixed_controls, rows, decisions)
+    veto = cert.backends[0].veto
+    assert veto.per_case_ok is True
+    assert (float(veto.control_mean), float(veto.treatment_mean)) == (2 / 3, 1 / 3)
+    assert veto.aggregate_ok is True
+    assert (float(veto.subset_control_mean), float(veto.subset_treatment_mean)) == (0.0, 0.5)
+    assert (veto.subset_ok, veto.holds) == (False, False)
+    assert cert.verdict == VETOED
+    assert "c-003, c-004, c-006" in " ".join(cert.reasons)
+
+
+def test_an_arm_that_registered_no_subset_is_held_to_the_pooled_aggregate_alone(tmp_path):
+    # The same numbers, an arm with no registration: one aggregate, and it passes.
+    rows = mixed_control_rows()
+    cert = score(tmp_path, mixed_controls, rows, adjudicate_all(rows, FALSE_POSITIVE))
+    veto = cert.backends[0].veto
+    assert veto.subset_cases == ()
+    assert (veto.aggregate_ok, veto.subset_ok, veto.holds) == (True, True, True)
+
+
+def test_a_registered_subset_with_nothing_scored_in_it_is_a_failed_veto(tmp_path):
+    # Same rule as an unmeasured veto: a condition that was never measured has not held.
+    rows = control_rows("c-001", 2, control_noise=0, treatment_noise=0)
+    decisions: list[dict] = []
+    under_lang_python(rows, decisions)
+    cert = score(tmp_path, lambda d: write_case(d, "c-001"), rows, decisions)
+    veto = cert.backends[0].veto
+    assert (veto.aggregate_ok, veto.subset_control_mean) == (True, None)
+    assert (veto.subset_ok, veto.holds) == (False, False)
+    assert cert.verdict == VETOED
+    assert "no repetition scored" in " ".join(cert.reasons)
+
+
+def certifying_sweep(defect_class: str):
+    """Five cases of one class, found by the treatment and by neither control run."""
+    def build(directory: Path) -> None:
+        one_defect_class(directory, defect_class=defect_class)
+        write_case(directory, "c-003")
+
+    rows = [
+        r for n in range(1, CERTIFYING_CLASS_MIN_CASES + 1)
+        for r in defect_rows(f"b-{100 + n}", PROTOCOL_MIN_REPS,
+                             control_hits=0, treatment_hits=PROTOCOL_MIN_REPS)
+    ]
+    rows += control_rows("c-003", PROTOCOL_MIN_REPS, control_noise=0, treatment_noise=0)
+    return build, rows
+
+
+def test_a_gain_outside_the_designated_class_is_reported_and_cannot_certify(tmp_path):
+    build, rows = certifying_sweep("dropped-guard")
+    decisions = adjudicate_split(rows)
+    under_lang_python(rows, decisions)
+    cert = score(tmp_path, build, rows, decisions)
+    # The class is still verdict-grade and its gain is still computed and printed.
+    assert class_of(cert, "dropped-guard").criterion_met is True
+    assert cert.verdict == NOT_CERTIFIED
+    assert "designated certifying class" in " ".join(cert.reasons)
+
+
+def test_the_same_gain_certifies_for_an_arm_with_no_designation(tmp_path):
+    # What makes the test above a rule and not an arithmetic failure.
+    build, rows = certifying_sweep("dropped-guard")
+    assert score(tmp_path, build, rows, adjudicate_split(rows)).verdict == CERTIFIED
+
+
+def test_the_designated_class_certifies_normally(tmp_path):
+    build, rows = certifying_sweep("swallowed-error")
+    decisions = adjudicate_split(rows)
+    under_lang_python(rows, decisions)
+    assert score(tmp_path, build, rows, decisions).verdict == CERTIFIED
 
 
 # --- case invalidation --------------------------------------------------------------------

@@ -26,6 +26,10 @@ STANCE_MARKER = "Begin from the presumption that this code is defective."
 WEAK_PATTERNS_HEADING = "WEAK REVIEW PATTERNS"
 WEAK_PLAN_PATTERNS_HEADING = "WEAK PLAN REVIEW PATTERNS"
 
+# Same, for the `lang-python` arm's single inserted block.
+PYTHON_CHECKS_HEADING = "PYTHON SPECIFICS"
+PYTHON_CHECKS_MARKER = "A mutable default argument"
+
 # Reads the prompt rr wrote for it, records the exact bytes, and answers with whatever
 # review the test asked for. STUB_FAIL_UNTIL makes the first N invocations fail, which is
 # how the retry path is exercised without a real flaky backend.

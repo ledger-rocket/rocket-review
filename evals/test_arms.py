@@ -16,7 +16,13 @@ from arms import (
     load_arm,
     runtime_prompt_constants,
 )
-from conftest import STANCE_MARKER, WEAK_PATTERNS_HEADING, WEAK_PLAN_PATTERNS_HEADING
+from conftest import (
+    PYTHON_CHECKS_HEADING,
+    PYTHON_CHECKS_MARKER,
+    STANCE_MARKER,
+    WEAK_PATTERNS_HEADING,
+    WEAK_PLAN_PATTERNS_HEADING,
+)
 
 
 @pytest.fixture
@@ -141,6 +147,61 @@ def test_the_stance_arm_carries_the_two_blocks_where_the_experiment_expects_them
     assert WEAK_PLAN_PATTERNS_HEADING in plan
     # The plan list is its own text, not the code one under a longer heading.
     assert WEAK_PATTERNS_HEADING not in plan
+
+
+#: Same reasoning again, for the treatment of the language-checks experiment: pinned from
+#: the day it is written, because an arm whose text can move while a sweep is running is
+#: not a treatment.
+LANG_PYTHON_HASH = (
+    "f1b1bf6d4a464b00356934269e02ab726cb9e9ee64aa3404d17ed5cd0e3a6331"
+)
+
+
+def test_the_lang_python_arm_is_frozen():
+    assert load_arm("lang-python").content_hash == LANG_PYTHON_HASH
+
+
+#: `current/`'s hash at 6f8ad78, the text `lang-python/` was derived from. Equal to
+#: STANCE_BASE_HASH because the live prompts have not moved since 285ec3b; pinned as its
+#: own number anyway, since two arms sharing a base by coincidence is no reason for one
+#: arm's purity check to be written in terms of another's.
+LANG_PYTHON_BASE_HASH = (
+    "14e3dcae19cb2a5da07bfe4ffda2d578082145acf757a7ff51eda5f3a52ca12e"
+)
+
+
+def test_the_lang_python_arm_inherits_its_base_text_unchanged():
+    """Strip the one inserted paragraph and what is left must hash to `current/` at 6f8ad78.
+
+    The pure-insertion proof for the whole arm rather than for the diff body alone: the
+    hash spans all five prompts, so a byte edited in any of the other four fails here too.
+    """
+    texts = dict(load_arm("lang-python").texts)
+    texts["DIFF_REVIEW_PROMPT"] = without_paragraph(
+        texts["DIFF_REVIEW_PROMPT"], PYTHON_CHECKS_HEADING
+    )
+    assert arm_hash(texts) == LANG_PYTHON_BASE_HASH, (
+        "lang-python/ no longer reduces to current/ at 6f8ad78: text outside the inserted "
+        "block was edited, or the block is no longer a single paragraph"
+    )
+
+
+def test_the_lang_python_arm_carries_its_block_in_the_diff_body_alone():
+    # `diff` is the only mode this corpus can score the block in, so the same block in the
+    # code or plan body would be text no case can speak to — see *The language-checks arm*
+    # in evals/README.md.
+    arm = load_arm("lang-python")
+    body = arm.texts["DIFF_REVIEW_PROMPT"]
+    assert PYTHON_CHECKS_HEADING in body
+    assert PYTHON_CHECKS_MARKER in body
+    for name in ("CODE_REVIEW_PROMPT", "PLAN_REVIEW_PROMPT"):
+        assert PYTHON_CHECKS_HEADING not in arm.texts[name]
+    # The seat: after the general checks, before the severity block the prompt closes on.
+    assert (
+        body.index("REVIEW FOCUS")
+        < body.index(PYTHON_CHECKS_HEADING)
+        < body.index("SEVERITY LEVELS")
+    )
 
 
 def test_every_shipped_arm_documents_its_provenance():

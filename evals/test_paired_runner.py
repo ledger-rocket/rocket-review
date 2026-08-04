@@ -19,6 +19,8 @@ import rocket_review.prompts as rr_prompts
 from arms import PROMPT_CONSTANTS, load_arm
 from cases import remove_worktree
 from conftest import (
+    PYTHON_CHECKS_HEADING,
+    PYTHON_CHECKS_MARKER,
     STANCE_MARKER,
     WEAK_PATTERNS_HEADING,
     WEAK_PLAN_PATTERNS_HEADING,
@@ -642,6 +644,47 @@ def test_a_paired_run_of_current_against_stance_delivers_each_arms_own_text(
         assert STANCE_MARKER not in prompt
         assert WEAK_PATTERNS_HEADING not in prompt
         assert WEAK_PLAN_PATTERNS_HEADING not in prompt
+
+
+def test_a_paired_run_of_current_against_lang_python_delivers_the_python_block(
+    tmp_path, git_repo, corpus, monkeypatch, stub_backend,
+):
+    """The same proof for the language-checks arm, in the one mode it changes.
+
+    Both corpus cases are `diff`, which is where the arm's single block lives. The block
+    has to reach the backend on every treatment run and appear in no control prompt —
+    otherwise a sweep of these two arms would be measuring `current` against itself.
+    """
+    monkeypatch.delenv("CI", raising=False)
+    for key, value in stub_backend.env().items():
+        monkeypatch.setenv(key, value)
+    assert main([
+        "--control", "current", "--treatment", "lang-python",
+        "--backends", "codex:stub-model", "--cases", str(corpus),
+        "--runs", "1", "--concurrency", "1", "--timeout", "60",
+        "--repo", str(git_repo), "--out", str(tmp_path / "results"),
+    ]) == 0
+
+    current, lang_python = load_arm("current"), load_arm("lang-python")
+    captured = stub_backend.captured_prompts()
+    assert len(captured) == 4  # 2 diff cases x 2 arms x 1 rep
+
+    delivered: Counter[str] = Counter()
+    for prompt in captured:
+        # The inserted block splits the base body, so only one arm's diff text can appear
+        # whole in any prompt: substitution, not addition.
+        roles = [
+            role for role, arm in ((CONTROL, current), (TREATMENT, lang_python))
+            if arm.texts["DIFF_REVIEW_PROMPT"].strip() in prompt
+        ]
+        assert len(roles) == 1, (roles, prompt[:300])
+        delivered[roles[0]] += 1
+        if roles[0] == CONTROL:
+            assert PYTHON_CHECKS_HEADING not in prompt
+            assert PYTHON_CHECKS_MARKER not in prompt
+        else:
+            assert PYTHON_CHECKS_MARKER in prompt
+    assert delivered == Counter({CONTROL: 2, TREATMENT: 2})
 
 
 # --- refusals --------------------------------------------------------------------------

@@ -206,7 +206,7 @@ An arm is immutable input. The runner loads it, content-hashes it (sha256 over a
 length-prefixed concatenation in a fixed constant order), and writes that hash on **every**
 result row, so any row can be traced back to the exact prompt bytes that produced it.
 
-Three arms ship:
+Four arms ship:
 
 - **`current/`** — a byte-exact export of the constants at HEAD. `test_arms.py` asserts it
   still matches the live `prompts.py`, so editing the runtime prompts without re-exporting
@@ -223,6 +223,11 @@ Three arms ship:
   is `current/` plus insertions, which is what makes a measured difference attributable to
   the two blocks. Nothing in `rocket_review/prompts.py` moves unless a sweep certifies it,
   and then only the `diff` body — see *Promotion scope*.
+- **`lang-python/`** — `current/` at commit `6f8ad78` with one block of Python-specific
+  checks inserted in `DIFF_REVIEW_PROMPT` and nothing else touched. The treatment for the
+  language-checks experiment, frozen and hash-pinned from the day it was written on the
+  same reasoning `stance/` is. Python and `diff` mode are not a first slice of a larger
+  feature; they are the only slice this corpus can score — see *The language-checks arm*.
 
 Adding a prompt constant to `rocket_review/prompts.py` without adding it to every arm is
 also caught: `PROMPT_CONSTANTS` is asserted against the constants the runtime actually
@@ -789,6 +794,12 @@ only if:
 - **in aggregate** across clean-control cases, the treatment mean does not exceed the
   control mean at all.
 
+An arm whose added text is inert on some clean controls has to clear a second aggregate,
+restricted to the controls it is not inert on — otherwise the cases it cannot affect can
+carry the ones it can. `lang-python` is such an arm; the subset is pre-registered in
+`adjudicate.ARM_RULES` and computed alongside the veto's other conditions (*The
+language-checks arm*).
+
 `tier1.py` prints the pre-adjudication form of both numbers directly: `critical+high/run`
 restricted to clean controls (the aggregate condition), and again per case with each case
 labelled control or defect (the per-case condition). Neither has to be recombined by hand —
@@ -862,6 +873,102 @@ can speak to.
 **Why the unpromotable bodies stay in the arm anyway.** Their runs are reported signal —
 worth reading, and worth designing the next corpus around. Removing them would cost that
 for nothing, because this rule already refuses to act on them.
+
+### The language-checks arm — what a certification licenses
+
+Four statements about `lang-python/`, written as decision rules and committed with the arm,
+before any sweep has run against it. Two of them — the tightened veto and the designated
+certifying class — are read by `adjudicate.py` (`ARM_RULES`) rather than only stated here,
+because the scorer's verdict is binding and its numbers may not be recombined by hand: a
+rule the scorer does not read is not a rule.
+
+**1. What this arm measures.** The arm carries its Python block unconditionally, on every
+review of every case. The shipping feature it stands for would append that block only when
+a review touches Python files. Always-on is the strictly harsher of the two tests:
+identical on recall, since every defect case in this corpus is Python and both forms carry
+the block on all of them, and a superset of exposure on noise, since the always-on form
+also puts the block in front of the three `diff`-mode clean controls that change no Python
+— `c-001`, `c-002`, `c-005` — which the conditional form would leave alone. (The seventh
+control, `p-004`, is a plan case that neither form reaches; it still enters the pooled
+aggregate, which is what statement 2 is about.) **Certification of this arm therefore
+licenses shipping either the always-on form or the `changed_paths`-conditional form,
+provided the conditional splices the identical bytes at the identical seat — closing
+REVIEW FOCUS, before SEVERITY LEVELS — on a strict subset of reviews.**
+
+*Splices*, not appends, and the word is load-bearing. `get_prompt` composes a mode body
+with one output-format section by concatenation, so a conditional written as an append
+would land the block after SEVERITY LEVELS and after the "an unlabelled finding is
+malformed" line the prompt closes on. Those are not the bytes this arm measured — the
+seat is argued for in the arm's README and pinned in `test_arms.py` — and a certification
+of these bytes at that seat says nothing about the same bytes at another.
+
+The conditional form is the one worth shipping, and this is what makes shipping it legal
+off a sweep that never ran it: it can only ever remove exposure the certified arm was
+already judged with, never add any. The reverse promotion is not licensed and never will be
+by this arm — a sweep of the conditional form would say nothing about what the block does
+to a review with no Python in it.
+
+**2. The veto's aggregate condition is tightened for this arm.** As written, the aggregate
+is pooled over all seven clean controls, four of which the block cannot reach: `c-001`
+(toml/yml), `c-002` (md) and `c-005` (yml) change no Python, and `p-004` is a plan case,
+which is inert more strongly still — the block lives only in `DIFF_REVIEW_PROMPT`, so
+neither arm carries it in a plan review at all. Those four are exactly where the always-on
+and conditional forms differ. If the inert block *lowers* false positives there, that
+negative delta offsets a positive delta on the Python-touching controls, and an always-on
+arm could pass an aggregate the form actually shipped would fail. So for this arm the
+aggregate condition must hold twice: pooled over every clean control, **and** pooled over
+the Python-touching controls alone (`c-003`, `c-004`, `c-006`). The per-case condition
+needs no such repair — it already binds each control on its own, so no case can be rescued
+by another's delta.
+
+`adjudicate.py` computes both aggregates and folds the restricted one into the veto, and
+`test_cases.py` pins the subset against the corpus: it has to match the clean controls
+whose diff changes a `.py` file and no others, so a control added later cannot fall outside
+the restricted aggregate unnoticed.
+
+**3. Scope of any certification.** Python only, `diff` mode only. A CERTIFIED verdict here
+licenses the Python block in `DIFF_REVIEW_PROMPT` and nothing else. Equivalent blocks for
+other languages, and this block in the `code` or `plan` bodies, remain unmeasured and
+unshippable until the corpus carries cases for them: a Go, SQL or shell block has neither a
+mutant to be scored for recall on nor a control to be scored for noise on, and `code` mode
+has no clean controls at all, so its veto cannot be evaluated (*Promotion scope*). Nothing
+about this rule is loosened by a good result — a certified Python block is evidence about a
+Python block.
+
+**4. Which class certifies, and what a gain there can be attributed to.** Two classes reach
+the ≥5 bar, and reading both as certifying would give this one sweep two independent draws
+at the success criterion. **`swallowed-error` is the designated certifying class for this
+arm.** A `dropped-guard` gain is computed, printed and reported — and cannot certify.
+
+The designation is not arbitrary; it follows from what the mutants are. **No
+`dropped-guard` member instantiates any line of this block.** Read individually, its five
+are a path-containment prefix bug twice (`b-002`, `b-022`), a subprocess allow-list rule
+widened with a wildcard (`b-003`), a dropped verdict-membership check (`b-016`), and an
+argument-combination check removed (`b-017`): no swallowed `except`, no mutable default, no
+unreleased resource, no `eval`/`exec`/SQL sink, no `assert` standing in for validation. A
+gain there could only be read as non-specific priming — a longer, more concrete prompt
+sharpening the review generally — which is a different hypothesis from the one this arm was
+built to test, and one it does not isolate.
+
+**Attribution inside the designated class is partial, so the per-case breakdown has to be
+read and not just the class total.** Three of `swallowed-error`'s six are `except` bodies
+that stopped signalling and instantiate this block's first line: `b-009` (`cli.run_one`'s
+`BackendError` handler), `b-023` (`config.load_file`'s unreadable-file handler) and `b-024`
+(`cli._run`'s `ConfigError` handler). The other three — `b-018`, `b-020`, `b-021` — are
+checks elsewhere that stop a failure from failing, and instantiate nothing here. A gain
+concentrated in the first three is attributable to the check the block adds; a gain in the
+other three is the same non-specific priming, and has to be reported as such. `adjudicate.py`
+prints per-case hits under every class, so this reading needs no extra arithmetic.
+
+One more mutant instantiates the same line and cannot certify: `b-008` (`lost-diagnostic`,
+1 case), whose `TimeoutExpired` handler returns `""` where it used to raise. Reported
+signal, like every other sub-bar class.
+
+**Recall here is a lower bound; noise is representative.** No mutant in the corpus
+instantiates the mutable-default, resource-release, `eval`/`exec`/SQL or `assert` entries —
+four of the five lines have nothing to find, so they can only cost in the veto and never
+earn in recall. The measured false-positive effect is the whole block's; the measured
+recall is what one line of five could show.
 
 ### Scoring rule — when a finding matches a defect
 
@@ -1084,6 +1191,11 @@ Means are compared as exact rationals, not floats: a bound of exactly +0.5 is on
 side of "by no more than 0.5", and it should not depend on binary rounding whether it lands
 there.
 
+One pooled aggregate can hide a subset it was pooled over, which matters when an arm's text
+is inert on some controls and not others. `lang-python` has exactly that shape, so its veto
+carries a second aggregate over the controls its block reaches, computed here from
+`ARM_RULES` and folded into `holds` — see *The language-checks arm*.
+
 A run whose review did not strictly validate contributes a **zero** to its arm's mean rather
 than dropping out of the denominator. This is enforced rather than inherited: the runtime
 parser is lenient by design — an invented severity, a missing `why`, a `why` that is not even
@@ -1235,7 +1347,8 @@ launches a real backend.
 - `test_arms.py` — the `current/` drift guard, the constant-coverage guard, hash stability
   and sensitivity, arm loading errors, and that applying an arm actually changes what
   `get_prompt` and `build_agent_prompt` return. Also the frozen arms: a pinned hash each,
-  and for `stance/` that every file is `current/` with lines added and none removed.
+  and for `stance/` and `lang-python/` that every file is `current/` with lines added and
+  none removed, in the bodies the experiment expects and no others.
 - `test_cases.py` — manifest validation, materialization of all three source types against a
   throwaway git repository (including that a patch which does not apply fails loudly and
   leaves no worktree behind), and the integrity of the shipped corpus itself: every case's
@@ -1243,14 +1356,18 @@ launches a real backend.
   touches the file its manifest scores against, every referenced path exists at that commit,
   every span both ends inside its file and overlaps a hunk the patch actually changed, every
   mutant carries a `killed_by` naming test files that exist there, and no clean control has
-  grown a defect block. All of it reads the git object database; nothing is checked out —
-  which is why `ci.yml`'s test job needs `fetch-depth: 0`.
+  grown a defect block. Also that `lang-python`'s registered control subset is exactly the
+  clean controls whose diff changes Python, so a control added later cannot slip outside
+  its restricted aggregate. All of it reads the git object database; nothing is checked out
+  — which is why `ci.yml`'s test job needs `fetch-depth: 0`.
 - `test_paired_runner.py` — the injection proof, arm alternation, and complete paired runs
   against a stub `codex` binary: result-file shape, per-row provenance, the retry path, CI
   refusal, and worktree teardown. Plus `current` against `stance` over a diff-and-plan
   corpus, which is where the shipped treatment's added text is shown to reach a backend at
   all — the two arms differ only by insertions, so a launcher that fell back to the live
-  prompts would otherwise produce a full result file measuring `current` twice.
+  prompts would otherwise produce a full result file measuring `current` twice. The same
+  proof for `lang-python` over a diff-only corpus: the Python block reaches the backend in
+  the treatment arm and appears in no control prompt.
 - `test_tier1.py` — every tier-1 metric on fixed rows, plus the hand-labelled DO-NOT-FLAG
   fixture.
 - `test_adjudicate.py` — the certification arithmetic on synthetic sweeps: input binding
@@ -1261,4 +1378,8 @@ launches a real backend.
   the class), the protocol-depth gate in both directions, per-backend combination, every
   artifact validation and rule refusal, the completeness gate, the exit-status separation,
   and two full end-to-end sweeps through the CLI — one that certifies and one whose
-  identical recall is vetoed by the noise it was bought with.
+  identical recall is vetoed by the noise it was bought with. Plus the per-arm
+  pre-registrations, each paired with the same sweep under an arm that carries none: a
+  restricted aggregate that vetoes what the pooled one would pass, a registered subset with
+  nothing scored in it, and a gain outside the designated certifying class that is reported
+  rather than certified.
