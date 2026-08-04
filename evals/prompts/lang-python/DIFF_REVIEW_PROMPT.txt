@@ -23,7 +23,7 @@ PYTHON SPECIFICS — apply these to every Python change the diff makes
 - A mutable default argument — `[]`, `{}`, `set()` — carried between calls as one shared object
 - A file, socket, connection or lock opened outside `with` and not released in `try`/`finally` on every path
 - Untrusted data reaching `eval` or `exec`, or a SQL string assembled by f-string, `%` or concatenation
-- An `assert` doing validation the program relies on, which `python -O` strips out
+- An `assert` outside the tests doing validation the program relies on, which `python -O` strips out
 
 SEVERITY LEVELS
 - CRITICAL: Security flaws, data loss, crashes introduced by this change

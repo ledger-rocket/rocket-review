@@ -18,10 +18,10 @@ veto against. See *Promotion scope* in `evals/README.md`.
 This arm carries the block on every run. The shipping feature it stands for would append
 the identical bytes only when a review touches a Python file, and which of those two forms
 a certification licenses is pre-registered in `evals/README.md` (*The language-checks arm*)
-before any sweep exists to argue about. That section also records what a certified result
-could *not* be attributed to: no case of the one class able to certify instantiates any
-line of this block, so a gain there would be evidence about this text and not about these
-checks.
+before any sweep exists to argue about. That section also names the class a gain may be
+certified on — `swallowed-error`, three of whose six mutants are `except` bodies this
+block's first line is about — and records that a `dropped-guard` gain is reported and
+cannot certify, because no member of that class instantiates a line of this block.
 
 Placement. The block closes the numbered REVIEW FOCUS list and precedes SEVERITY LEVELS. It
 is a list of checks, so its home is the region naming what a reviewer hunts for, not the
@@ -47,6 +47,13 @@ The heading says *change*, not *file*, on purpose: the body's first line confine
 review to what the diff changes, and a block inviting a sweep of every touched Python file
 would contradict it — and would make any measured effect partly a scope widening rather
 than these five checks.
+
+The `assert` entry says *outside the tests* for a related reason. In a test an `assert` is
+the correct construct, and the controls this corpus can charge it against are
+test-dominated — `c-004` is almost entirely `tests/`, `c-006` carries about 1.5k test
+lines — so an unscoped entry would spend its whole false-positive budget on the one place
+the pattern is not a defect. Nothing in this corpus can earn recall on it either (no mutant
+instantiates it), which is why the scoping costs nothing: it can only remove noise.
 
 Licensing. No GSD technique is adapted here; the entries are ordinary Python defect
 knowledge. The gate is run anyway, because everything added to an arm goes through it: each

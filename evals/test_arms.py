@@ -153,7 +153,7 @@ def test_the_stance_arm_carries_the_two_blocks_where_the_experiment_expects_them
 #: the day it is written, because an arm whose text can move while a sweep is running is
 #: not a treatment.
 LANG_PYTHON_HASH = (
-    "1cbd6a59627bfc680a80bd499694fb1c412883f12a819217386d4a3e1b3df6a9"
+    "f1b1bf6d4a464b00356934269e02ab726cb9e9ee64aa3404d17ed5cd0e3a6331"
 )
 
 
