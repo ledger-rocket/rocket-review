@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from adjudicate import ARM_RULES
 from cases import (
     CASES_DIR,
     Case,
@@ -254,6 +255,35 @@ def test_the_shipped_corpus_covers_every_source_and_both_labels():
     assert {c.source for c in SHIPPED} == {"mutant", "merged-pr", "seeded-plan"}
     assert {c.mode for c in SHIPPED} == {"diff", "code", "plan"}
     assert any(c.is_control for c in SHIPPED) and any(not c.is_control for c in SHIPPED)
+
+
+def touches_python(case: Case) -> bool:
+    """Whether the diff a control case is reviewed as changes any `.py` file."""
+    shown = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "show", "--name-only", "--format=", case.repo_commit],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
+    )
+    return any(path.endswith(".py") for path in shown.stdout.split())
+
+
+def test_the_lang_python_arm_control_subset_is_exactly_the_python_touching_controls():
+    """The scorer's registered subset, checked against what the corpus actually contains.
+
+    `adjudicate.ARM_RULES` holds the ids by hand, because a veto condition that recomputed
+    its own membership at scoring time would not be pre-registered. Pinning it here is what
+    stops a control added later from falling outside the restricted aggregate in silence —
+    either it carries Python and belongs in the subset, or it does not and the arm's block
+    cannot reach it.
+    """
+    controls = [c for c in SHIPPED if c.is_control and c.source == "merged-pr"]
+    expected = {c.id for c in controls if touches_python(c)}
+    assert ARM_RULES["lang-python"].control_subset == expected
+    # Plan controls are not in it and cannot be: the block lives in DIFF_REVIEW_PROMPT, so
+    # a plan review never carries it in either arm.
+    assert not any(
+        c.id in ARM_RULES["lang-python"].control_subset
+        for c in SHIPPED if c.is_control and c.mode == "plan"
+    )
 
 
 # --- validation ------------------------------------------------------------------------

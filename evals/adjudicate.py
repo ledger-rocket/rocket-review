@@ -87,6 +87,39 @@ CERTIFYING_CLASS_MIN_CASES = 5
 #: assumed. Blocking is deliberately not gated on it: a shallow sweep still vetoes.
 PROTOCOL_MIN_REPS = 5
 
+@dataclass(frozen=True)
+class ArmRules:
+    """Pre-registrations that bind one arm, committed before the sweep they govern.
+
+    They live here rather than only in the arm's README because the verdict this scorer
+    prints is binding and its numbers may not be recombined by hand — so a rule the
+    decision depends on has to be one the scorer reads. See `evals/README.md`,
+    *The language-checks arm*.
+    """
+
+    #: The clean controls this arm's added text can reach at all. The veto's aggregate is
+    #: pooled over every clean control, so an arm that is inert on some of them can have
+    #: those cases carry the ones it is not inert on; an arm listed here has to clear the
+    #: aggregate over this subset as well. Pinned against the corpus in `test_cases.py`.
+    control_subset: frozenset[str] = frozenset()
+    #: The one defect class a gain may be certified on. Two verdict-grade classes would
+    #: give one sweep two independent draws at the success criterion, and a class whose
+    #: members instantiate nothing the arm added cannot attribute a gain to it either.
+    certifying_class: str | None = None
+
+
+#: Keyed by the arm under test — the treatment — under its directory name.
+ARM_RULES: dict[str, ArmRules] = {
+    "lang-python": ArmRules(
+        control_subset=frozenset({"c-003", "c-004", "c-006"}),
+        certifying_class="swallowed-error",
+    ),
+}
+
+#: What an arm nobody pre-registered anything for is scored under: every clean control in
+#: the aggregate, any verdict-grade class able to certify.
+NO_ARM_RULES = ArmRules()
+
 #: Exit status. 0/1/2 are the three verdicts; nothing that is not a computed verdict may
 #: land on one of them.
 EXIT_STATUS = {CERTIFIED: 0, NOT_CERTIFIED: 1, VETOED: 2}
@@ -657,6 +690,16 @@ class VetoResult:
     at_protocol_depth: bool
     per_case_ok: bool
     aggregate_ok: bool
+    #: The same aggregate over the arm's pre-registered control subset. Empty tuple and a
+    #: `True` when the arm registered none, so an unrestricted arm reads as it always did.
+    subset_cases: tuple[str, ...]
+    subset_control_runs: int
+    subset_treatment_runs: int
+    subset_control_total: int
+    subset_treatment_total: int
+    subset_control_mean: Fraction | None
+    subset_treatment_mean: Fraction | None
+    subset_ok: bool
     holds: bool
     reasons: list[str] = field(default_factory=list)
 
@@ -901,15 +944,21 @@ def _class_recall(
 
 def compute_veto(
     rows: list[dict], cases: dict[str, Case], parsed: dict[tuple, list[Finding]],
-    false_positives: set[tuple], removed: frozenset[str],
+    false_positives: set[tuple], removed: frozenset[str], rules: ArmRules = NO_ARM_RULES,
 ) -> VetoResult:
     """The veto for one backend, from adjudicated false positives rather than raw counts.
 
     Per clean-control case, the mean CRITICAL+HIGH adjudicated-false-positive count per
     run per arm, over complete pairs only — the same runs tier 1 scores, so the two
     reports cannot disagree about which work happened.
+
+    An arm that registered a control subset is held to the aggregate twice, over every
+    clean control and over that subset: pooling controls the arm's text cannot reach lets
+    them carry the ones it can, and a change ships in the form that only ever runs on the
+    subset.
     """
     totals = {role: [0, 0] for role in (CONTROL, TREATMENT)}
+    subset_totals = {role: [0, 0] for role in (CONTROL, TREATMENT)}
     by_case: dict[str, dict[str, list[int]]] = {}
     for row in rows:
         case = cases[row["case_id"]]
@@ -923,6 +972,9 @@ def compute_veto(
         )
         totals[row["arm_role"]][0] += 1
         totals[row["arm_role"]][1] += count
+        if case.id in rules.control_subset:
+            subset_totals[row["arm_role"]][0] += 1
+            subset_totals[row["arm_role"]][1] += count
         tally = by_case.setdefault(case.id, {role: [0, 0] for role in (CONTROL, TREATMENT)})
         tally[row["arm_role"]][0] += 1
         tally[row["arm_role"]][1] += count
@@ -947,10 +999,21 @@ def compute_veto(
     treatment_runs, treatment_total = totals[TREATMENT]
     control_mean = _mean(control_total, control_runs)
     treatment_mean = _mean(treatment_total, treatment_runs)
+    subset_control_runs, subset_control_total = subset_totals[CONTROL]
+    subset_treatment_runs, subset_treatment_total = subset_totals[TREATMENT]
+    subset_control_mean = _mean(subset_control_total, subset_control_runs)
+    subset_treatment_mean = _mean(subset_treatment_total, subset_treatment_runs)
     per_case_ok = all(c.within_bound for c in per_case)
     aggregate_ok = (
         control_mean is not None and treatment_mean is not None
         and treatment_mean <= control_mean
+    )
+    # An arm with no registered subset is unrestricted, not unmeasured. One that has a
+    # subset and scored nothing in it fails for the reason an unmeasured veto fails: the
+    # condition was never shown to hold.
+    subset_ok = not rules.control_subset or (
+        subset_control_mean is not None and subset_treatment_mean is not None
+        and subset_treatment_mean <= subset_control_mean
     )
     reasons: list[str] = []
     if control_mean is None or treatment_mean is None:
@@ -970,6 +1033,17 @@ def compute_veto(
             f"in aggregate over clean controls, treatment {_num(treatment_mean)} exceeds "
             f"control {_num(control_mean)} adjudicated false-positive critical+high per run"
         )
+    subset_label = ", ".join(sorted(rules.control_subset))
+    if rules.control_subset and not subset_ok:
+        reasons.append(
+            f"over the controls this arm's text reaches ({subset_label}), "
+            + (
+                "no repetition scored, so the restricted aggregate cannot be shown to hold"
+                if subset_control_mean is None or subset_treatment_mean is None else
+                f"treatment {_num(subset_treatment_mean)} exceeds control "
+                f"{_num(subset_control_mean)} adjudicated false-positive critical+high per run"
+            )
+        )
     min_case_reps = min((c.reps for c in per_case), default=0)
     return VetoResult(
         per_case=per_case, control_runs=control_runs, treatment_runs=treatment_runs,
@@ -978,7 +1052,15 @@ def compute_veto(
         min_case_reps=min_case_reps,
         at_protocol_depth=bool(per_case) and min_case_reps >= PROTOCOL_MIN_REPS,
         per_case_ok=per_case_ok, aggregate_ok=aggregate_ok,
-        holds=per_case_ok and aggregate_ok, reasons=reasons,
+        subset_cases=tuple(sorted(rules.control_subset)),
+        subset_control_runs=subset_control_runs,
+        subset_treatment_runs=subset_treatment_runs,
+        subset_control_total=subset_control_total,
+        subset_treatment_total=subset_treatment_total,
+        subset_control_mean=subset_control_mean,
+        subset_treatment_mean=subset_treatment_mean,
+        subset_ok=subset_ok,
+        holds=per_case_ok and aggregate_ok and subset_ok, reasons=reasons,
     )
 
 
@@ -1073,13 +1155,15 @@ def compute(
 
     backends: list[BackendCertification] = []
     for backend, backend_rows in sorted(by_backend.items()):
-        veto = compute_veto(backend_rows, cases, parsed, false_positives, removed)
+        treatment_arm = _arm_of(backend_rows, TREATMENT)
+        rules = ARM_RULES.get(treatment_arm, NO_ARM_RULES)
+        veto = compute_veto(backend_rows, cases, parsed, false_positives, removed, rules)
         classes, twins = compute_recall(backend_rows, cases, parsed, matched, removed)
         backends.append(_backend_verdict(
             backend=backend,
             control_arm=_arm_of(backend_rows, CONTROL),
-            treatment_arm=_arm_of(backend_rows, TREATMENT),
-            veto=veto, classes=classes, twins=twins,
+            treatment_arm=treatment_arm,
+            veto=veto, classes=classes, twins=twins, rules=rules,
         ))
     silent = sorted(expected_backends(header, finals) - set(by_backend))
     if silent:
@@ -1110,10 +1194,16 @@ def compute(
 
 def _backend_verdict(
     backend: str, control_arm: str, treatment_arm: str, veto: VetoResult,
-    classes: list[ClassRecall], twins: list[CaseRecall],
+    classes: list[ClassRecall], twins: list[CaseRecall], rules: ArmRules = NO_ARM_RULES,
 ) -> BackendCertification:
     certifying = [c for c in classes if c.certifying]
-    winners = [c for c in certifying if c.criterion_met]
+    # A designated class narrows what may certify; every other class is still computed and
+    # printed, which is the difference between reported and decided.
+    eligible = [
+        c for c in certifying
+        if rules.certifying_class is None or c.defect_class == rules.certifying_class
+    ]
+    winners = [c for c in eligible if c.criterion_met]
     if not veto.holds:
         verdict, reasons = VETOED, list(veto.reasons)
     elif winners and veto.at_protocol_depth:
@@ -1125,7 +1215,7 @@ def _backend_verdict(
         ]
     else:
         verdict = NOT_CERTIFIED
-        reasons = _not_certified_reasons(classes, certifying, winners, veto)
+        reasons = _not_certified_reasons(classes, certifying, winners, veto, rules)
     return BackendCertification(
         backend=backend, control_arm=control_arm, treatment_arm=treatment_arm,
         veto=veto, classes=classes, twins=twins, verdict=verdict, reasons=reasons,
@@ -1134,7 +1224,7 @@ def _backend_verdict(
 
 def _not_certified_reasons(
     classes: list[ClassRecall], certifying: list[ClassRecall], winners: list[ClassRecall],
-    veto: VetoResult,
+    veto: VetoResult, rules: ArmRules = NO_ARM_RULES,
 ) -> list[str]:
     """Name what actually stood between this sweep and a certification."""
     if winners and not veto.at_protocol_depth:
@@ -1147,11 +1237,26 @@ def _not_certified_reasons(
             f"the success criterion is met on {met}, but {depth} and certification needs "
             f"{PROTOCOL_MIN_REPS} — the veto is measured too thinly to certify against"
         ]
+    reasons: list[str] = []
+    if rules.certifying_class is not None:
+        # Said out loud, because a gain that met the criterion and still did not certify is
+        # exactly the outcome a reader would otherwise suspect of being a scorer bug.
+        blocked = [
+            c for c in certifying
+            if c.defect_class != rules.certifying_class and c.criterion_met
+        ]
+        if blocked:
+            reasons.append(
+                f"{', '.join(c.defect_class for c in blocked)} met the success criterion, "
+                f"but {rules.certifying_class} is this arm's designated certifying class, "
+                "so that gain is reported and cannot certify"
+            )
+        certifying = [c for c in certifying if c.defect_class == rules.certifying_class]
     if not certifying:
         if not classes:
-            return ["no defect case scored, so no class can certify"]
-        return [f"{c.defect_class}: {_grade_text(c)}" for c in classes]
-    return [f"{c.defect_class}: {_criterion_miss(c)}" for c in certifying]
+            return reasons + ["no defect case scored, so no class can certify"]
+        return reasons + [f"{c.defect_class}: {_grade_text(c)}" for c in classes]
+    return reasons + [f"{c.defect_class}: {_criterion_miss(c)}" for c in certifying]
 
 
 def _criterion_miss(entry: ClassRecall) -> str:
@@ -1231,6 +1336,10 @@ def print_report(cert: Certification) -> None:
     for backend in cert.backends:
         print(f"\n{backend.backend}: control ({backend.control_arm}) vs "
               f"treatment ({backend.treatment_arm})")
+        rules = ARM_RULES.get(backend.treatment_arm, NO_ARM_RULES)
+        if rules.certifying_class is not None:
+            print(f"  pre-registered for {backend.treatment_arm}: only "
+                  f"{rules.certifying_class} may certify; every other class is reported")
         _print_veto(backend.veto)
         _print_classes(backend.classes)
         _print_twins(backend.twins)
@@ -1256,6 +1365,13 @@ def _print_veto(veto: VetoResult) -> None:
           f"treatment {_num(veto.treatment_mean)} "
           f"({veto.treatment_total} fp over {veto.treatment_runs} runs)  "
           f"{'ok' if veto.aggregate_ok else 'OVER'}")
+    if veto.subset_cases:
+        print(f"    aggregate over {', '.join(veto.subset_cases)} — the controls this arm's "
+              f"text reaches — control {_num(veto.subset_control_mean)} "
+              f"({veto.subset_control_total} fp over {veto.subset_control_runs} runs)  "
+              f"treatment {_num(veto.subset_treatment_mean)} "
+              f"({veto.subset_treatment_total} fp over {veto.subset_treatment_runs} runs)  "
+              f"{'ok' if veto.subset_ok else 'OVER'}")
     print(f"    veto {'holds' if veto.holds else 'TRIPPED'}"
           + ("" if veto.at_protocol_depth else
              f" — measured at n={veto.min_case_reps}, below the protocol "
@@ -1347,9 +1463,19 @@ def report_json(cert: Certification) -> dict:
                     "at_protocol_depth": b.veto.at_protocol_depth,
                     "per_case_ok": b.veto.per_case_ok,
                     "aggregate_ok": b.veto.aggregate_ok,
+                    "subset_cases": list(b.veto.subset_cases),
+                    "subset_control_runs": b.veto.subset_control_runs,
+                    "subset_treatment_runs": b.veto.subset_treatment_runs,
+                    "subset_control_total": b.veto.subset_control_total,
+                    "subset_treatment_total": b.veto.subset_treatment_total,
+                    "subset_control_mean": _float(b.veto.subset_control_mean),
+                    "subset_treatment_mean": _float(b.veto.subset_treatment_mean),
+                    "subset_ok": b.veto.subset_ok,
                     "holds": b.veto.holds,
                     "reasons": b.veto.reasons,
                 },
+                "designated_certifying_class":
+                    ARM_RULES.get(b.treatment_arm, NO_ARM_RULES).certifying_class,
                 "classes": [
                     {
                         "defect_class": c.defect_class, "cases": c.cases,
