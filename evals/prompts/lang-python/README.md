@@ -18,7 +18,10 @@ veto against. See *Promotion scope* in `evals/README.md`.
 This arm carries the block on every run. The shipping feature it stands for would append
 the identical bytes only when a review touches a Python file, and which of those two forms
 a certification licenses is pre-registered in `evals/README.md` (*The language-checks arm*)
-before any sweep exists to argue about.
+before any sweep exists to argue about. That section also records what a certified result
+could *not* be attributed to: no case of the one class able to certify instantiates any
+line of this block, so a gain there would be evidence about this text and not about these
+checks.
 
 Placement. The block closes the numbered REVIEW FOCUS list and precedes SEVERITY LEVELS. It
 is a list of checks, so its home is the region naming what a reviewer hunts for, not the
@@ -28,12 +31,22 @@ a rival list. Above REVIEW FOCUS the specifics would frame the general categorie
 inverts what each is for; below SEVERITY LEVELS a check would sit after the instruction the
 prompt closes on.
 
-Every entry is a defect a reader can see in the diff itself, and a Python form that the
-general categories reach only in the abstract: an `except` that hides its failure, a
-mutable default, a resource freed on no path, an `eval`/`exec`/SQL sink, an `assert`
-carrying validation that `python -O` deletes. None of them restates something the prompt
-already says, and none is on its DO-NOT-FLAG list — no formatting, imports, naming or
-annotations.
+Every entry is a defect a reader can see in the diff itself, and none is on the prompt's
+DO-NOT-FLAG list — no formatting, imports, naming or annotations. What each adds over the
+text already there differs by entry, and is worth stating exactly:
+
+- the swallowed `except`, the unreleased resource and the `eval`/`exec`/SQL sink each have
+  a category-level parent in REVIEW FOCUS — incomplete error handling (2), resource leaks
+  (6), injection (5). They name a construct where the prompt names a category, which is a
+  specification rather than a restatement; the injection entry is the closest of the three
+  to redundant, since its parent already names the vulnerability class by name.
+- the mutable default and the `assert` that `python -O` deletes have no counterpart in the
+  prompt at any level.
+
+The heading says *change*, not *file*, on purpose: the body's first line confines the
+review to what the diff changes, and a block inviting a sweep of every touched Python file
+would contradict it — and would make any measured effect partly a scope widening rather
+than these five checks.
 
 Licensing. No GSD technique is adapted here; the entries are ordinary Python defect
 knowledge. The gate is run anyway, because everything added to an arm goes through it: each

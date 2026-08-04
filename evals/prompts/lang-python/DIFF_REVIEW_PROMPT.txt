@@ -18,7 +18,7 @@ REVIEW FOCUS
 5. SECURITY — Does the change introduce vulnerabilities (injection, auth bypass, secrets exposure)?
 6. PERFORMANCE — Does the change degrade performance or introduce resource leaks?
 
-PYTHON SPECIFICS — apply these to every Python file the diff touches
+PYTHON SPECIFICS — apply these to every Python change the diff makes
 - An `except` body that neither re-raises nor logs, leaving the failure invisible
 - A mutable default argument — `[]`, `{}`, `set()` — carried between calls as one shared object
 - A file, socket, connection or lock opened outside `with` and not released in `try`/`finally` on every path
