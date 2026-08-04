@@ -1,0 +1,15 @@
+diff --git a/rocket_review/config.py b/rocket_review/config.py
+index 80cf743..7c1bb74 100644
+--- a/rocket_review/config.py
++++ b/rocket_review/config.py
+@@ -132,8 +132,8 @@ def load_file(path: Path, *, repo_supplied: bool) -> Layer:
+     """
+     try:
+         raw = path.read_bytes()
+-    except OSError as e:
+-        raise ConfigError(f"could not read {path}: {e}") from e
++    except OSError:
++        return Layer(path=path, values={}, repo_supplied=repo_supplied)
+     try:
+         data = tomllib.loads(raw.decode("utf-8"))
+     except UnicodeDecodeError as e:

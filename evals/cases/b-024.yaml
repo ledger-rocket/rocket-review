@@ -1,0 +1,25 @@
+---
+# The same call is retried with no layers at all, which is what makes the swallow silent:
+# resolve() succeeds against the built-in defaults, so nothing downstream can tell that a
+# config file was read and refused. The span starts at the `try` rather than the handler,
+# because the two lines the handler now runs are only wrong in the light of the two above
+# them — a reviewer who has this right may cite either.
+id: b-024
+mode: diff
+source: mutant
+diff: cases/b-024.patch
+repo_commit: 6f8ad789bc55b2367147bf27c052443fecad4ea9
+defect:
+  class: swallowed-error
+  file: rocket_review/cli.py
+  span: [793, 798]
+  expected: >-
+    A ConfigError is caught and the run proceeds on built-in defaults instead of exiting 1,
+    so a project or user config rr refuses — an unknown key, a malformed value, invalid
+    TOML — is discarded without a word: every setting the file supplied stops applying, and
+    a CI gate that lived in .rocket-review.toml exits 0 on every review from then on.
+# Admission proof: these tests pass at repo_commit and fail with `diff` applied.
+# Written by `python evals/verify_cases.py --write`; re-run it rather than editing.
+killed_by:
+  - tests/test_config.py::test_a_broken_config_fails_before_any_git_or_backend_work
+  - tests/test_config.py::test_a_broken_user_config_is_reported_too
