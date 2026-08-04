@@ -348,16 +348,16 @@ it, and no mutant can be materialized at all. A case authored on a branch theref
 
 ### Corpus B — injected defect mutants (recall)
 
-20 cases over 17 distinct one-hunk mutations of `rocket_review/`; three of the seventeen are
+22 cases over 19 distinct one-hunk mutations of `rocket_review/`; three of the nineteen are
 expressed a second time as `code`-mode cases (same patch, different id) so the same defect
-can be scored with and without a diff framing it. Across five runtime modules (`cli.py`,
-`models.py`, `backends/base.py`, `backends/api.py`, `backends/claude.py`), the class labels
-are:
+can be scored with and without a diff framing it. Across six runtime modules (`cli.py`,
+`models.py`, `config.py`, `backends/base.py`, `backends/api.py`, `backends/claude.py`), the
+class labels are:
 
 | class | distinct mutants | what it names |
 |-------|------------------|---------------|
 | `dropped-guard` | 5 | a check removed outright, or left running but no longer excluding what it was written to exclude |
-| `swallowed-error` | 4 | a failure that stops producing a failing outcome — returned instead of raised, or recorded and then not acted on |
+| `swallowed-error` | 6 | a failure that stops producing a failing outcome — returned instead of raised, or recorded and then not acted on |
 | `flipped-comparison` | 2 | a comparison or exit-status test read the wrong way round |
 | `off-by-one-bound` | 2 | a boundary shifted by one element or one line |
 | `lost-diagnostic` | 1 | a failure still detected downstream, but reported with the wrong cause |
@@ -390,8 +390,15 @@ guard, which looks like `dropped-guard`, but the arm it removes is the errored-b
 the outcome is a gate that exits 0 on a run that never completed — so it lands on the
 `swallowed-error` side.
 
-`dropped-guard` is the one class at the ≥5 bar, so what makes its members *independent* is
-written out here rather than left to the label:
+`b-023` and `b-024` sit on the other edge of the same line. Both are triggered by a config
+file rr refuses, which sounds like invalid input getting through — but nothing invalid
+reaches the run: the file's values are discarded under the mutant exactly as they are under
+the original. What stops happening is the refusal. The run comes back as a review under
+settings nobody chose, and a `fail_on` the file carried stops gating anything, which is the
+`swallowed-error` side rather than the `dropped-guard` one.
+
+`dropped-guard` and `swallowed-error` are the two classes at the ≥5 bar, so what makes each
+one's members *independent* is written out here rather than left to the label:
 
 - the doc-link containment check (`cli.read_doc_with_links`, `b-002`); the exact-match git
   allow rule in the claude sandbox's tool allowlist (`b-003`); the verdict-validity check in
@@ -409,12 +416,33 @@ the doc path is not, since a diff can come from a branch nobody on the team wrot
 Independence is the rule and they pass it; flavour spread is a preference this pair does not
 satisfy, which is recorded here rather than smoothed over.
 
-`swallowed-error`'s four members are `cli.run_one`'s `BackendError` handler (`b-009`), where
+`swallowed-error`'s six members are `cli.run_one`'s `BackendError` handler (`b-009`), where
 the error is lost before it is ever recorded; `base.run_command`'s non-zero-exit arm (`b-018`);
 `api._output_text`'s unfinished-response check (`b-020`), where the fragment of a truncated
-review is returned as the whole of it; and `models.should_fail`'s errored-backend arm
-(`b-021`). Four modules, four failures, four ways of not failing — one short of the bar, and
-left short rather than padded.
+review is returned as the whole of it; `models.should_fail`'s errored-backend arm (`b-021`);
+`config.load_file`'s unreadable-file handler (`b-023`), which hands back a `Layer` that sets
+nothing; and `cli._run`'s `ConfigError` handler (`b-024`), which retries the same `resolve`
+with no layers at all. Five modules, six failures, six ways of not failing.
+
+Three of the six are `except` bodies that stopped signalling — the handler returns a benign
+value where it used to raise or exit (`b-009`, `b-023`, `b-024`) — and three are checks
+elsewhere that stop a failure from failing. That split is a fact about this runtime rather
+than a preference. Of its 41 `except` clauses, most already return a benign value on purpose
+and say why in a comment above — there is no swallow left to inject, and the construct the
+mutant would produce is the one the original already has. Of the ones that still raise or
+exit, only a handful are reached by any test at all, so a swallow injected into the rest is
+an equivalent mutant the admission rule drops rather than a case.
+
+`b-023` and `b-024` are this class's one same-flavour pair: both swallow a config failure, and
+a reviewer describes both in one sentence. They are independent under the rule, and the
+reasons are worth stating rather than assumed. `b-023` fabricates a return value *inside*
+`config.load_file`, so `load()` and everything above it believe the file was read and
+validated, and only that file's settings vanish — an unreadable project config silently hands
+the run to the user's own config. `b-024` discards, at the call site, a `ConfigError` the
+config module raised correctly, so every layer vanishes together and the run lands on built-in
+defaults. Different sites, different modules, different blast radius, one flavour — recorded
+here rather than smoothed over. The class does not rest on the pairing: reject it and
+`swallowed-error` still has five.
 
 Ids are never reused. A case retired during construction leaves its number behind rather than
 freeing it, because the id keys every result row and a reused one would make two different
@@ -514,9 +542,10 @@ count in a hurry is how the next bad control gets in; it is a task of its own.
 
 Three cases cannot certify anything about plan-mode prompts, and the decision rules below say
 so: `plan-flaw` is two independent cases, well under the ≥5 the success criterion requires.
-The one class that does reach five, `dropped-guard`, is a mutant class scored in `diff` and
-`code` mode with no plan case in it — so nothing that ever clears the gate on this corpus
-will say anything about the plan prompt.
+The two classes that do reach the bar, `dropped-guard` and `swallowed-error`, are mutant
+classes scored in `diff` mode — `dropped-guard` also in `code` mode — with no plan case in
+either, so nothing that ever clears the gate on this corpus will say anything about the plan
+prompt.
 
 ## Running a paired sweep
 
@@ -690,17 +719,17 @@ as the results it would reinterpret.
 
 ### What this release can and cannot decide
 
-> **The gate is live for `dropped-guard` only. Every other class is reported, never
-> decided.**
+> **The gate is live for `dropped-guard` and `swallowed-error`. Every other class is
+> reported, never decided.**
 >
 > Both prerequisites of the success criterion are now met:
 >
 > - **Corpus depth.** The criterion needs a defect class with **≥5 independent cases**.
->   `dropped-guard` has five (listed case by case under *Corpus B*). It is the only class
->   that does: `swallowed-error` (4), `flipped-comparison` (2), `off-by-one-bound` (2),
->   `plan-flaw` (2), `lost-diagnostic` (1), `wrong-set-members` (1), `wrong-reducer` (1),
->   `inverted-fallback-rank` (1) are all below the bar and are **reported but cannot
->   certify**, whatever their numbers look like.
+>   `dropped-guard` has five and `swallowed-error` six, both listed case by case under
+>   *Corpus B*. They are the only classes that do: `flipped-comparison` (2),
+>   `off-by-one-bound` (2), `plan-flaw` (2), `lost-diagnostic` (1), `wrong-set-members` (1),
+>   `wrong-reducer` (1), `inverted-fallback-rank` (1) are all below the bar and are
+>   **reported but cannot certify**, whatever their numbers look like.
 > - **A scorer.** `adjudicate.py` turns a committed artifact of human finding-decisions
 >   into class recall, the veto and the success criterion, under the aggregation rules
 >   written out below — repetition aggregation, twin dedup, veto arithmetic, case
@@ -763,9 +792,11 @@ Defect recall improves on at least one defect class that has **≥5 independent 
 **≥20% relative AND ≥2 additional defects found**. Both conditions, not either.
 
 - Classes with fewer than 5 cases are reported but **cannot certify** a change. They are too
-  small to distinguish a real improvement from a run of luck. **`dropped-guard` is the only
-  class at the bar today**, so it is the only class `adjudicate.py` gives verdict-grade
-  treatment — see *What this release can and cannot decide* above.
+  small to distinguish a real improvement from a run of luck. **`dropped-guard` and
+  `swallowed-error` are the classes at the bar today**, so they are the only two
+  `adjudicate.py` gives verdict-grade treatment — see *What this release can and cannot
+  decide* above. Improving recall on **either** satisfies this criterion; the rule asks for
+  at least one qualifying class, not for all of them.
 - **Independent** means a separate defect, not a separate encoding of one. The same seeded
   mutant reviewed in `diff` mode and again in `code` mode counts once.
 - A class whose control recall is zero uses the absolute condition alone (≥2 additional
@@ -779,9 +810,9 @@ bodies whose mode could have certified anything.
 
 Against this corpus, that is **`diff` mode alone**:
 
-- `dropped-guard`, the only class at the ≥5 bar, has all five of its independent cases in
-  `diff` mode. Its two `code`-mode re-expressions are twins of cases already counted and
-  never certify (*Twin dedup*).
+- Both classes at the ≥5 bar have every independent case in `diff` mode: `dropped-guard`'s
+  five, whose two `code`-mode re-expressions are twins of cases already counted and never
+  certify (*Twin dedup*), and `swallowed-error`'s six, which has no `code`-mode case at all.
 - `plan-flaw` is the only class in `plan` mode and has 2 cases — reported, cannot certify.
 - `code` mode has **no clean controls at all** — the seven are 6 `diff` and 1 `plan` — so
   the veto, which is computed on clean controls alone, cannot be evaluated there. A
