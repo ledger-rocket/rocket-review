@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 from adjudicate import (
+    ARM_RULES,
     CASE_INVALIDATED,
     CERTIFIED,
     CERTIFYING_CLASS_MIN_CASES,
@@ -322,6 +323,32 @@ def test_the_shipped_corpus_dedups_to_the_class_counts_the_gate_is_argued_from()
     ) == ["dropped-guard", "swallowed-error"]
     assert counts["dropped-guard"] == 5
     assert counts["swallowed-error"] == 6
+
+
+def test_a_designated_certifying_class_is_one_this_corpus_could_certify():
+    """An arm may narrow what certifies. It may not designate a class that never can.
+
+    A designation naming a class below the case bar reads as a rule and behaves as a ban:
+    no sweep could satisfy it, so the arm's only reachable verdicts would be NOT CERTIFIED
+    and VETOED. This is also the coupling between an arm's pre-registration and the corpus
+    it was written against — designate a class the corpus has not yet grown to five and
+    this fails until it has.
+    """
+    cases = [c for c in load_cases(CASES_DIR) if c.defect is not None]
+    groups: dict[str, list] = {}
+    for case in cases:
+        groups.setdefault(mutation_of(case), []).append(case)
+    counts = Counter(
+        certifying_representative(g).defect.defect_class for g in groups.values()
+    )
+    for arm, rules in ARM_RULES.items():
+        if rules.certifying_class is None:
+            continue
+        assert counts[rules.certifying_class] >= CERTIFYING_CLASS_MIN_CASES, (
+            f"{arm} designates {rules.certifying_class}, which the shipped corpus gives "
+            f"{counts[rules.certifying_class]} independent case(s) — below the "
+            f"{CERTIFYING_CLASS_MIN_CASES} a class needs to certify anything"
+        )
 
 
 def twin_promotion_corpus(directory: Path) -> None:
