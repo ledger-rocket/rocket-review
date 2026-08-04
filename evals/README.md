@@ -206,7 +206,7 @@ An arm is immutable input. The runner loads it, content-hashes it (sha256 over a
 length-prefixed concatenation in a fixed constant order), and writes that hash on **every**
 result row, so any row can be traced back to the exact prompt bytes that produced it.
 
-Three arms ship:
+Four arms ship:
 
 - **`current/`** — a byte-exact export of the constants at HEAD. `test_arms.py` asserts it
   still matches the live `prompts.py`, so editing the runtime prompts without re-exporting
@@ -223,6 +223,11 @@ Three arms ship:
   is `current/` plus insertions, which is what makes a measured difference attributable to
   the two blocks. Nothing in `rocket_review/prompts.py` moves unless a sweep certifies it,
   and then only the `diff` body — see *Promotion scope*.
+- **`lang-python/`** — `current/` at commit `6f8ad78` with one block of Python-specific
+  checks inserted in `DIFF_REVIEW_PROMPT` and nothing else touched. The treatment for the
+  language-checks experiment, frozen and hash-pinned from the day it was written on the
+  same reasoning `stance/` is. Python and `diff` mode are not a first slice of a larger
+  feature; they are the only slice this corpus can score — see *The language-checks arm*.
 
 Adding a prompt constant to `rocket_review/prompts.py` without adding it to every arm is
 also caught: `PROMPT_CONSTANTS` is asserted against the constants the runtime actually
@@ -863,6 +868,36 @@ can speak to.
 worth reading, and worth designing the next corpus around. Removing them would cost that
 for nothing, because this rule already refuses to act on them.
 
+### The language-checks arm — what a certification licenses
+
+Two statements about `lang-python/`, written as decision rules and committed with the arm,
+before any sweep has run against it.
+
+**1. What this arm measures.** The arm carries its Python block unconditionally, on every
+review of every case. The shipping feature it stands for would append that block only when
+a review touches Python files. Always-on is the strictly harsher of the two tests:
+identical on recall, since every defect case in this corpus is Python and both forms carry
+the block on all of them, and a superset of exposure on noise, since the always-on form
+also puts the block in front of the three clean controls that touch no Python at all.
+**Certification of this arm therefore licenses shipping either the always-on form or the
+`changed_paths`-conditional form, because the conditional appends the identical bytes on a
+strict subset of reviews.**
+
+The conditional form is the one worth shipping, and this is what makes shipping it legal
+off a sweep that never ran it: it can only ever remove exposure the certified arm was
+already judged with, never add any. The reverse promotion is not licensed and never will be
+by this arm — a sweep of the conditional form would say nothing about what the block does
+to a review with no Python in it.
+
+**2. Scope of any certification.** Python only, `diff` mode only. A CERTIFIED verdict here
+licenses the Python block in `DIFF_REVIEW_PROMPT` and nothing else. Equivalent blocks for
+other languages, and this block in the `code` or `plan` bodies, remain unmeasured and
+unshippable until the corpus carries cases for them: a Go, SQL or shell block has neither a
+mutant to be scored for recall on nor a control to be scored for noise on, and `code` mode
+has no clean controls at all, so its veto cannot be evaluated (*Promotion scope*). Nothing
+about this rule is loosened by a good result — a certified Python block is evidence about a
+Python block.
+
 ### Scoring rule — when a finding matches a defect
 
 A finding counts as detecting a manifest's defect only when **all three** hold:
@@ -1235,7 +1270,8 @@ launches a real backend.
 - `test_arms.py` — the `current/` drift guard, the constant-coverage guard, hash stability
   and sensitivity, arm loading errors, and that applying an arm actually changes what
   `get_prompt` and `build_agent_prompt` return. Also the frozen arms: a pinned hash each,
-  and for `stance/` that every file is `current/` with lines added and none removed.
+  and for `stance/` and `lang-python/` that every file is `current/` with lines added and
+  none removed, in the bodies the experiment expects and no others.
 - `test_cases.py` — manifest validation, materialization of all three source types against a
   throwaway git repository (including that a patch which does not apply fails loudly and
   leaves no worktree behind), and the integrity of the shipped corpus itself: every case's
@@ -1250,7 +1286,9 @@ launches a real backend.
   refusal, and worktree teardown. Plus `current` against `stance` over a diff-and-plan
   corpus, which is where the shipped treatment's added text is shown to reach a backend at
   all — the two arms differ only by insertions, so a launcher that fell back to the live
-  prompts would otherwise produce a full result file measuring `current` twice.
+  prompts would otherwise produce a full result file measuring `current` twice. The same
+  proof for `lang-python` over a diff-only corpus: the Python block reaches the backend in
+  the treatment arm and appears in no control prompt.
 - `test_tier1.py` — every tier-1 metric on fixed rows, plus the hand-labelled DO-NOT-FLAG
   fixture.
 - `test_adjudicate.py` — the certification arithmetic on synthetic sweeps: input binding
