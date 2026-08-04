@@ -1,0 +1,19 @@
+
+JSON RESPONSE FORMAT
+Output ONLY a single JSON object — no prose before or after it, no markdown fence —
+matching exactly this shape:
+{
+  "verdict": "approve" | "needs_fixes" | "blocker",
+  "summary": "recap in at most 200 words",
+  "findings": [
+    {
+      "severity": "critical" | "high" | "medium" | "low",
+      "title": "one-line issue statement",
+      "file": "path/to/file or null",
+      "line": 123 or null,
+      "why": "why it matters",
+      "fix": "concrete suggested fix, copy-pasteable when possible"
+    }
+  ]
+}
+An empty findings array with verdict "approve" is a valid review.
