@@ -298,16 +298,22 @@ def get_diff(staged: bool) -> str:
 
 
 def _exit_no_changes(staged: bool) -> None:
-    """An empty diff usually means the work was just committed — often in the
-    same compound command that called `rr`. Naming the flag that reviews it
-    saves the round trip of discovering `--commit` from `--help`."""
+    """An empty diff usually means the work moved somewhere `rr` was not asked
+    to look — most often committed, frequently in the same compound command
+    that called `rr`. Naming where to look next saves the round trip of
+    finding the flag in `--help`. The two paths need different advice: an
+    empty `--staged` can mean unstaged *or* committed, while an empty `--diff`
+    rules out the working tree already."""
+    if staged:
+        hint = (
+            "Stage them with `git add`, review the working tree with "
+            "`rr --diff`, or if the work is already committed, "
+            "`rr --commit HEAD`."
+        )
+    else:
+        hint = "If the work is already committed, review it with `rr --commit HEAD`."
     label = "staged changes" if staged else "uncommitted changes"
-    hint = "--commit HEAD" if not staged else "--diff"
-    print(
-        f"Error: no {label} found. If the work is already committed, "
-        f"review it with `rr {hint}`.",
-        file=sys.stderr,
-    )
+    print(f"Error: no {label} found. {hint}", file=sys.stderr)
     sys.exit(1)
 
 
