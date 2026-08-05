@@ -21,3 +21,13 @@ rocket-review publishes to PyPI through GitHub's [trusted publishing](https://do
 2. Create a GitHub release with tag `v<version>` (e.g. `v0.1.0`) targeting `main`.
 3. `publish.yml` builds the sdist + wheel and uploads to PyPI. It fails fast if
    the tag and `pyproject.toml` version disagree.
+4. Within a day, [`ledger-rocket/homebrew-tap`](https://github.com/ledger-rocket/homebrew-tap)
+   notices the new version on PyPI and opens a bump PR against itself. **Its
+   checks do not start on their own** — GitHub does not trigger workflows for
+   pull requests opened with the default `GITHUB_TOKEN` — so close and reopen
+   that PR to run CI, then merge. Until it merges, `brew install` serves the
+   previous version.
+
+The bump lives in the tap rather than here on purpose: this repo's CI holds no
+secrets, and pushing to another repository would mean storing a cross-repo token.
+The sdist's sha256 does not exist until step 3 finishes either.
