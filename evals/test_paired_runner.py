@@ -11,7 +11,7 @@ import sys
 import time
 from collections import Counter
 from pathlib import Path
-from threading import Lock
+from threading import Barrier, BrokenBarrierError, Lock
 from types import SimpleNamespace
 
 import pytest
@@ -238,6 +238,11 @@ def test_order_index_restarts_per_case_and_backend(tmp_path, arms):
 # --- scheduling ---------------------------------------------------------------------------
 
 
+#: Generous on purpose: the barrier releases as soon as the runs overlap, so this bound
+#: is only reached when cross-case concurrency is actually absent.
+CONCURRENCY_TIMEOUT = 30
+
+
 def fake_groups(cases=("a", "b"), backends=("codex",), runs=2):
     """Rep groups whose tasks carry only what the scheduler looks at."""
     groups = []
@@ -283,21 +288,32 @@ def test_a_repetitions_two_runs_finish_before_the_next_one_starts():
 
 
 def test_different_cases_still_run_concurrently():
-    running = 0
-    peak = 0
+    # A barrier rather than a stopwatch. It releases the moment every run is genuinely in
+    # flight, so a loaded machine makes this slower instead of red — only a scheduler that
+    # serializes the two cases can fail it, by timing out. Four runs is the whole sweep
+    # here (two cases, one repetition each, two arms per repetition), and within one case
+    # only a repetition's two arms may overlap, so reaching four proves the overlap crosses
+    # cases.
+    groups = fake_groups(cases=("a", "b"), runs=1)
+    expected = sum(len(group.tasks) for group in groups)
+    barrier = Barrier(expected)
+    together = 0
     lock = Lock()
 
     def execute(task):
-        nonlocal running, peak
+        nonlocal together
+        try:
+            barrier.wait(timeout=CONCURRENCY_TIMEOUT)
+        except BrokenBarrierError:
+            return  # the barrier broke for every waiter, so the sweep still drains
         with lock:
-            running += 1
-            peak = max(peak, running)
-        time.sleep(0.02)
-        with lock:
-            running -= 1
+            together += 1
 
-    run_groups(fake_groups(cases=("a", "b"), runs=1), concurrency=4, execute=execute)
-    assert peak > 2, "two cases with four slots should overlap"
+    run_groups(groups, concurrency=4, execute=execute)
+    assert together == expected, (
+        f"only {together} of {expected} runs were ever in flight together — the two cases "
+        f"did not overlap"
+    )
 
 
 @pytest.mark.parametrize("concurrency", [1, 2, 4])
