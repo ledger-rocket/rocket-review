@@ -41,8 +41,13 @@ api = ["openai>=1.68"]
 # jsonschema and pyyaml are for evals/ only — the runtime parser is intentionally lenient
 # and validates nothing strictly, and no runtime path reads YAML, so neither may become an
 # install-time dependency.
+# The three linters are pinned to the exact versions the workflows run, because their
+# version decides what passes: a newer ruff enforces rules the gate does not, and an
+# unpinned one already failed a release (publish.yml lints too, and v0.1.0 died on rules
+# CI never checked). Bump these and ci.yml/publish.yml together, or local runs stop
+# predicting the gate. pytest and the parsers only need a floor — they gate nothing.
 dev = [
-    "pytest>=8", "ruff>=0.6", "mypy>=1.18", "yamllint>=1.37",
+    "pytest>=8", "ruff==0.14.0", "mypy==1.18.2", "yamllint==1.37.1",
     "jsonschema>=4", "pyyaml>=6", "rocket-review[api]",
 ]
 
