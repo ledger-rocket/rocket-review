@@ -522,3 +522,91 @@ def test_a_missing_artifact_is_rejected(tmp_path, git_repo, head_oid):
     case = load_case(write_manifest(tmp_path, "p-101", text))
     with pytest.raises(CaseError, match="not found"):
         materialize(case, git_repo, tmp_path / "work")
+
+
+# --- the review context is sealed -------------------------------------------------------
+
+
+def _reaches(repo: Path, oid: str) -> bool:
+    """Whether `oid` is readable from `repo`. Not `conftest.git`, which asserts success."""
+    return subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "-e", oid],
+        capture_output=True, check=False,
+    ).returncode == 0
+
+
+@pytest.fixture
+def future_fix(git_repo: Path, head_oid: str) -> str:
+    """A commit made *after* the one a case pins — the answer a reviewer must not read.
+
+    Sharing an object database is enough to hand it over: a linked worktree checked out
+    at an ancestor still resolves every descendant, so `git show <later-oid>` returns the
+    fix for the very defect under review.
+    """
+    (git_repo / "sample.py").write_text(
+        "def rank(label):\n"
+        "    known = ['critical', 'high']\n"
+        "    if not label:\n"
+        "        return 0\n"
+        "    return known.index(label) if label in known else 0\n"
+        "# FUTUREFIX: repaired upstream, after the commit under review\n",
+        encoding="utf-8",
+    )
+    git(git_repo, "add", "sample.py")
+    git(git_repo, "commit", "-qm", "FUTUREFIX the answer key")
+    return git(git_repo, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_a_staged_mutant_cannot_read_commits_made_after_the_one_it_pins(
+    tmp_path, git_repo, head_oid, future_fix
+):
+    write_mutant_patch(tmp_path, git_repo, head_oid)
+    case = load_case(write_manifest(tmp_path, "m-001", MUTANT.format(oid=head_oid)))
+    staged = materialize(case, git_repo, tmp_path / "work")
+    try:
+        assert not _reaches(staged.cwd, future_fix)
+        assert "FUTUREFIX" not in git(staged.cwd, "log", "--all", "--oneline").stdout
+    finally:
+        remove_worktree(git_repo, staged.worktree)
+
+
+def test_a_staged_merged_pr_cannot_read_commits_made_after_the_one_it_reviews(
+    tmp_path, git_repo, head_oid, future_fix
+):
+    case = load_case(write_manifest(
+        tmp_path, "c-101",
+        f"id: c-101\nmode: diff\nsource: merged-pr\nrepo_commit: {head_oid}\n",
+    ))
+    staged = materialize(case, git_repo, tmp_path / "work")
+    try:
+        # Reviewing from the live checkout is what exposed the future: the case must get
+        # a snapshot of its own, and must report it so the runner tears it down.
+        assert staged.cwd != git_repo
+        assert staged.worktree is not None
+        assert not _reaches(staged.cwd, future_fix)
+    finally:
+        if staged.worktree is not None:
+            remove_worktree(git_repo, staged.worktree)
+
+
+def test_a_staged_merged_pr_still_diffs_against_its_parent(
+    tmp_path, git_repo, head_oid, future_fix
+):
+    """Sealing must not cost the parent commit.
+
+    Truncated to the tip alone, `git show` has nothing to diff against and reports the
+    whole tree as additions — a different review from the one the case describes.
+    """
+    case = load_case(write_manifest(
+        tmp_path, "c-101",
+        f"id: c-101\nmode: diff\nsource: merged-pr\nrepo_commit: {head_oid}\n",
+    ))
+    staged = materialize(case, git_repo, tmp_path / "work")
+    try:
+        shown = git(staged.cwd, "show", "--stat", "--format=", head_oid).stdout
+        assert "1 file changed" in shown
+        assert "2 insertions(+)" in shown
+        assert "deletions" not in shown
+    finally:
+        if staged.worktree is not None:
+            remove_worktree(git_repo, staged.worktree)
