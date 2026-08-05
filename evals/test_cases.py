@@ -488,17 +488,29 @@ def test_a_patch_that_does_not_apply_fails_loudly_and_leaves_no_worktree(
     with pytest.raises(CaseError, match="does not apply"):
         materialize(case, git_repo, tmp_path / "work")
     assert "case-m-001" not in git(git_repo, "worktree", "list").stdout
+    # The staged snapshot is a directory rather than a registered worktree, so the
+    # worktree-list check above cannot see it and would pass over an abandoned clone.
+    assert not (tmp_path / "work" / "case-m-001").exists()
 
 
-def test_merged_pr_is_reviewed_in_place_at_its_commit(tmp_path, git_repo, head_oid):
+def test_merged_pr_is_reviewed_at_its_commit_in_a_snapshot_of_its_own(
+    tmp_path, git_repo, head_oid
+):
     text = (
         f"id: c-001\nmode: diff\nsource: merged-pr\nrepo_commit: {head_oid}\n"
     )
     case = load_case(write_manifest(tmp_path, "c-001", text))
     staged = materialize(case, git_repo, tmp_path / "work")
-    assert staged.worktree is None
-    assert staged.cwd == git_repo
-    assert staged.rr_args == ["--commit", head_oid]
+    try:
+        # A commit is immutable; the checkout around it is not. Reviewing from the repo
+        # itself put the backend in a tree that had moved on, with every later commit
+        # readable — so the snapshot is the case's own, and is reported for teardown.
+        assert staged.cwd != git_repo
+        assert staged.worktree == staged.cwd
+        assert git(staged.cwd, "rev-parse", "HEAD").stdout.strip() == head_oid
+        assert staged.rr_args == ["--commit", head_oid]
+    finally:
+        remove_worktree(git_repo, staged.worktree)
 
 
 def test_seeded_plan_is_reviewed_as_a_file_argument(tmp_path, git_repo, head_oid):
