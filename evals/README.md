@@ -555,9 +555,12 @@ two different artifacts share one history.
 
 That leaves **one clean control in `plan` mode**, and the thinness is worth stating: the
 veto's per-case condition still applies to `p-004`, but one control is a narrow base to read
-a plan-mode false-positive rate off. The gap is deliberately left open. Writing a plan sound
-enough to survive as a control is the work whose failure produced `p-001`, and refilling the
-count in a hurry is how the next bad control gets in; it is a task of its own.
+a plan-mode false-positive rate off. The gap stays open, and under the suspension above it
+is no longer a debt: refilling it was only ever needed to restore a certification-grade
+plan-mode base, and nothing certifies now. Writing a plan sound enough to survive as a
+control is the work whose failure produced `p-001`, and refilling the count in a hurry is
+how the next bad control gets in — so the count stays at one until there is a reason to
+raise it, and that reason would arrive with the suspension being lifted, not before.
 
 Three cases cannot certify anything about plan-mode prompts, and the decision rules below say
 so: `plan-flaw` is two independent cases, well under the ≥5 the success criterion requires.
@@ -736,10 +739,53 @@ after seeing which threshold the change happens to clear. Changing a rule is a c
 own, argued on its own merits, made before the sweep it governs — never in the same change
 as the results it would reinterpret.
 
-### What this release can and cannot decide
+### Certification is suspended — this harness may block a change, not license one
 
-> **The gate is live for `dropped-guard` and `swallowed-error`. Every other class is
-> reported, never decided.**
+> **`adjudicate.py` still reports a verdict, and VETOED and NOT CERTIFIED still mean what
+> they say. CERTIFIED does not license shipping anything.** The asymmetry is the point:
+> evidence that a change makes reviews worse is worth acting on even when it is thin,
+> because acting on it is conservative. Evidence that a change makes reviews better has to
+> be much stronger before it licenses a change to what every user's review depends on, and
+> it currently is not.
+>
+> Four reasons, each established by a sweep rather than argued:
+>
+> - **No defect class has headroom.** `swallowed-error` is found 6/6 by the current prompts
+>   and `dropped-guard` 4/5. A class already at the ceiling cannot show an improvement, so
+>   the success criterion cannot be met by a better prompt — only by a luckier one. Measured
+>   twice, and confirmed after the review context was sealed, so it is not an artifact of
+>   the reviewer having been able to read the repository's later commits.
+> - **The decision rule has no computed error rate.** Neither the recall criterion nor the
+>   veto has a false-certification rate, a false-veto rate or a power analysis. Independent
+>   estimates put an A/A null with five cases somewhere around a one-in-six chance of
+>   satisfying the +2 rule by chance alone. A threshold rule whose error rate nobody has
+>   computed is not a gate.
+> - **The measuring instrument is itself uncalibrated.** Two adjudications of the *same
+>   findings on the same case* reached opposite conclusions — M3b recorded c-005's
+>   critical/high findings as false positives, M5 verified the same issues as real defects
+>   and invalidated the case for it. Everything downstream inherits that variance.
+> - **No independent party.** A confirmation set that the prompt author can see is not a
+>   holdout, and a cleanliness audit with one adjudicator has no second opinion. Both are
+>   structural, not scheduling: they cannot be fixed by doing the existing work more
+>   carefully.
+>
+> **What remains sound, and is why the harness is kept rather than retired.** Paired
+> comparison under identical conditions is unaffected by any of the above: both arms meet
+> the same corpus, the same backend and the same exposure, so a *difference* between them
+> is real evidence even when the absolute numbers are not calibrated. On that basis this
+> harness has already refused two prompt changes that read well — the stance arm (VETOED)
+> and the language-checks arm (NOT CERTIFIED) — and caught a defect that was silently
+> corrupting its own measurements. Strict-validity rates, the DO-NOT-FLAG tripwire, the
+> run-to-run noise floor and the veto all still measure what they claim.
+>
+> **Lifting the suspension** needs the four items above answered, not asserted: a defect
+> class screened to have headroom, published operating characteristics for the decision
+> rule, a calibrated adjudication procedure, and an independent holdout owner. Until then a
+> CERTIFIED verdict is one input to a human decision and never the decision itself.
+
+### Class depth — which classes the criterion could read at all
+
+> **Depth is necessary and, per the suspension above, no longer sufficient.**
 >
 > Both prerequisites of the success criterion are now met:
 >
@@ -762,10 +808,13 @@ as the results it would reinterpret.
 >   what it says, and five is the depth every threshold below was argued at. A sweep run
 >   shallower may be read, but it does not certify anything — `adjudicate.py` enforces that
 >   rather than trusting it (*Protocol depth*). It can still be **vetoed** at any depth.
-> - **`adjudicate.py`'s verdict is binding.** CERTIFIED, NOT CERTIFIED or VETOED is the
->   answer, not an input to a judgement made afterwards. A rule that turns out to be wrong
->   is changed in a commit of its own, argued on its own merits, before the next sweep —
->   never in the same change as the results it would reinterpret.
+> - **`adjudicate.py`'s blocking verdicts are binding.** VETOED and NOT CERTIFIED are the
+>   answer, not an input to a judgement made afterwards; CERTIFIED is evidence toward one,
+>   per the suspension above. A rule that turns out to be wrong is changed in a commit of
+>   its own, argued on its own merits, before the next sweep — never in the same change as
+>   the results it would reinterpret. That last rule is what the suspension itself obeys:
+>   it retracts a licence, and retracts it for every future sweep, without re-scoring a
+>   past one. M3b stays VETOED and M5 stays NOT CERTIFIED.
 >
 > What the harness could already do is unchanged: establish the run-to-run noise floor
 > (A/A), and apply the veto, which is computed on clean controls alone and is indifferent
@@ -841,6 +890,10 @@ Defect recall improves on at least one defect class that has **≥5 independent 
   defects found), since a relative improvement on zero is undefined rather than infinite.
 
 ### Promotion scope — which of a certified arm's changes may ship
+
+Every "licenses" in this section and the ones after it is a **ceiling on scope, not a
+grant**: it bounds what a certification could ever cover, and *Certification is suspended*
+above governs whether it covers anything at all. The two compose — the narrower wins.
 
 A verdict certifies the **modes the evidence came from**, not the arm as an object. An arm
 may change several mode bodies at once; a CERTIFIED verdict licenses promoting only those
