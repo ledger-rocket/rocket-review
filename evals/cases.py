@@ -9,6 +9,7 @@ handled differently.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -81,7 +82,8 @@ class Materialized:
 
     cwd: Path
     rr_args: list[str]
-    #: Set when a throwaway git worktree was created and must be torn down afterwards.
+    #: The staged directory that must be torn down after the review, or None when the case
+    #: is reviewed without isolation (seeded plans and standalone files).
     worktree: Path | None
 
 
@@ -224,75 +226,113 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     )
 
 
+def _clone_at(repo: Path, dst: Path, commit: str, case_id: str) -> None:
+    """Create an isolated shallow clone of `repo` whose history ends at `commit`.
+
+    `--depth=2` exactly: depth 1 would seal but drop the parent commit, and a case
+    reviewed with `git show <oid>` needs that parent to render the reviewed diff — at
+    depth 1 the whole tree would read as additions, describing a different review from
+    the one the case performs. The source is a file:// URL so no alternative clone's
+    refs or objects (including anything committed after `commit`) leak into the staged
+    snapshot's view.
+    """
+    init = _git(repo, "init", "-q", str(dst))
+    if init.returncode != 0:
+        raise CaseError(
+            f"{case_id}: could not initialise an isolated snapshot for {commit}: "
+            f"{init.stderr.strip()}"
+        )
+    try:
+        fetched = _git(
+            dst, "fetch", "-q", "--depth=2", repo.resolve().as_uri(), commit,
+        )
+        if fetched.returncode != 0:
+            raise CaseError(
+                f"{case_id}: commit {commit} could not be fetched into an isolated "
+                f"snapshot: {fetched.stderr.strip()}"
+            )
+        checked = _git(dst, "checkout", "-q", "--detach", "FETCH_HEAD")
+        if checked.returncode != 0:
+            raise CaseError(
+                f"{case_id}: could not check out {commit} in the isolated snapshot: "
+                f"{checked.stderr.strip()}"
+            )
+    except CaseError:
+        shutil.rmtree(dst, ignore_errors=True)
+        raise
+
+
 def materialize(case: Case, repo: Path, workdir: Path) -> Materialized:
     """Stage a case so `rr` reviews it the way the developer who hit it would have.
 
-    Mutant cases get a detached worktree at `repo_commit` with the patch applied to the
-    working tree. A `diff`-mode mutant is reviewed with `--diff`, which is the faithful
-    shape: the agentic backends are told to run `git diff HEAD` and can navigate the whole
+    Every snapshot-based case — mutant and merged-pr alike — is materialized into its own
+    isolated shallow clone of `repo`, detached at `repo_commit`, taken two commits deep.
+    The clone, not the live checkout, is what a backend runs in, so nothing committed in
+    `repo` after `repo_commit` is readable from it; an agentic backend told to run
+    `git diff HEAD` or `git show <oid>` sees only the snapshot the case pins and its
+    parent. Two commits deep is what lets `git show <oid>` render the reviewed diff — at
+    one commit deep the parent is missing and the whole tree reads as additions.
+
+    A `diff`-mode mutant leaves the patch uncommitted in the staged clone, which is the
+    faithful shape: the backends are told to run `git diff HEAD` and can navigate the whole
     snapshot around the change, exactly as on a real uncommitted edit. Feeding the patch on
     stdin instead would hand every backend the same bytes but strip the repository context
     that `rr`'s primary mode depends on, so a prompt change affecting repo navigation would
     not show up.
 
-    A `code`-mode mutant is the same worktree reviewed as a whole file — `rr <defect.file>`
+    A `code`-mode mutant is the same snapshot reviewed as a whole file — `rr <defect.file>`
     — which is what asks whether the defect is still found without a diff pointing at it.
-    There the patch is *committed* inside the worktree first: a backend under codex's
-    read-only sandbox may still run `git diff HEAD`, and an uncommitted mutation would
-    hand it the very diff this mode exists to withhold. Committing makes that diff empty,
-    so the two modes differ in what the reviewer can see and not only in which prompt ran.
-    The path is passed repo-relative so findings cite the same path the manifest and
-    `tier1`'s resolver use; an absolute path into a throwaway worktree would resolve
-    against nothing.
+    There the patch is *committed* inside the staged clone first: a backend under codex's
+    read-only sandbox may still run `git diff HEAD`, and an uncommitted mutation would hand
+    it the very diff this mode exists to withhold. Committing makes that diff empty, so the
+    two modes differ in what the reviewer can see and not only in which prompt ran. The
+    path is passed repo-relative so findings cite the same path the manifest and `tier1`'s
+    resolver use; an absolute path into a throwaway snapshot would resolve against nothing.
 
-    Merged-PR cases need no worktree: a commit is immutable, so `--commit <oid>` in the
-    repo itself is already reproducible, and it exercises rr's `git show` path.
+    A merged-pr case is the same isolated clone reviewed with `--commit <oid>`, which
+    exercises rr's `git show` path against a fixed snapshot rather than against whatever
+    `main` has advanced to.
 
     Seeded plans and standalone code files are reviewed from the checkout as ordinary file
     arguments; `repo_commit` is provenance for them rather than a checkout target, since
     the artifact under review is not a repository snapshot.
     """
-    if case.source == "mutant":
+    if case.source in ("mutant", "merged-pr"):
+        staged = workdir / f"case-{case.id}"
+        _clone_at(repo, staged, case.repo_commit, case.id)
+        if case.source == "merged-pr":
+            return Materialized(
+                cwd=staged, rr_args=["--commit", case.repo_commit], worktree=staged,
+            )
         assert case.diff is not None
         patch = (case.root / case.diff).resolve()
         if not patch.is_file():
+            shutil.rmtree(staged, ignore_errors=True)
             raise CaseError(f"{case.id}: patch {patch} not found")
-        worktree = workdir / f"case-{case.id}"
-        added = _git(repo, "worktree", "add", "--detach", str(worktree), case.repo_commit)
-        if added.returncode != 0:
-            raise CaseError(
-                f"{case.id}: could not create a worktree at {case.repo_commit}: "
-                f"{added.stderr.strip()}"
-            )
-        applied = _git(worktree, "apply", "--whitespace=nowarn", str(patch))
+        applied = _git(staged, "apply", "--whitespace=nowarn", str(patch))
         if applied.returncode != 0:
-            remove_worktree(repo, worktree)
+            shutil.rmtree(staged, ignore_errors=True)
             raise CaseError(
                 f"{case.id}: patch {case.diff} does not apply at {case.repo_commit}: "
                 f"{applied.stderr.strip()}"
             )
         if case.mode == "code":
             assert case.defect is not None  # load_case rejects a code mutant without one
-            # Identity is supplied inline: the worktree is thrown away, and a machine
-            # running this may have no git user configured at all.
+            # Identity is supplied inline: the staged snapshot is thrown away, and a
+            # machine running this may have no git user configured at all.
             committed = _git(
-                worktree,
+                staged,
                 "-c", "user.email=evals@invalid", "-c", "user.name=rocket-review evals",
                 "commit", "--quiet", "--all", "--message", f"eval case {case.id}",
             )
             if committed.returncode != 0:
-                remove_worktree(repo, worktree)
+                shutil.rmtree(staged, ignore_errors=True)
                 raise CaseError(
-                    f"{case.id}: could not commit the patch in the worktree, so "
+                    f"{case.id}: could not commit the patch in the snapshot, so "
                     f"`git diff HEAD` would still expose it: {committed.stderr.strip()}"
                 )
-            return Materialized(
-                cwd=worktree, rr_args=[case.defect.file], worktree=worktree,
-            )
-        return Materialized(cwd=worktree, rr_args=["--diff"], worktree=worktree)
-
-    if case.source == "merged-pr":
-        return Materialized(cwd=repo, rr_args=["--commit", case.repo_commit], worktree=None)
+            return Materialized(cwd=staged, rr_args=[case.defect.file], worktree=staged)
+        return Materialized(cwd=staged, rr_args=["--diff"], worktree=staged)
 
     assert case.path is not None
     artifact = (case.root / case.path).resolve()
@@ -302,17 +342,25 @@ def materialize(case: Case, repo: Path, workdir: Path) -> Materialized:
 
 
 def remove_worktree(repo: Path, worktree: Path) -> None:
-    """Tear down a staged worktree, saying so when it could not be torn down.
+    """Tear down a staged directory, saying so when it could not be torn down.
 
     Never raises: this runs in a `finally` alongside other cleanups, and one stuck
-    worktree must not stop the rest. But it must not be silent either — a failed removal
-    leaves admin state behind that only a manual `git worktree prune` clears.
+    directory must not stop the rest. But it must not be silent either — a failed removal
+    leaves a clone behind that would leak one per case per sweep.
     """
-    # --force because the mutant patch leaves the worktree dirty by construction.
-    removed = _git(repo, "worktree", "remove", "--force", str(worktree))
-    if removed.returncode != 0:
+    try:
+        # A linked worktree carries a `.git` *file* pointing into the parent repo's admin
+        # state, so it must be deregistered as well as deleted — an isolated clone (`git
+        # init`) carries a whole `.git` directory and only needs the directory gone.
+        if (worktree / ".git").is_file():
+            removed = _git(repo, "worktree", "remove", "--force", str(worktree))
+            if removed.returncode != 0:
+                raise RuntimeError(removed.stderr.strip())
+        else:
+            shutil.rmtree(worktree)
+    except Exception as e:
         print(
-            f"Warning: could not remove worktree {worktree}: {removed.stderr.strip()}\n"
+            f"Warning: could not remove worktree {worktree}: {e}\n"
             f"         once it is gone, run `git -C {repo} worktree prune`.",
             file=sys.stderr,
         )
