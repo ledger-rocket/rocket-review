@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rocket-review"
-version = "0.3.1"
+version = "0.3.2"
 description = "Second-opinion code and plan reviews from Codex, Claude Code, opencode, or the OpenAI API — one CLI"
 requires-python = ">=3.13"
 license = "Apache-2.0"
