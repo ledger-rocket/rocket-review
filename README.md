@@ -69,18 +69,26 @@ flagging the regression — not a pattern match on the diff.
 pipx install rocket-review
 ```
 
+Or with Homebrew, which brings its own Python:
+
+```bash
+brew install ledger-rocket/tap/rocket-review
+```
+
 Or the latest from source:
 
 ```bash
 pipx install git+https://github.com/ledger-rocket/rocket-review.git
 ```
 
-Requires Python 3.13+ and at least one backend:
+Requires Python 3.13+ — the Homebrew formula vendors it, so that floor only
+applies to the pipx and from-source routes. Either way you need at least one
+backend, which no install method provides:
 
 - [Codex CLI](https://github.com/openai/codex) (default for plan reviews)
 - [Claude Code](https://claude.com/claude-code) (default for code and diff reviews)
 - [opencode](https://opencode.ai) (`--backend opencode` — any provider, including local models; **experimental**, see below)
-- or none of the above: `--backend api` (or the `--api` shorthand) calls the OpenAI API directly — set `OPENAI_API_KEY` and install the SDK extra: `pipx install 'rocket-review[api]'` (or `pipx inject rocket-review openai` into an existing install)
+- or none of the above: `--backend api` (or the `--api` shorthand) calls the OpenAI API directly — set `OPENAI_API_KEY` and install the SDK extra: `pipx install 'rocket-review[api]'` (or `pipx inject rocket-review openai` into an existing install). The Homebrew formula ships the base package only, so `--backend api` needs one of the pipx routes.
 
 `--pr` also needs the [gh CLI](https://cli.github.com).
 
