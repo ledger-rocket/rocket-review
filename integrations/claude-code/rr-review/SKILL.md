@@ -1,6 +1,6 @@
 ---
 name: rr-review
-description: Get a cross-vendor second-opinion review via rr (rocket-review) on a plan, diff, commit, PR, or file — and triage the findings. Use when the user says "rr", "review this", "get a review", "second opinion", or before pushing any non-trivial change or building from a non-trivial plan.
+description: Get a second-opinion review via rr (rocket-review) on a plan, diff, commit, PR, or file — and triage the findings. Use when the user says "rr", "review this", "get a review", "second opinion", or before pushing any non-trivial change or building from a non-trivial plan.
 ---
 
 # Second-opinion review via rr
@@ -9,19 +9,22 @@ description: Get a cross-vendor second-opinion review via rr (rocket-review) on 
 returns prose or a JSON findings envelope. The agentic backends run read-only
 inside the project, so they open imports, tests, and related files before
 judging (the `api` backend is the exception — it sees only what is sent).
-Backend defaults are per-mode: plans go to codex, code and diffs to claude —
-and since this agent *is* Claude, pass `--backend codex` (or
-`--backend codex,claude` for both opinions) on code, diff, commit, and PR
-reviews so the second opinion actually comes from a different vendor. Full
-flag reference: `rr --help`; the README in the rocket-review repository covers
-backends, config files, and the security model.
+The reviewer runs in a fresh session that knows nothing of the conversation
+that produced the change — it judges what the code says, not what the author
+meant — so the per-mode defaults (plans → codex, code and diffs → claude,
+measured on rocket-review's own eval corpus) are the right starting point
+even when the reviewing model's vendor matches this agent's. For a
+cross-vendor read on high-stakes changes — same-family models can share
+blind spots — add `--backend codex,claude` and weigh the disagreements. Full
+flag reference: `rr --help`; the README in the rocket-review repository
+covers backends, config files, and the security model.
 
 ## When to run
 
-- **Before pushing any non-trivial change** — `rr --diff --backend codex` (or
-  `--staged`, `--commit`, `--pr`, whichever fits) catches issues before they
-  leave the machine. Skip it for trivial changes: formatting, doc typos,
-  mechanical renames, one-line config bumps.
+- **Before pushing any non-trivial change** — `rr --diff` (or `--staged`,
+  `--commit`, `--pr`, whichever fits) catches issues before they leave the
+  machine. Skip it for trivial changes: formatting, doc typos, mechanical
+  renames, one-line config bumps.
 - **Plans too** — a review of a plan or design doc *before* building is worth
   at least as much as a review of the code after: `rr plan.md --docs`.
 - If the project has a standards doc (`llms.txt`, `AGENTS.md`, `CLAUDE.md`),
@@ -42,28 +45,24 @@ review"):
 3. If it is **ambiguous** — uncommitted changes AND a recent PR, or several
    plausible targets — ask which one, rather than guessing.
 
-Whatever the target, carry the standing flags from the sections below:
-`--backend codex` on everything but plans, and `--docs` when the project has a
-standards doc.
+Whatever the target, add `--docs` when the project has a standards doc.
 
 ## Commands
 
 ```bash
-rr plan.md --docs                          # review a plan against project standards
-rr --diff --docs --backend codex           # review uncommitted changes to tracked files
-rr --staged --docs --backend codex         # review staged changes only
-rr --commit SHA --docs --backend codex     # review a specific commit
-rr --pr 123 --docs --backend codex         # review a GitHub PR
-rr src/auth.py --docs --backend codex      # review specific files
-rr --diff --backend codex --prompt "focus on the locking"   # add a specific focus
-rr --diff --backend codex,claude           # two opinions, side by side
-rr --diff --backend codex --json --fail-on high             # machine-readable, gateable
+rr plan.md --docs                 # review a plan against project standards
+rr --diff --docs                  # review uncommitted changes to tracked files
+rr --staged --docs                # review staged changes only
+rr --commit SHA --docs            # review a specific commit
+rr --pr 123 --docs                # review a GitHub PR
+rr src/auth.py --docs             # review specific files
+rr --diff --prompt "focus on the locking"   # add a specific focus
+rr --diff --backend codex,claude  # two opinions, side by side
+rr --diff --json --fail-on high   # machine-readable, gateable
 ```
 
-- `--backend codex` keeps the diff-shaped reviews cross-vendor (their built-in
-  default is claude). A project `.rocket-review.toml` with
-  `[backends]` `code = "codex"` / `diff = "codex"` makes that the default, and
-  then the flag can be dropped.
+- The mode picks the reviewer — leave `--backend` alone unless you want the
+  cross-vendor pair (`codex,claude`) on a high-stakes change.
 - `--diff` is `git diff HEAD`, so untracked new files are invisible to it —
   `git add -N <paths>` first, or review them directly (`rr <paths>`).
 - `--docs` with no path auto-discovers `llms.txt` / `AGENTS.md` / `CLAUDE.md`

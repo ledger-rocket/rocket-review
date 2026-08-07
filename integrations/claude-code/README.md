@@ -28,17 +28,17 @@ project's):
 ```markdown
 ## Second-opinion review (rr)
 
-`rr` (rocket-review) sends a plan, diff, commit, or PR to an independent
-reviewer. Before pushing any non-trivial change, run
-`rr --diff --backend codex` (or `--commit`/`--pr` as fits — the codex backend
-keeps the review cross-vendor, since the built-in diff default is claude) and
-address the findings; review plans the same way before building
-(`rr plan.md`). Skip it for trivial changes — formatting, doc typos,
-mechanical renames. If the project has a standards doc (`llms.txt`,
-`AGENTS.md`, `CLAUDE.md`), add `--docs` so the review checks the project's
-own rules. Verify each finding against the code before fixing it — and before
-dismissing it; the bar is the same in both directions. Use the `rr-review`
-skill for the details.
+`rr` (rocket-review) sends a plan, diff, commit, or PR to a reviewer running
+in a fresh session, with no memory of the conversation that produced the
+change and no stake in its choices. Before pushing any non-trivial change,
+run `rr --diff` (or `--commit`/`--pr` as fits) and address the findings;
+review plans the same way before building (`rr plan.md`). Skip it for
+trivial changes — formatting, doc typos, mechanical renames. If the project
+has a standards doc (`llms.txt`, `AGENTS.md`, `CLAUDE.md`), add `--docs` so
+the review checks the project's own rules; on high-stakes changes add
+`--backend codex,claude` for a cross-vendor read. Verify each finding against
+the code before fixing it — and before dismissing it; the bar is the same in
+both directions. Use the `rr-review` skill for the details.
 ```
 
 ## Why the rule is shaped this way
