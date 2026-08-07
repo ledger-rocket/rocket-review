@@ -82,8 +82,8 @@ pipx install git+https://github.com/ledger-rocket/rocket-review.git
 ```
 
 Requires Python 3.13+ — the Homebrew formula vendors it, so that floor only
-applies to the pipx and from-source routes. Either way you need at least one
-backend, which no install method provides:
+applies to the pipx and from-source routes. Whichever route you take, you also
+need at least one backend — no install method brings one:
 
 - [Codex CLI](https://github.com/openai/codex) (default for plan reviews)
 - [Claude Code](https://claude.com/claude-code) (default for code and diff reviews)
@@ -205,7 +205,7 @@ rr --staged --json --fail-on high && git commit   # block the commit on high+ fi
 - **`schema_version`** (currently the string `"1"`) tags the envelope shape. It bumps
   only on a breaking change — a field removed, or a type or meaning changed — so new
   fields can appear without one. Match it exactly against versions you know, treat
-  anything else as unsupported, and ignore keys you don't recognise. No numeric ordering
+  anything else as unsupported, and ignore keys you don't recognize. No numeric ordering
   is implied, which is why it is a string.
 - **Long output is truncated** at 4000 chars: `raw` keeps the head plus a marker naming
   the full length. This bounds the envelope and keeps review text — which may quote
@@ -234,8 +234,9 @@ rr src/auth.py --docs docs/standards.md docs/smells.md
 Relative markdown links inside the docs are followed one level, so an index file
 (like `llms.txt`) pulls in everything it references.
 
-**When you ask for docs and there are none, that is an error — except as a standing
-preference.** The three ways to ask differ only in that:
+**Asking for docs when the project has none is an error — unless the ask is a
+standing preference rather than a request.** The three ways to ask differ only
+on that point:
 
 - `--docs` (bare) — errors if none of `llms.txt` / `AGENTS.md` / `CLAUDE.md` is in the
   current directory. Pass explicit paths when your standards live elsewhere.
@@ -406,12 +407,17 @@ report a vulnerability.
 
 ## Agent integration
 
-Drop into your `CLAUDE.md` / `AGENTS.md`:
+The one-liner for any agent's `CLAUDE.md` / `AGENTS.md`:
 
 ```markdown
 Before pushing non-trivial changes, run `rr --diff --docs` and address the findings.
 For plans, run `rr plan.md --docs` before implementing. Use a 900000ms timeout.
 ```
+
+For Claude Code specifically,
+[`integrations/claude-code/`](integrations/claude-code/) ships a ready-made
+skill (target auto-detection, flags, timeouts, findings triage) and a fuller
+`CLAUDE.md` rule stating when to reach for a second opinion at all.
 
 ## Notes
 
