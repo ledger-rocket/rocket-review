@@ -7,7 +7,7 @@
 
 **`rr` — a second opinion on your code, from a model that didn't write it.**
 
-> **v0.1 — experimental.** Interfaces and flags may change. Read
+> **Pre-1.0.** Interfaces and flags may change between minor versions. Read
 > [Security & data flow](#security--data-flow) before pointing it at anything sensitive.
 
 One small CLI that sends your plan, diff, commit, or PR to an agentic reviewer
@@ -88,7 +88,12 @@ backend, which no install method provides:
 - [Codex CLI](https://github.com/openai/codex) (default for plan reviews)
 - [Claude Code](https://claude.com/claude-code) (default for code and diff reviews)
 - [opencode](https://opencode.ai) (`--backend opencode` — any provider, including local models; **experimental**, see below)
-- or none of the above: `--backend api` (or the `--api` shorthand) calls the OpenAI API directly — set `OPENAI_API_KEY` and install the SDK extra: `pipx install 'rocket-review[api]'` (or `pipx inject rocket-review openai` into an existing install). The Homebrew formula ships the base package only, so `--backend api` needs one of the pipx routes.
+- or none of the above — `--backend api` (shorthand `--api`) calls the OpenAI API
+  directly, with no agent CLI. It needs three things:
+  - `OPENAI_API_KEY` in your environment
+  - the SDK extra: `pipx install 'rocket-review[api]'`, or `pipx inject rocket-review
+    openai` into an existing install
+  - a pipx install — the Homebrew formula ships the base package only
 
 `--pr` also needs the [gh CLI](https://cli.github.com).
 
@@ -149,20 +154,27 @@ rr --diff --backend codex:gpt-5.6-sol,claude:claude-opus-4-8
 rr --diff --effort high                        # more reasoning effort (per-backend flag)
 ```
 
-Model names: the codex backend passes no `-m`, so it honors your codex default
-(set `model` in `~/.codex/config.toml`). On ChatGPT plans use `gpt-5.6-sol`, the
-ChatGPT-account-accessible 5.6 variant — codex signed into a ChatGPT account rejects
-the bare `gpt-5.6` alias and `gpt-5.6-codex`. The `--backend api` path (API-key auth)
-defaults to `gpt-5.6-terra` — balanced cost/quality. Use `--model gpt-5.6-sol` for
-max quality (flagship pricing) or `gpt-5.6-luna` for the cheapest tier. rr always
-uses explicit, suffixed model names and never relies on the bare `gpt-5.6` alias,
-which points at the flagship today but can be remapped by OpenAI.
-Use `--effort` to set reasoning effort; values differ per backend (codex/api accept
-e.g. `minimal|low|medium|high`, claude `low|medium|high|xhigh|max`) and an unsupported
-value fails loudly at the backend. opencode has no effort flag, so `--effort` errors
-if opencode is among the selected backends. Heavy `--effort high` reviews — especially
-on reasoning models — can outrun the default 900s (15 min) subprocess timeout; raise it
-with `--timeout 1800`.
+**Model names.**
+
+- **codex** passes no `-m`, so it honors your own codex default (`model` in
+  `~/.codex/config.toml`). On ChatGPT plans use `gpt-5.6-sol`, the
+  ChatGPT-account-accessible 5.6 variant — codex signed into a ChatGPT account rejects
+  both the bare `gpt-5.6` alias and `gpt-5.6-codex`.
+- **api** (API-key auth) defaults to `gpt-5.6-terra`, balanced on cost and quality.
+  `--model gpt-5.6-sol` buys max quality at flagship pricing; `gpt-5.6-luna` is the
+  cheapest tier.
+- rr always names models explicitly, with the suffix, and never relies on the bare
+  `gpt-5.6` alias — it points at the flagship today but OpenAI can remap it.
+
+**Reasoning effort and timeouts.**
+
+- `--effort` sets reasoning effort, and the accepted values differ by backend: codex and
+  api take `minimal|low|medium|high`, claude takes `low|medium|high|xhigh|max`. An
+  unsupported value fails loudly at the backend rather than being silently ignored.
+- opencode has no effort flag at all, so `--effort` errors if opencode is among the
+  selected backends.
+- Heavy `--effort high` reviews — especially on reasoning models — can outrun the default
+  900s (15 min) subprocess timeout. Raise it with `--timeout 1800`.
 
 The Codex and Claude backends run agentically in read-only mode: they navigate your
 project — imports, tests, related files — before judging. That context is what makes the
@@ -185,20 +197,20 @@ rr --diff --json | jq '.findings[] | {severity, title, backend}'
 rr --staged --json --fail-on high && git commit   # block the commit on high+ findings
 ```
 
-Every finding carries `severity, title, file, line, why, fix, backend, model`.
-The envelope leads with a `summary` block — `findings_total`, per-severity counts
-(explicit zeros for absent severities), `worst_severity`, per-backend verdicts, and
-the `gate` result when `--fail-on` is set — so an agent gets the counts and the
-gate answer without parsing the findings array. A top-level `schema_version`
-(currently the string `"1"`) tags the envelope shape: it bumps only on a breaking
-change — a field removed, a type or meaning changed — so new fields can appear
-without a bump and consumers should ignore keys they don't know. Consumers should
-match the value exactly against known versions (no numeric ordering is implied)
-and treat anything else as unsupported. Backend output over 4000 chars is
-truncated inline — `raw` keeps the head plus a marker naming the full length — so the
-envelope stays bounded and no review text (which may quote proprietary code) is written
-to disk; pass `--full` to inline the untruncated output instead. Parse failures and
-backend errors fail the gate closed.
+- **Findings** each carry `severity, title, file, line, why, fix, backend, model`.
+- **A `summary` block leads the envelope** — `findings_total`, per-severity counts (with
+  explicit zeros for absent severities), `worst_severity`, per-backend verdicts, and the
+  `gate` result when `--fail-on` is set. An agent gets the counts and the gate answer
+  without parsing the findings array.
+- **`schema_version`** (currently the string `"1"`) tags the envelope shape. It bumps
+  only on a breaking change — a field removed, or a type or meaning changed — so new
+  fields can appear without one. Match it exactly against versions you know, treat
+  anything else as unsupported, and ignore keys you don't recognise. No numeric ordering
+  is implied, which is why it is a string.
+- **Long output is truncated** at 4000 chars: `raw` keeps the head plus a marker naming
+  the full length. This bounds the envelope and keeps review text — which may quote
+  proprietary code — off disk. `--full` inlines the untruncated output instead.
+- **Failures fail the gate closed**, both parse failures and backend errors.
 
 ## Review modes
 
@@ -220,13 +232,18 @@ rr src/auth.py --docs docs/standards.md docs/smells.md
 ```
 
 Relative markdown links inside the docs are followed one level, so an index file
-(like `llms.txt`) pulls in everything it references. Bare `--docs` errors if none of
-`llms.txt` / `AGENTS.md` / `CLAUDE.md` exist in the current directory — pass explicit
-paths when your standards live elsewhere. `--llms [PATH]` is kept as a compatibility
-alias for `--docs [PATH]`: bare, it takes the project's `llms.txt` if the repository
-carries one and errors if it cannot — like a bare `--docs`, and unlike a config file's
-`docs = true`, which is a standing preference and stays silent; with a path, it reads
-what you name.
+(like `llms.txt`) pulls in everything it references.
+
+**When you ask for docs and there are none, that is an error — except as a standing
+preference.** The three ways to ask differ only in that:
+
+- `--docs` (bare) — errors if none of `llms.txt` / `AGENTS.md` / `CLAUDE.md` is in the
+  current directory. Pass explicit paths when your standards live elsewhere.
+- `--llms [PATH]` — a compatibility alias for `--docs [PATH]`, identical in both forms:
+  bare it takes the repository's `llms.txt` and errors if there isn't one; with a path it
+  reads what you name.
+- `docs = true` in a [config file](#config-file) — a standing preference rather than a
+  request, so it stays **silent** when a project has no standards doc.
 
 Inside a git repository, an auto-discovered doc and every link followed out of any doc
 must be a file the repository tracks — the repo, not you, chose those, and a standards
