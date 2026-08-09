@@ -5,7 +5,7 @@ name: CI
 # secrets and `contents: read` only — safe to run on fork PRs.
 #
 # Gates: ruff (lint), mypy (type-check), pytest (unit suite), package build +
-# import smoke, and yamllint.
+# import smoke, yamllint, and a pip-audit dependency vulnerability scan.
 #
 # The `CI Success` aggregator is the single required status check in the
 # branch ruleset, so gates can be added or removed above without a ruleset
@@ -85,6 +85,45 @@ jobs:
       - name: Yamllint
         run: uvx yamllint@1.37.1 .
 
+  vuln-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+      # `dependencies` is empty and there is no lockfile, so there is no pinned
+      # set on disk to audit — it has to be resolved first. `[dev]` is the widest
+      # target: it pulls in `[api]`, so every package a user can install is
+      # covered, plus the linters that run here as CI-executed code. A dev-only
+      # advisory blocking a PR is the intended trade; `--ignore-vuln ID` is the
+      # release valve if one ever lands with no fix available.
+      #
+      # Resolving instead of reading a lockfile means the audit set tracks what
+      # PyPI would give a user today, not what was pinned months ago. The cost is
+      # that an upstream release can turn this red on a PR that changed nothing —
+      # correct for a security gate, and the reason it is a separate job rather
+      # than a step bolted onto `test`, where a red pytest would hide it and a
+      # CVE would report as a test failure.
+      - name: Resolve the dev install set
+        run: |
+          uv venv
+          uv pip install -e ".[dev]"
+          uv pip freeze --exclude-editable > "${RUNNER_TEMP}/audit-requirements.txt"
+      # pip-audit comes straight from PyPI rather than through a wrapper action.
+      # The wrapper runs this same command underneath, `uvx <tool>@<version>` is
+      # how every other gate in this file pins its tooling, and it keeps the
+      # third-party action count of a fork-PR-safe workflow at zero.
+      #
+      # -s osv queries the OSV database, which covers advisories PyPI's own
+      # service does not. --no-deps audits the literal pins from the freeze
+      # instead of re-resolving. --strict exits non-zero on a scan error, not
+      # just on a finding, so a broken audit cannot pass as a clean one.
+      - name: Audit for known vulnerabilities
+        run: >-
+          uvx pip-audit@2.10.1 --strict --no-deps -s osv
+          --requirement "${RUNNER_TEMP}/audit-requirements.txt"
+
   # Single green/red target for branch protection. The ruleset requires only
   # this check by name. Every gate above runs unconditionally, so a `skipped`
   # result is never expected — it means the run was cancelled or a gate was
@@ -92,7 +131,7 @@ jobs:
   ci-success:
     name: CI Success
     if: ${{ always() }}
-    needs: [lint, typecheck, test, build, yaml-lint]
+    needs: [lint, typecheck, test, build, yaml-lint, vuln-scan]
     runs-on: ubuntu-latest
     steps:
       - name: Require every gate to have passed
