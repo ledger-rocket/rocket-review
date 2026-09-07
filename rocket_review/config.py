@@ -37,7 +37,15 @@ FLAG_DEFAULTS: dict[str, Any] = {
     "json": False,
     "full": False,
     "docs": None,
+    "codex_sandbox": "read-only",
 }
+
+# What `codex exec -s` accepts. read-only is the built-in default: a review needs to read
+# the prompt file and the repository, nothing more. The wider modes exist for hosts where
+# codex's own sandbox cannot start at all (a container that may not create user namespaces
+# fails with "bwrap: No permissions to create a new namespace") and the surrounding
+# environment is the boundary instead.
+CODEX_SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 
 FLAG_KEYS = tuple(FLAG_DEFAULTS)
 ACCEPTED_KEYS = (*FLAG_KEYS, "backends", "models")
@@ -73,6 +81,8 @@ class Settings:
     full: bool
     #: None for no docs, [] for auto-discovery (bare --docs), else the paths to read.
     docs: list[str] | None
+    #: `codex exec -s <mode>`; one of CODEX_SANDBOX_MODES.
+    codex_sandbox: str
     #: mode -> backend name, with the built-in table already folded in.
     backends: dict[str, str]
     #: backend name -> model, i.e. what `--backend name:model` pins.
@@ -140,9 +150,18 @@ def load_file(path: Path, *, repo_supplied: bool) -> Layer:
         raise ConfigError(f"{path} is not valid UTF-8: {e}") from e
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"invalid TOML in {path}: {e}") from e
+    values = _validate(path, data)
+    if repo_supplied and "codex_sandbox" in values:
+        # The project file comes from the repository under review. Letting it widen the
+        # sandbox the reviewer runs in would let the code being reviewed choose how much
+        # of the reviewer's machine it may touch. The user file and the flag decide this.
+        raise ConfigError(
+            f"{path}: codex_sandbox is not accepted in a project file; "
+            "set it in the user config or pass --codex-sandbox."
+        )
     return Layer(
         path=path,
-        values=_validate(path, data),
+        values=values,
         repo_supplied=repo_supplied,
     )
 
@@ -229,6 +248,8 @@ def _validate(path: Path, data: dict[str, Any]) -> dict[str, Any]:
             values[key] = _bool(path, key, data[key])
     if "docs" in data:
         values["docs"] = _docs(path, data["docs"])
+    if "codex_sandbox" in data:
+        values["codex_sandbox"] = _codex_sandbox(path, data["codex_sandbox"])
     if "backends" in data:
         values["backends"] = _backends(path, data["backends"])
     if "models" in data:
@@ -252,6 +273,15 @@ def _string(path: Path, key: str, value: Any) -> str:
 def _bool(path: Path, key: str, value: Any) -> bool:
     if not isinstance(value, bool):
         raise ConfigError(f"{path}: {key} must be true or false, got {value!r}.")
+    return value
+
+
+def _codex_sandbox(path: Path, value: Any) -> str:
+    if not isinstance(value, str) or value not in CODEX_SANDBOX_MODES:
+        raise ConfigError(
+            f"{path}: codex_sandbox must be one of {', '.join(CODEX_SANDBOX_MODES)}, "
+            f"got {value!r}"
+        )
     return value
 
 
