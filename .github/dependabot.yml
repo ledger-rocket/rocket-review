@@ -1,0 +1,94 @@
+---
+# Dependabot version updates. Hand-maintained: edit this file in place.
+#
+# Two streams — the Python packages declared in pyproject.toml, and the
+# third-party Actions the workflows pin. Nothing merges on its own; every PR
+# opened here is reviewed and merged by a person.
+#
+# `package-ecosystem: uv` is right even though there is no uv.lock: uv is what
+# CI installs and builds with, and the updater is satisfied by pyproject.toml
+# alone. It reads `[project.optional-dependencies]`, which is where every
+# dependency this project has lives — `[project].dependencies` is empty on
+# purpose, so a plain `pip install rocket-review` pulls nothing extra in.
+
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    # Sit out the window in which a compromised or broken release is usually
+    # caught and yanked, and scale the wait to how much the bump can break: a
+    # major waits a month, a patch three days.
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 10
+    ignore:
+      # These three are pinned twice: in the `dev` extra, and again in the
+      # workflow step that runs them (`uvx ruff@…`, `pip install ruff==…`).
+      # Dependabot only edits pyproject.toml, so a bump here would leave the
+      # gates running the old version — CI would pass without ever seeing the
+      # new one, and the manifest pin would be a lie. Move both halves by hand,
+      # in one change, and fix whatever new rules the bump brings with it.
+      - dependency-name: "ruff"
+      - dependency-name: "mypy"
+      - dependency-name: "yamllint"
+      # The `dev` extra depends on this project's own `api` extra, so the
+      # openai pin lives in one place. A resolver reads that as the project
+      # being built, not as a release off PyPI; the ignore keeps Dependabot
+      # from reading it the other way and proposing a self-bump.
+      - dependency-name: "rocket-review"
+    groups:
+      # Batched by semver level rather than all into one PR, so a patch sweep
+      # stays a quick read while anything that can change behaviour is judged
+      # on its own. The two `update-types` lists are disjoint, so no bump can
+      # land in both PRs.
+      #
+      # The semver label is the publisher's claim, not a guarantee — a 0.x
+      # release is labelled patch and promises nothing about compatibility.
+      # What makes the patch batch cheap to review is the cooldown above plus a
+      # green CI run, not the label on its own.
+      external-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+      external:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "major"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    cooldown:
+      # Actions are not versioned by semver, and the schema accepts only
+      # default-days for them — the ladder above has no effect here.
+      default-days: 7
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+    groups:
+      # Deliberately not split by semver the way the Python groups are: Action
+      # bumps are few and mostly rewrite a pinned SHA, so one batched PR is
+      # easier to audit than three.
+      #
+      # Audit it properly. An Action is executable code that runs in CI holding
+      # the workflow's token, and a version number says nothing about what the
+      # new SHA actually points at. Read the upstream diff whatever level the
+      # bump claims to be.
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
