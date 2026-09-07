@@ -746,6 +746,13 @@ def _run():
              "Not supported by opencode; invalid values fail loudly downstream.",
     )
     parser.add_argument(
+        "--codex-sandbox", default=None, choices=config.CODEX_SANDBOX_MODES, metavar="MODE",
+        help="Sandbox codex runs the review in: read-only (default), workspace-write, or "
+             "danger-full-access for a host where codex's own sandbox cannot start and the "
+             "surrounding environment is the boundary. Config key: codex_sandbox (user "
+             "file only).",
+    )
+    parser.add_argument(
         "--timeout", type=positive_int, default=None, metavar="SECONDS",
         help="Per-backend subprocess timeout in seconds (default: 900 = 15 min). "
              "Raise for slow high-effort reviews, e.g. --timeout 1800.",
@@ -962,6 +969,7 @@ def _run():
         json_output=settings.json,
         effort=settings.effort,
         timeout=settings.timeout,
+        codex_sandbox=settings.codex_sandbox,
         foreign_repo=bool(args.repo),
         changed_paths=changed_paths,
     )

@@ -19,7 +19,7 @@ def review(job: ReviewJob) -> str:
         outfile = Path(f.name)
     schema_file = None
     try:
-        cmd = ["codex", "exec", "-s", "read-only", "-o", str(outfile)]
+        cmd = ["codex", "exec", "-s", job.codex_sandbox, "-o", str(outfile)]
         model = job.model or DEFAULT_MODEL
         if model:
             cmd += ["-m", model]

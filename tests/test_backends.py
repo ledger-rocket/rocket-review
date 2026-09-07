@@ -38,6 +38,21 @@ def test_codex_builds_readonly_exec_command(monkeypatch, tmp_path):
     assert "-m" in captured["cmd"] and "gpt-5.5" in captured["cmd"]
 
 
+def test_codex_sandbox_comes_from_the_job(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"] = cmd
+        out = cmd[cmd.index("-o") + 1]
+        with open(out, "w") as f:
+            f.write("REVIEW TEXT")
+        return ""
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    codex.review(job(codex_sandbox="danger-full-access"))
+    assert captured["cmd"][:4] == ["codex", "exec", "-s", "danger-full-access"]
+
+
 def test_codex_default_models():
     assert codex.DEFAULT_MODEL is None
     assert api.DEFAULT_MODEL == "gpt-5.6-terra"

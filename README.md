@@ -270,6 +270,7 @@ fail_on = "high"        # --fail-on (needs json = true, exactly as the flag need
 json = false            # --json
 full = false            # --full
 docs = true             # --docs with no path (auto-discovery); or a list of paths
+codex_sandbox = "read-only"  # --codex-sandbox; user file only, see below
 
 [backends]              # per-mode default backend, overriding the built-in table
 plan = "codex"
@@ -283,7 +284,13 @@ claude = "claude-opus-5"
 ```
 
 Every key mirrors a flag — a config file changes what `rr` does by default, never what
-it can do. What to review (`--diff`, `--pr`, files, `--mode`, `--prompt`) stays on the
+it can do. `codex_sandbox` is the one key a project file may not set: it is
+`codex exec -s <mode>`, `read-only` by default, and the code under review must not choose
+how much of the reviewer's machine the reviewer may touch. Set `workspace-write` or
+`danger-full-access` in your user file, or pass `--codex-sandbox`, only on a host where
+codex's own sandbox cannot start (a container that may not create user namespaces fails
+with `bwrap: No permissions to create a new namespace`) and the surrounding environment
+is the boundary. What to review (`--diff`, `--pr`, files, `--mode`, `--prompt`) stays on the
 command line, where it is visible in the invocation.
 
 Anything else is an error, named rather than ignored: an unknown key or mode, a backend

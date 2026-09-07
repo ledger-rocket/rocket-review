@@ -330,7 +330,7 @@ def test_unknown_key_names_the_file_the_key_and_the_accepted_set(tmp_path):
     message = error_from(path)
     assert str(path) in message
     assert "unknown key 'timeuot'" in message
-    assert "Accepted: backends, docs, effort, fail_on, full, json, models, timeout." in message
+    assert "Accepted: backends, codex_sandbox, docs, effort, fail_on, full, json, models, timeout." in message
 
 
 def test_several_unknown_keys_are_all_named(tmp_path):
@@ -381,6 +381,10 @@ def test_unreadable_file_names_itself(tmp_path):
     ("docs = [1]", "docs must be true, false, or a list of paths, got [1]"),
     ("backends = 'codex'", "[backends] must be a table of mode = backend"),
     ("models = 'gpt'", "[models] must be a table of backend = model"),
+    ("codex_sandbox = 'open'",
+     "codex_sandbox must be one of read-only, workspace-write, danger-full-access, got 'open'"),
+    ("codex_sandbox = true",
+     "codex_sandbox must be one of read-only, workspace-write, danger-full-access, got True"),
 ])
 def test_invalid_values_are_rejected(tmp_path, body, expected):
     message = error_from(write(tmp_path, f"{body}\n"))
@@ -1151,3 +1155,34 @@ def test_llms_with_a_path_is_still_the_users_own_word(monkeypatch, tmp_path):
     jobs = fake_backends(monkeypatch)
     assert run_main(monkeypatch, ["--diff", "--llms", "notes.md"]) == 0
     assert "MY OWN NOTES" in jobs["claude"].docs_content
+
+
+def test_codex_sandbox_defaults_to_read_only():
+    settings = config.resolve({key: None for key in config.FLAG_KEYS}, [])
+    assert settings.codex_sandbox == "read-only"
+    assert settings.sources["codex_sandbox"] == config.BUILT_IN
+
+
+def test_codex_sandbox_from_user_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    path = write_user_config('codex_sandbox = "danger-full-access"\n')
+    settings = config.resolve(
+        {key: None for key in config.FLAG_KEYS}, config.load(no_config=False, cwd=tmp_path),
+    )
+    assert settings.codex_sandbox == "danger-full-access"
+    assert settings.from_file("codex_sandbox") == str(path)
+
+
+def test_codex_sandbox_flag_outranks_user_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_user_config('codex_sandbox = "danger-full-access"\n')
+    cli_values = {key: None for key in config.FLAG_KEYS}
+    cli_values["codex_sandbox"] = "workspace-write"
+    settings = config.resolve(cli_values, config.load(no_config=False, cwd=tmp_path))
+    assert settings.codex_sandbox == "workspace-write"
+    assert settings.sources["codex_sandbox"] == config.COMMAND_LINE
+
+
+def test_codex_sandbox_is_rejected_in_a_project_file(tmp_path):
+    message = error_from(write(tmp_path, 'codex_sandbox = "danger-full-access"\n'), repo_supplied=True)
+    assert "codex_sandbox is not accepted in a project file" in message
