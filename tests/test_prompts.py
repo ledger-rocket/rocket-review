@@ -38,6 +38,13 @@ def job(**kw):
     return ReviewJob(**defaults)
 
 
+ENVIRONMENT = "SANDBOX-STATEMENT-7c1e: this sandbox allows reading only."
+
+
+def agent_prompt(review_job, environment=ENVIRONMENT):
+    return build_agent_prompt(review_job, environment)
+
+
 @pytest.mark.parametrize("mode", list(MODE_MARKERS))
 def test_mode_selects_only_its_own_body(mode):
     prompt = get_prompt(mode)
@@ -154,37 +161,58 @@ def test_docs_content_itself_is_not_inlined_by_get_prompt():
     assert "no global mutable state" not in get_prompt("code", docs_content=DOCS)
 
 
-def test_agent_prompt_leads_with_instructions_and_grants_read_access():
-    prompt = build_agent_prompt(job(mode="code"))
+def test_agent_prompt_leads_with_instructions_then_states_the_sandbox():
+    prompt = agent_prompt(job(mode="code", content="BODY"))
     assert prompt == prompt.strip()  # instructions are stripped, so nothing pads the prompt
-    assert prompt.index(MODE_MARKERS["code"]) < prompt.index("You have full read access")
-    assert "Do not modify any files." in prompt
+    assert prompt.index(MODE_MARKERS["code"]) < prompt.index("Do not modify any files.")
+    assert prompt.index("Do not modify any files.") < prompt.index(ENVIRONMENT)
+    assert prompt.index(ENVIRONMENT) < prompt.index("=== CODE TO REVIEW ===")
+    # A sandbox that denies every command is not "full access"; the backend says what it is.
+    assert "You have full read access" not in prompt
+
+
+def test_agent_prompt_requires_the_backends_sandbox_statement():
+    for blank in ("", "   \n"):
+        with pytest.raises(ValueError, match="sandbox description"):
+            build_agent_prompt(job(), blank)
+
+
+def test_agent_prompt_requires_disclosure_of_unrun_checks_and_forbids_retries():
+    prompt = agent_prompt(job())
+    assert "which checks you ran" in prompt and "which you could not run" in prompt
+    assert "rests only on reading the code must say so" in prompt
+    assert "do not retry it" in prompt
+    # A refusal is final; a sandbox limit a flag can avoid is not (a Codex read-only run can
+    # fail on a cache write and succeed without it).
+    assert "the sandbox refuses" in prompt
+    assert "may be retried once without that need" in prompt
+    assert prompt.index(ENVIRONMENT) < prompt.index("which checks you ran")
 
 
 def test_agent_prompt_carries_get_prompt_addenda():
-    prompt = build_agent_prompt(job(docs_content=DOCS, json_output=True))
+    prompt = agent_prompt(job(docs_content=DOCS, json_output=True))
     assert STANDARDS_MARKER in prompt and JSON_MARKER in prompt
 
 
 def test_agent_prompt_extra_follows_instructions():
-    prompt = build_agent_prompt(job(extra="focus on security"))
+    prompt = agent_prompt(job(extra="focus on security"))
     assert "Additional instructions: focus on security" in prompt
-    assert prompt.index("Additional instructions") < prompt.index("You have full read access")
+    assert prompt.index("Additional instructions") < prompt.index("Do not modify any files.")
 
 
 def test_agent_prompt_omits_extra_line_when_unset():
-    assert "Additional instructions" not in build_agent_prompt(job())
+    assert "Additional instructions" not in agent_prompt(job())
 
 
 def test_agent_prompt_wraps_docs_in_a_delimited_block_after_the_addendum():
-    prompt = build_agent_prompt(job(docs_content=DOCS))
+    prompt = agent_prompt(job(docs_content=DOCS))
     assert f"=== PROJECT STANDARDS ===\n{DOCS}\n=== END PROJECT STANDARDS ===" in prompt
     assert prompt.index(STANDARDS_MARKER) < prompt.index("=== PROJECT STANDARDS ===")
 
 
 @pytest.mark.parametrize("mode, label", [("plan", "PLAN"), ("code", "CODE"), ("diff", "DIFF")])
 def test_agent_prompt_labels_inline_content_per_mode(mode, label):
-    prompt = build_agent_prompt(job(mode=mode, content="BODY"))
+    prompt = agent_prompt(job(mode=mode, content="BODY"))
     assert f"=== {label} TO REVIEW ===\nBODY\n=== END {label} ===" in prompt
 
 
@@ -192,46 +220,46 @@ def test_agent_prompt_rejects_unknown_mode_before_labelling_content():
     # The "CONTENT" label fallback in build_agent_prompt is unreachable: get_prompt raises
     # on an unknown mode before the label is chosen.
     with pytest.raises(KeyError):
-        build_agent_prompt(job(mode="bogus"))
+        agent_prompt(job(mode="bogus"))
 
 
 def test_agent_prompt_commit_asks_the_backend_to_run_git_show():
-    prompt = build_agent_prompt(job(content=None, commit="abc123"))
+    prompt = agent_prompt(job(content=None, commit="abc123"))
     assert "Run `git show abc123` to see the commit" in prompt
     assert "TO REVIEW ===" not in prompt
 
 
 def test_agent_prompt_git_cmd_asks_the_backend_to_run_it():
-    prompt = build_agent_prompt(job(content=None, git_cmd="git diff --staged"))
+    prompt = agent_prompt(job(content=None, git_cmd="git diff --staged"))
     assert "Run `git diff --staged` to see the changes" in prompt
 
 
 def test_agent_prompt_pr_inlines_content_with_pr_framing():
-    prompt = build_agent_prompt(job(pr=True, content="PR BODY AND DIFF"))
+    prompt = agent_prompt(job(pr=True, content="PR BODY AND DIFF"))
     assert "You are reviewing a GitHub pull request." in prompt
     assert prompt.endswith("PR BODY AND DIFF")
     assert "=== DIFF TO REVIEW ===" not in prompt
 
 
 def test_agent_prompt_pr_wins_over_commit_and_git_cmd():
-    prompt = build_agent_prompt(job(pr=True, content="PR BODY", commit="abc123",
+    prompt = agent_prompt(job(pr=True, content="PR BODY", commit="abc123",
                                     git_cmd="git diff"))
     assert "GitHub pull request" in prompt
     assert "git show abc123" not in prompt and "Run `git diff`" not in prompt
 
 
 def test_agent_prompt_commit_wins_over_git_cmd_and_content():
-    prompt = build_agent_prompt(job(commit="abc123", git_cmd="git diff", content="INLINE"))
+    prompt = agent_prompt(job(commit="abc123", git_cmd="git diff", content="INLINE"))
     assert "git show abc123" in prompt
     assert "Run `git diff`" not in prompt and "INLINE" not in prompt
 
 
 def test_agent_prompt_with_no_content_source_still_gives_instructions():
-    prompt = build_agent_prompt(job(content=None))
+    prompt = agent_prompt(job(content=None))
     assert MODE_MARKERS["diff"] in prompt
     assert "TO REVIEW ===" not in prompt
 
 
 def test_agent_prompt_joins_parts_with_blank_lines():
-    prompt = build_agent_prompt(job(extra="x"))
+    prompt = agent_prompt(job(extra="x"))
     assert "\n\nAdditional instructions: x\n\n" in prompt

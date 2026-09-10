@@ -25,6 +25,21 @@ PERMISSION_MODE = "manual"
 READ_ONLY_TOOLS = "Read Glob Grep"
 
 
+def _git_view_command(job: ReviewJob) -> str | None:
+    """The single git command that surfaces the change, or None when the prompt inlines it.
+
+    Same precedence as build_agent_prompt, which decides what the prompt asks the reviewer to
+    run: an inlined pull request needs no git, then --commit, then --diff/--staged. Resolving
+    it in another order would allow-list one command and ask for another, and the reviewer
+    would meet a denial on the command the prompt named.
+    """
+    if job.pr and job.content:
+        return None
+    if job.commit:
+        return f"git show {job.commit}"
+    return job.git_cmd or None
+
+
 def _git_view_rule(job: ReviewJob) -> str | None:
     """Exact-match Bash allow rule for the single git command that surfaces the change.
 
@@ -33,11 +48,26 @@ def _git_view_rule(job: ReviewJob) -> str | None:
     any other) write flag can't be appended. Returns None for sources whose content is
     already inlined in the prompt (PR, files, stdin, plan), which need no git at all.
     """
-    if job.git_cmd:
-        return f"Bash({job.git_cmd})"
-    if job.commit:
-        return f"Bash(git show {job.commit})"
-    return None
+    command = _git_view_command(job)
+    return f"Bash({command})" if command else None
+
+
+def _environment(job: ReviewJob) -> str:
+    """What this sandbox lets the reviewer do, stated in its prompt (PRO-6105).
+
+    Built from the same sources as the allowlist, so the prompt cannot promise a tool that
+    `--allowedTools` denies or hide one it allows.
+    """
+    names = READ_ONLY_TOOLS.split()
+    tools = f"the {', '.join(names[:-1])} and {names[-1]} tools"
+    command = _git_view_command(job)
+    if command:
+        tools += f", and the single shell command `{command}`"
+    return (
+        f"This review runs in a read-only sandbox. You can use only {tools}. Every other "
+        "command is denied, including tests, type checks, linters, builds, package managers, "
+        "gh, and any other git command, so do not attempt them."
+    )
 
 
 def review(job: ReviewJob) -> str:
@@ -57,7 +87,7 @@ def review(job: ReviewJob) -> str:
     # Prompt goes via stdin: no ARG_MAX concern and no temp file needed.
     timeout = base.TIMEOUT if job.timeout is None else job.timeout
     output = base.run_command(
-        cmd, stdin=build_agent_prompt(job), timeout=timeout
+        cmd, stdin=build_agent_prompt(job, _environment(job)), timeout=timeout
     ).strip()
     if not output:
         raise BackendError("claude produced no output")

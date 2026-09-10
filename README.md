@@ -428,6 +428,10 @@ For plans, run `rr plan.md --docs` before implementing. Use a 900000ms timeout.
   (edit/write denied at the tool level). Read-only stops writes; it does not stop the
   agent *reading* readable secrets and sending them to the backend's provider — see
   [Security & data flow](#security--data-flow).
+- Every agentic prompt carries the backend's own description of what its sandbox allows, and
+  asks the reviewer to say which checks it ran and which it could not run. A verdict from a
+  Claude review, whose sandbox denies tests and linters, says so instead of implying they
+  passed.
 - `--fail-on` requires `--json` — including when a [config file](#config-file) is what
   set it; the error names the file.
 - Exit codes: 0 no gate tripped · 1 operational error (or every backend failed) · 2 findings at/above `--fail-on`. A partial backend failure warns on stderr but still exits 0 — gate CI with `--json --fail-on` to fail closed.

@@ -241,8 +241,28 @@ def get_prompt(mode: str, docs_content: str | None = None, json_output: bool = F
     return prompt
 
 
-def build_agent_prompt(job: ReviewJob) -> str:
-    """Assemble the instruction prompt for an agentic (repo-navigating) backend."""
+# Every agentic review must say what it actually verified. Reviewers whose sandbox denied
+# tests and linters retried the same command in other forms and then issued verdicts that
+# never said no check had run (PRO-6105). Private: evals/arms.py treats every public string
+# constant in this module as an arm prompt, and this rule is not an arm's to vary.
+_REVIEW_EVIDENCE_RULE = (
+    "Say in your review which checks you ran (tests, type checks, linters, builds) and which "
+    "you could not run. A finding that rests only on reading the code must say so. A command "
+    "the sandbox refuses will not succeed in another form: do not retry it through a different "
+    "wrapper, flag, path or pipeline, and record it as not run. A command that fails because the "
+    "sandbox blocks one specific thing, such as writing a cache, may be retried once without that "
+    "need; if it fails again, record it as not run and review from the source."
+)
+
+
+def build_agent_prompt(job: ReviewJob, environment: str) -> str:
+    """Assemble the instruction prompt for an agentic (repo-navigating) backend.
+
+    `environment` is the backend's own statement of what its sandbox lets the reviewer do.
+    Each backend owns it because each sandbox differs; the prompt carries it verbatim.
+    """
+    if not environment.strip():
+        raise ValueError("build_agent_prompt needs the backend's sandbox description")
     instructions = get_prompt(job.mode, job.docs_content, job.json_output)
 
     parts = [instructions.strip()]
@@ -251,10 +271,11 @@ def build_agent_prompt(job: ReviewJob) -> str:
         parts.append(f"Additional instructions: {job.extra}")
 
     parts.append(
-        "You have full read access to the project. "
         "Inspect any referenced files, imports, tests, or related code to give a thorough review. "
         "Do not modify any files."
     )
+    parts.append(environment.strip())
+    parts.append(_REVIEW_EVIDENCE_RULE)
 
     if job.docs_content:
         parts.append(

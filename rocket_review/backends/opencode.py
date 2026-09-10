@@ -7,6 +7,12 @@ BINARY = "opencode"
 INSTALL_HINT = "brew install anomalyco/tap/opencode or npm i -g opencode-ai (https://opencode.ai)"
 DEFAULT_MODEL = None  # honor the user's configured opencode default
 
+# The read-only plan agent's limits, stated in its prompt (PRO-6105).
+ENVIRONMENT = (
+    "This review runs as opencode's read-only plan agent: file edits and writes are denied, "
+    "and a non-interactive run may also deny shell commands."
+)
+
 
 def review(job: ReviewJob) -> str:
     # `plan` is opencode's built-in read-only agent: it denies edit/write at the tool
@@ -22,7 +28,7 @@ def review(job: ReviewJob) -> str:
     # `--file` attachment (opencode's array-valued flag swallows the trailing message, and
     # its Read tool caps attachments at 50 KiB, silently truncating a large diff).
     timeout = base.TIMEOUT if job.timeout is None else job.timeout
-    output = base.run_command(cmd, stdin=build_agent_prompt(job), timeout=timeout).strip()
+    output = base.run_command(cmd, stdin=build_agent_prompt(job, ENVIRONMENT), timeout=timeout).strip()
     if not output:
         raise BackendError("opencode produced no output")
     return output

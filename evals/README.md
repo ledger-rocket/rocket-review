@@ -239,9 +239,16 @@ That guard is also why the surface is exactly five names. `get_prompt` composes 
 body with one output-format section, and the *prose* format sections are private to
 `prompts.py`: a sixth public constant would need a file in every arm, and the frozen
 historical arm cannot grow one without ceasing to be history. Nothing is lost, because
-every measured run is `--json`, where the assembled prompt is the arm's mode body, its
+every measured run is `--json`, where `get_prompt` returns the arm's mode body, its
 `PROJECT_STANDARDS_ADDENDUM` when the case supplies docs, and its `JSON_OUTPUT_ADDENDUM` —
 arm bytes throughout, with no live text anywhere in it. Asserted in `test_arms.py`.
+
+An agentic backend adds two blocks the arm does not own (PRO-6105): the backend's own
+description of what its sandbox allows, and the private evidence rule in `prompts.py` that
+makes a review say which checks it ran. Both are fixed text, so for an agentic run the arm's
+content hash no longer covers every byte the model reads. Rows from before and after PRO-6105
+are told apart by `harness_commit` and `runtime_rr_version`, not by the arm hash, and their
+prompts are not byte-comparable.
 
 ## The injection seam
 

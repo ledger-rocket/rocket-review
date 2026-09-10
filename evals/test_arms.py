@@ -316,7 +316,7 @@ def test_apply_arm_reaches_build_agent_prompt(tmp_path, restore_prompts):
         mode="plan", content="a plan", docs_content=None, extra=None, commit=None,
         pr=False, git_cmd=None, model=None,
     )
-    assert "ARM PLAN TEXT" in rr_prompts.build_agent_prompt(job)
+    assert "ARM PLAN TEXT" in rr_prompts.build_agent_prompt(job, "SANDBOX STATEMENT")
 
 
 def test_export_round_trips_the_live_prompts(tmp_path):

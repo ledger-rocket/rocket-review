@@ -728,7 +728,7 @@ def test_changed_paths_default_to_a_fresh_empty_list():
 
 
 def test_changed_paths_do_not_reach_the_prompt():
-    prompt = build_agent_prompt(_job(changed_paths=["ZZ-UNIQUE-MARKER.py"]))
+    prompt = build_agent_prompt(_job(changed_paths=["ZZ-UNIQUE-MARKER.py"]), "SANDBOX STATEMENT")
 
     # Carried and unused: this task adds the data, and no review may read it yet.
     assert "ZZ-UNIQUE-MARKER" not in prompt
