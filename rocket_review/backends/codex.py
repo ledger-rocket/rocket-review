@@ -16,17 +16,20 @@ DEFAULT_MODEL = None  # honor the user's codex default (~/.codex/config.toml)
 # (PRO-6105). The keys cover config.CODEX_SANDBOX_MODES; a test pins that.
 SANDBOX_ENVIRONMENTS = {
     "read-only": (
-        "This review runs under Codex's read-only sandbox policy: your shell commands run, "
-        "but they cannot write, so a test, build or package manager that needs to write a "
-        "cache or an artifact may fail."
+        "This review runs under Codex's read-only sandbox policy: the sandbox permits reading "
+        "files only, and network access is restricted. A test, build or package manager that "
+        "writes a cache or fetches a dependency fails here."
     ),
     "workspace-write": (
-        "This review runs under Codex's workspace-write sandbox policy: your shell commands "
-        "can write only inside the project. Do not modify any files anyway."
+        "This review runs under Codex's workspace-write sandbox policy: the sandbox permits "
+        "reading files, and editing files in the working directory and the sandbox's other "
+        "writable roots, which normally include a temporary directory; editing anywhere else "
+        "needs approval, and network access is restricted. Do not modify the project's files."
     ),
     "danger-full-access": (
-        "This review runs with no Codex sandbox (danger-full-access): your shell commands are "
-        "not restricted. Do not modify any files, and run only commands that inspect."
+        "This review runs with no Codex sandbox (danger-full-access): there is no filesystem "
+        "sandboxing and network access is enabled. Do not modify any files, and run only "
+        "commands that inspect."
     ),
 }
 

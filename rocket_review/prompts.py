@@ -249,9 +249,10 @@ _REVIEW_EVIDENCE_RULE = (
     "Say in your review which checks you ran (tests, type checks, linters, builds) and which "
     "you could not run. A finding that rests only on reading the code must say so. A command "
     "the sandbox refuses will not succeed in another form: do not retry it through a different "
-    "wrapper, flag, path or pipeline, and record it as not run. A command that fails because the "
-    "sandbox blocks one specific thing, such as writing a cache, may be retried once without that "
-    "need; if it fails again, record it as not run and review from the source."
+    "wrapper, flag, path or pipeline. When a tool the sandbox does allow reaches the same "
+    "information, use it instead: read the file with Read, search with Grep. A command that "
+    "fails because the sandbox blocks one specific thing, such as writing a cache, may be "
+    "retried once without that need. Record as not run only what no allowed tool can reach."
 )
 
 

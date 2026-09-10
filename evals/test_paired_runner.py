@@ -27,6 +27,7 @@ from conftest import (
     git,
 )
 from paired_runner import (
+    probe_runtime_prompt_hash,
     ALTERNATION_SCHEME,
     LAUNCHER,
     CONTROL,
@@ -94,6 +95,34 @@ def corpus(tmp_path, git_repo, head_oid) -> Path:
 
 
 # --- the injection proof ---------------------------------------------------------------
+
+
+def test_the_runtime_prompt_hash_fingerprints_the_blocks_no_arm_owns():
+    # The arm hash stops at the mode bodies and addenda; these blocks decide as much of an
+    # agentic prompt and no arm can vary them, so a row must be able to name which bytes it ran.
+    import hashlib
+
+    from rocket_review import prompts
+    from rocket_review.backends import claude, codex, opencode
+    from rocket_review.backends.base import ReviewJob
+
+    job = ReviewJob(mode="diff", content="d", docs_content=None, extra=None,
+                    commit=None, pr=False, git_cmd=None, model=None)
+    parts = [prompts._REVIEW_EVIDENCE_RULE, claude._environment(job), opencode.ENVIRONMENT]
+    parts += [codex.SANDBOX_ENVIRONMENTS[k] for k in sorted(codex.SANDBOX_ENVIRONMENTS)]
+    expected = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+    assert probe_runtime_prompt_hash(sys.executable) == expected
+
+
+def test_the_runtime_prompt_hash_is_none_when_the_runtime_has_no_such_blocks(tmp_path):
+    # A rocket-review from before PRO-6105 has no evidence rule: the field says so with null
+    # rather than with a hash of nothing.
+    stub = tmp_path / "python-stub"
+    stub.write_text("#!/bin/sh\nexit 1\n")
+    stub.chmod(0o755)
+
+    assert probe_runtime_prompt_hash(str(stub)) is None
 
 
 def test_the_arms_prompt_text_reaches_the_backend(tmp_path, git_repo, stub_backend, arms):
@@ -371,7 +400,8 @@ def test_runs_still_in_flight_when_a_sweep_fails_keep_their_rows(
             case_is_control=task.case.is_control, arm=task.arm.name, arm_role=task.role,
             arm_hash=task.arm.content_hash, backend=task.backend,
             requested_model=task.model, backend_version=None,
-            harness_rr_version=None, runtime_rr_version=None, harness_commit=None,
+            harness_rr_version=None, runtime_rr_version=None, runtime_prompt_hash=None,
+            harness_commit=None,
             rep=task.rep, order_index=task.order_index, attempt=1, command=["stub"],
             cwd=str(task.materialized.cwd), exit_code=0, duration_s=0.4,
             raw=json.dumps({"verdict": "approve", "summary": "s", "findings": []}),
