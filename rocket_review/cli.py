@@ -672,8 +672,25 @@ def run_one(
         return name, model, None, f"{type(e).__name__}: {e}"
 
 
+#: Subcommands, dispatched on argv[0] before the review parser ever sees the arguments.
+SUBCOMMANDS = ("doctor", "init")
+
+
 def main():
     try:
+        # Dispatched by hand rather than through argparse subparsers, because the review
+        # parser's positional is greedy (`files`, nargs="*"): adding subparsers would change
+        # how `rr plan.md` and every other existing invocation parses. Everything that is not
+        # one of these two words reaches the parser exactly as before. The cost is that a file
+        # literally named `doctor` or `init` has to be spelled `./doctor` to be reviewed.
+        argv = sys.argv[1:]
+        if argv and argv[0] in SUBCOMMANDS:
+            # Imported here, not at module scope: doctor imports this module for the version
+            # string, and a review run should not pay for a diagnostic it never uses.
+            from rocket_review import doctor
+
+            runner = doctor.run_doctor if argv[0] == "doctor" else doctor.run_init
+            sys.exit(runner(argv[1:]))
         _run()
     except BrokenPipeError:
         # A downstream reader (e.g. `rr ... | head`) closed the pipe. Redirect stdout
@@ -700,6 +717,8 @@ def _run():
             "  rr --diff --backend codex,claude       # cross-model review, one pass per backend\n"
             "  rr src/auth.py --docs                  # review a file against project standards\n"
             "  git diff | rr                          # review a diff piped on stdin\n"
+            "  rr init                                # write the default user config\n"
+            "  rr doctor                              # check this host's setup, exit 1 on a gap\n"
             "  rr --version                           # print the installed version\n"
         ),
     )
