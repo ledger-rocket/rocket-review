@@ -27,6 +27,7 @@ from conftest import (
     git,
 )
 from paired_runner import (
+    RUNTIME_PROMPT_FINGERPRINT_CODE,
     probe_runtime_prompt_hash,
     ALTERNATION_SCHEME,
     LAUNCHER,
@@ -97,22 +98,48 @@ def corpus(tmp_path, git_repo, head_oid) -> Path:
 # --- the injection proof ---------------------------------------------------------------
 
 
-def test_the_runtime_prompt_hash_fingerprints_the_blocks_no_arm_owns():
-    # The arm hash stops at the mode bodies and addenda; these blocks decide as much of an
-    # agentic prompt and no arm can vary them, so a row must be able to name which bytes it ran.
-    import hashlib
+@pytest.fixture
+def restore_prompts():
+    """The fingerprint code blanks the arm-owned constants; run in this process it would
+    otherwise leave every later test reading an empty prompt."""
+    saved = {name: getattr(rr_prompts, name) for name in PROMPT_CONSTANTS}
+    yield
+    for name, text in saved.items():
+        setattr(rr_prompts, name, text)
 
-    from rocket_review import prompts
-    from rocket_review.backends import claude, codex, opencode
-    from rocket_review.backends.base import ReviewJob
 
-    job = ReviewJob(mode="diff", content="d", docs_content=None, extra=None,
-                    commit=None, pr=False, git_cmd=None, model=None)
-    parts = [prompts._REVIEW_EVIDENCE_RULE, claude._environment(job), opencode.ENVIRONMENT]
-    parts += [codex.SANDBOX_ENVIRONMENTS[k] for k in sorted(codex.SANDBOX_ENVIRONMENTS)]
-    expected = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+def test_the_runtime_prompt_hash_covers_the_assembled_wrapper_not_a_hand_picked_list(restore_prompts):
+    # One source of truth: the probe runs this exact code in the runtime interpreter, so
+    # running it here proves the plumbing and pins what the fingerprint covers.
+    import contextlib
+    import io
 
-    assert probe_runtime_prompt_hash(sys.executable) == expected
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        exec(RUNTIME_PROMPT_FINGERPRINT_CODE, {"__name__": "__main__"})  # noqa: S102
+    in_process = buffer.getvalue().strip()
+
+    assert len(in_process) == 64
+    assert probe_runtime_prompt_hash(sys.executable) == in_process
+
+
+def test_the_runtime_prompt_hash_moves_when_a_backend_changes_its_sandbox_text(monkeypatch, restore_prompts):
+    # The failure this guards: an edit confined to one backend's text, or to a branch only a
+    # --commit job reaches, leaving the recorded provenance identical.
+    import contextlib
+    import io
+
+    from rocket_review.backends import claude
+
+    def digest():
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            exec(RUNTIME_PROMPT_FINGERPRINT_CODE, {"__name__": "__main__"})  # noqa: S102
+        return buffer.getvalue().strip()
+
+    before = digest()
+    monkeypatch.setattr(claude, "READ_ONLY_TOOLS", "Read Glob")
+    assert digest() != before
 
 
 def test_the_runtime_prompt_hash_is_none_when_the_runtime_has_no_such_blocks(tmp_path):

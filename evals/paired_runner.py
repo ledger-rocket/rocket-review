@@ -161,30 +161,56 @@ def probe_runtime(python: str) -> tuple[str | None, str | None]:
     return version, path
 
 
+# The text an agentic prompt carries that no arm can vary: the wrapper build_agent_prompt adds,
+# the per-source instruction it chooses, and each backend's sandbox description. An arm owns
+# exactly the five constants blanked below, so blanking them and assembling the prompt for every
+# source shape leaves precisely the fixed remainder — including the branches an inline-content
+# job never reaches, such as the exact git command a --diff or --commit case is told to run.
+RUNTIME_PROMPT_FINGERPRINT_CODE = """
+import hashlib
+from rocket_review import prompts
+from rocket_review.backends import claude, codex, opencode
+from rocket_review.backends.base import ReviewJob
+
+for name in ("PLAN_REVIEW_PROMPT", "CODE_REVIEW_PROMPT", "DIFF_REVIEW_PROMPT",
+             "PROJECT_STANDARDS_ADDENDUM", "JSON_OUTPUT_ADDENDUM"):
+    setattr(prompts, name, "")
+
+shapes = [
+    {"content": "INLINE"},
+    {"content": None, "git_cmd": "git diff HEAD"},
+    {"content": None, "commit": "deadbeef"},
+    {"pr": True, "content": "PR BODY"},
+]
+parts = []
+for mode in ("plan", "code", "diff"):
+    for json_output in (False, True):
+        for shape in shapes:
+            job = ReviewJob(mode=mode, content=None, docs_content="DOCS", extra="EXTRA",
+                            commit=None, pr=False, git_cmd=None, model=None,
+                            json_output=json_output)
+            for key, value in shape.items():
+                setattr(job, key, value)
+            environments = [claude._environment(job), opencode.ENVIRONMENT]
+            environments += [codex.SANDBOX_ENVIRONMENTS[k] for k in sorted(codex.SANDBOX_ENVIRONMENTS)]
+            parts += [prompts.build_agent_prompt(job, environment) for environment in environments]
+print(hashlib.sha256("\\n".join(parts).encode("utf-8")).hexdigest())
+"""
+
+
 def probe_runtime_prompt_hash(python: str) -> str | None:
     """Fingerprint the prompt text the runtime adds that no arm can vary (PRO-6105).
 
     An arm's content hash covers the mode bodies and the addenda. An agentic run also carries
-    each backend's sandbox description and the private evidence rule, which an arm cannot
-    change, so two rows with the same arm hash can still have read different prompts —
-    `--python` can point at any checkout, and a released version string does not move when
-    those blocks change. None means the runtime has no such blocks (a rocket-review from
-    before PRO-6105) or could not be asked.
+    the wrapper, the per-source instruction and each backend's sandbox description, which an
+    arm cannot change, so two rows with the same arm hash can still have read different
+    prompts — `--python` can point at any checkout, and a released version string does not
+    move when those blocks change. None means the runtime has no such blocks (a rocket-review
+    from before PRO-6105) or could not be asked.
     """
-    code = (
-        "import hashlib\n"
-        "from rocket_review import prompts\n"
-        "from rocket_review.backends import claude, codex, opencode\n"
-        "from rocket_review.backends.base import ReviewJob\n"
-        "job = ReviewJob(mode='diff', content='d', docs_content=None, extra=None,\n"
-        "                commit=None, pr=False, git_cmd=None, model=None)\n"
-        "parts = [prompts._REVIEW_EVIDENCE_RULE, claude._environment(job), opencode.ENVIRONMENT]\n"
-        "parts += [codex.SANDBOX_ENVIRONMENTS[k] for k in sorted(codex.SANDBOX_ENVIRONMENTS)]\n"
-        "print(hashlib.sha256('\\n'.join(parts).encode('utf-8')).hexdigest())"
-    )
     try:
         proc = subprocess.run(
-            [python, "-c", code], capture_output=True, text=True,
+            [python, "-c", RUNTIME_PROMPT_FINGERPRINT_CODE], capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=60,
         )
     except (OSError, subprocess.SubprocessError):
