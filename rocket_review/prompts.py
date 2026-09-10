@@ -243,7 +243,7 @@ def get_prompt(mode: str, docs_content: str | None = None, json_output: bool = F
 
 # Every agentic review must say what it actually verified. Reviewers whose sandbox denied
 # tests and linters retried the same command in other forms and then issued verdicts that
-# never said no check had run (PRO-6105). Private: evals/arms.py treats every public string
+# never said no check had run. Private: evals/arms.py treats every public string
 # constant in this module as an arm prompt, and this rule is not an arm's to vary.
 _REVIEW_EVIDENCE_RULE = (
     "Say in your review which checks you ran (tests, type checks, linters, builds) and which "

@@ -104,7 +104,7 @@ class Provenance:
     runtime_rr_version: str | None
     runtime_rr_path: str | None
     #: sha256 of the runtime's fixed agentic prompt blocks — the backends' sandbox
-    #: descriptions and the evidence rule — which sit outside every arm's hash (PRO-6105).
+    #: descriptions and the evidence rule — which sit outside every arm's hash.
     runtime_prompt_hash: str | None
     #: HEAD of the harness checkout. The PyPI version is constant across source commits, so
     #: it alone cannot say which prompts and which harness code a result came from.
@@ -162,14 +162,14 @@ def probe_runtime(python: str) -> tuple[str | None, str | None]:
 
 
 def probe_runtime_prompt_hash(python: str) -> str | None:
-    """Fingerprint the prompt text the runtime adds that no arm can vary (PRO-6105).
+    """Fingerprint the prompt text the runtime adds that no arm can vary.
 
     An arm's content hash covers the mode bodies and the addenda. An agentic run also carries
     each backend's sandbox description and the private evidence rule, which an arm cannot
     change, so two rows with the same arm hash can still have read different prompts —
     `--python` can point at any checkout, and a released version string does not move when
     those blocks change. None means the runtime has no such blocks (a rocket-review from
-    before PRO-6105) or could not be asked.
+    from before they existed) or could not be asked.
     """
     code = (
         "import hashlib\n"
@@ -231,7 +231,7 @@ class PairedRecord:
     harness_rr_version: str | None
     #: The rocket-review that actually ran this review, and the harness commit it ran from.
     runtime_rr_version: str | None
-    #: sha256 of the runtime's fixed agentic prompt blocks, which no arm owns (PRO-6105).
+    #: sha256 of the runtime's fixed agentic prompt blocks, which no arm owns.
     #: null when that runtime predates them.
     runtime_prompt_hash: str | None
     harness_commit: str | None

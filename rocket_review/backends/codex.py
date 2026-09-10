@@ -13,7 +13,7 @@ INSTALL_HINT = "npm install -g @openai/codex (https://github.com/openai/codex)"
 DEFAULT_MODEL = None  # honor the user's codex default (~/.codex/config.toml)
 
 # What each `codex exec -s <mode>` policy means for the reviewer, stated in its prompt
-# (PRO-6105). The keys cover config.CODEX_SANDBOX_MODES; a test pins that.
+# The keys cover config.CODEX_SANDBOX_MODES; a test pins that.
 SANDBOX_ENVIRONMENTS = {
     "read-only": (
         "This review runs under Codex's read-only sandbox policy: the sandbox permits reading "

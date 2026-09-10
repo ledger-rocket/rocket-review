@@ -53,7 +53,7 @@ def _git_view_rule(job: ReviewJob) -> str | None:
 
 
 def _environment(job: ReviewJob) -> str:
-    """What this sandbox lets the reviewer do, stated in its prompt (PRO-6105).
+    """What this sandbox lets the reviewer do, stated in its prompt.
 
     Built from the same sources as the allowlist, so the prompt cannot promise a tool that
     `--allowedTools` denies or hide one it allows.

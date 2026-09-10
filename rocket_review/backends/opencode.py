@@ -7,7 +7,7 @@ BINARY = "opencode"
 INSTALL_HINT = "brew install anomalyco/tap/opencode or npm i -g opencode-ai (https://opencode.ai)"
 DEFAULT_MODEL = None  # honor the user's configured opencode default
 
-# The read-only plan agent's limits, stated in its prompt (PRO-6105).
+# The read-only plan agent's limits, stated in its prompt.
 ENVIRONMENT = (
     "This review runs as opencode's read-only plan agent: file edits and writes are denied, "
     "and a non-interactive run may also deny shell commands."

@@ -116,7 +116,7 @@ def test_the_runtime_prompt_hash_fingerprints_the_blocks_no_arm_owns():
 
 
 def test_the_runtime_prompt_hash_is_none_when_the_runtime_has_no_such_blocks(tmp_path):
-    # A rocket-review from before PRO-6105 has no evidence rule: the field says so with null
+    # A rocket-review from before the evidence rule existed has none: the field says so with null
     # rather than with a hash of nothing.
     stub = tmp_path / "python-stub"
     stub.write_text("#!/bin/sh\nexit 1\n")
