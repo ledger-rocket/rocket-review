@@ -67,7 +67,11 @@ flagging the regression — not a pattern match on the diff.
 
 ```bash
 pipx install rocket-review
+rr init && rr doctor
 ```
+
+`rr init` writes the default config to `~/.config/rocket-review/config.toml`, and
+`rr doctor` tells you what is still missing — a backend CLI, a login, a model pin.
 
 Or with Homebrew, which brings its own Python:
 
@@ -109,8 +113,55 @@ rr --pr 123 --repo acme/api-server  # ...from outside that repo's checkout
 git diff HEAD~3 | rr              # pipe anything
 rr src/auth.py --docs             # review files against your documented standards
 rr --diff --no-config             # ignore the config files (hermetic run)
+rr init                           # write the default user config file
+rr doctor                         # check this host: config, backends, logins
 rr --version                      # print the installed version
 ```
+
+### `rr init` and `rr doctor`
+
+`rr init` writes the default user config — `effort`, the per-mode `[backends]` table,
+and a `[models]` pin per backend — to `~/.config/rocket-review/config.toml` (or
+`$XDG_CONFIG_HOME/rocket-review/config.toml`), creating the directory if it is not
+there. It never overwrites: run it again and it prints the path and leaves the file
+alone, `--force` replaces it. Edit the file afterwards — every key is documented inline
+and mirrors a flag, exactly as [Config file](#config-file) describes.
+
+`rr doctor` reports what `rr` would do on this host, one line per fact, each opening with
+`ok`, `missing`, `unknown`, or `failed`:
+
+```
+ok       rr 0.4.0 (pipx)
+ok       user config: /Users/you/.config/rocket-review/config.toml
+missing  project config: no .rocket-review.toml found from /Users/you/src/api (optional)
+ok       setting effort = medium (/Users/you/.config/rocket-review/config.toml)
+ok       setting backends.diff = claude (built-in default)
+ok       backend codex · cli /usr/local/bin/codex · auth ok · model gpt-6-astra (pinned)
+missing  backend claude · cli not on PATH — npm install -g @anthropic-ai/claude-code · ...
+
+fixes:
+  - install claude: npm install -g @anthropic-ai/claude-code (https://claude.com/claude-code)
+```
+
+It never prompts and never reviews anything: each backend is asked only its own status
+command (`codex login status`, `claude auth status`), with a few seconds' timeout. A CLI
+that cannot answer — no status command, too old to have one, a timeout — reads `unknown`,
+which is never counted as broken.
+
+- **Exit code** — 0 when every backend this host depends on is installed and not refusing
+  a login; 1 when one of them is missing or refusing, when the config file is invalid, or
+  when it holds a combination `rr` refuses to review with (`fail_on` or `full` without
+  `json`, `effort` with `opencode`); 2 on a usage error or an internal one. Only the
+  backends your modes actually use are checked; `--backend codex,claude` checks that list
+  instead — and a mode whose backend is missing still runs, on the
+  [substitute](#default-backends-by-mode) `rr` announces, so a 1 here means the reviewer
+  you configured is not the one you would get.
+- **`--quiet`** prints nothing and only sets the exit code, for a pre-push hook that
+  soft-passes on non-zero:
+
+  ```bash
+  rr doctor --quiet || echo "rr is not set up here; skipping the review" >&2
+  ```
 
 ### Default backends by mode
 
@@ -410,6 +461,9 @@ report a vulnerability.
   - `opencode` — [opencode](https://opencode.ai), configured for any provider (including a local Ollama model)
   - `api` — no CLI, but needs the OpenAI SDK (`pipx install 'rocket-review[api]'`, or `pipx inject rocket-review openai`); set `OPENAI_API_KEY` and `rr` calls the OpenAI API directly
 - `gh` CLI, authenticated, for `--pr`
+
+No install method brings a backend: each one above is a separate install and its own
+login. `rr doctor` says which of them this host has and which it does not.
 
 ## Agent integration
 
