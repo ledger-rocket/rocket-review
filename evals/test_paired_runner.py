@@ -100,8 +100,8 @@ def corpus(tmp_path, git_repo, head_oid) -> Path:
 
 @pytest.fixture
 def restore_prompts():
-    """The fingerprint code blanks the arm-owned constants; run in this process it would
-    otherwise leave every later test reading an empty prompt."""
+    """The fingerprint code replaces the arm-owned constants; run in this process it would
+    otherwise leave every later test reading a sentinel instead of a prompt."""
     saved = {name: getattr(rr_prompts, name) for name in PROMPT_CONSTANTS}
     yield
     for name, text in saved.items():
@@ -139,6 +139,60 @@ def test_the_runtime_prompt_hash_moves_when_a_backend_changes_its_sandbox_text(m
 
     before = digest()
     monkeypatch.setattr(claude, "READ_ONLY_TOOLS", "Read Glob")
+    assert digest() != before
+
+
+def test_the_runtime_prompt_hash_moves_when_the_runtime_maps_a_mode_to_another_body(monkeypatch, restore_prompts):
+    # Each arm-owned constant is replaced with its own name, not with "". Under a blank, a
+    # runtime whose get_prompt hands a diff job the CODE body assembles text identical to one
+    # that hands it the DIFF body, so the hash would sit still on exactly the change it exists
+    # to catch. Only the mapping moves here: the job, including job.mode, is untouched.
+    import contextlib
+    import io
+
+    def digest():
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            exec(RUNTIME_PROMPT_FINGERPRINT_CODE, {"__name__": "__main__"})  # noqa: S102
+        return buffer.getvalue().strip()
+
+    before = digest()
+    real_get_prompt = rr_prompts.get_prompt
+
+    # Only the JSON branch, because that is where the collision is total: with json_output the
+    # mode's prose format is replaced by the shared JSON addendum, so under a blank the CODE and
+    # DIFF bodies leave nothing behind to tell the two mappings apart.
+    def remapped(mode, docs_content, json_output):
+        if mode == "diff" and json_output:
+            mode = "code"
+        return real_get_prompt(mode, docs_content, json_output)
+
+    monkeypatch.setattr(rr_prompts, "get_prompt", remapped)
+    assert digest() != before
+
+
+def test_the_runtime_prompt_hash_covers_a_job_with_no_docs_and_no_extra(monkeypatch, restore_prompts):
+    # build_command runs the paired evaluations with --no-config and neither --docs nor
+    # --prompt, so the shape actually measured has both fields None. A fingerprint whose jobs
+    # always set them would not move when the runtime changes what it assembles for the shape
+    # the evaluation actually runs.
+    import contextlib
+    import io
+
+    def digest():
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            exec(RUNTIME_PROMPT_FINGERPRINT_CODE, {"__name__": "__main__"})  # noqa: S102
+        return buffer.getvalue().strip()
+
+    before = digest()
+    real_get_prompt = rr_prompts.get_prompt
+
+    def only_without_docs(mode, docs_content, json_output):
+        text = real_get_prompt(mode, docs_content, json_output)
+        return text if docs_content else text + "\n\nNO PROJECT STANDARDS WERE SUPPLIED."
+
+    monkeypatch.setattr(rr_prompts, "get_prompt", only_without_docs)
     assert digest() != before
 
 

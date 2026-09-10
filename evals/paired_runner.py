@@ -163,9 +163,16 @@ def probe_runtime(python: str) -> tuple[str | None, str | None]:
 
 # The text an agentic prompt carries that no arm can vary: the wrapper build_agent_prompt adds,
 # the per-source instruction it chooses, and each backend's sandbox description. An arm owns
-# exactly the five constants blanked below, so blanking them and assembling the prompt for every
-# source shape leaves precisely the fixed remainder — including the branches an inline-content
-# job never reaches, such as the exact git command a --diff or --commit case is told to run.
+# exactly the five constants replaced below, so replacing them and assembling the prompt for
+# every source shape leaves precisely the fixed remainder — including the branches an
+# inline-content job never reaches, such as the git command a --diff or --commit case is told
+# to run.
+#
+# Each constant is replaced with its own name, not with "". A blank erases which constant the
+# wrapper chose, so a runtime that sends diff jobs to CODE_REVIEW_PROMPT would assemble text
+# identical to one that sends them to DIFF_REVIEW_PROMPT, and the hash would not move on a
+# change of exactly the kind it exists to catch. The name is fixed text no arm can vary, so it
+# records the choice without putting an arm's own bytes in the hash.
 RUNTIME_PROMPT_FINGERPRINT_CODE = """
 import hashlib
 from rocket_review import prompts
@@ -174,7 +181,7 @@ from rocket_review.backends.base import ReviewJob
 
 for name in ("PLAN_REVIEW_PROMPT", "CODE_REVIEW_PROMPT", "DIFF_REVIEW_PROMPT",
              "PROJECT_STANDARDS_ADDENDUM", "JSON_OUTPUT_ADDENDUM"):
-    setattr(prompts, name, "")
+    setattr(prompts, name, "<" + name + ">")
 
 shapes = [
     {"content": "INLINE"},
@@ -182,18 +189,23 @@ shapes = [
     {"content": None, "commit": "deadbeef"},
     {"pr": True, "content": "PR BODY"},
 ]
+# build_command runs the paired evaluations with --no-config and neither --docs nor --prompt,
+# so the shape actually measured has both of these None. Fingerprint both, because the wrapper
+# reads them and drops whole sections when they are absent.
+extras = [("DOCS", "EXTRA"), (None, None)]
 parts = []
 for mode in ("plan", "code", "diff"):
     for json_output in (False, True):
-        for shape in shapes:
-            job = ReviewJob(mode=mode, content=None, docs_content="DOCS", extra="EXTRA",
-                            commit=None, pr=False, git_cmd=None, model=None,
-                            json_output=json_output)
-            for key, value in shape.items():
-                setattr(job, key, value)
-            environments = [claude._environment(job), opencode.ENVIRONMENT]
-            environments += [codex.SANDBOX_ENVIRONMENTS[k] for k in sorted(codex.SANDBOX_ENVIRONMENTS)]
-            parts += [prompts.build_agent_prompt(job, environment) for environment in environments]
+        for docs_content, extra in extras:
+            for shape in shapes:
+                job = ReviewJob(mode=mode, content=None, docs_content=docs_content, extra=extra,
+                                commit=None, pr=False, git_cmd=None, model=None,
+                                json_output=json_output)
+                for key, value in shape.items():
+                    setattr(job, key, value)
+                environments = [claude._environment(job), opencode.ENVIRONMENT]
+                environments += [codex.SANDBOX_ENVIRONMENTS[k] for k in sorted(codex.SANDBOX_ENVIRONMENTS)]
+                parts += [prompts.build_agent_prompt(job, environment) for environment in environments]
 print(hashlib.sha256("\\n".join(parts).encode("utf-8")).hexdigest())
 """
 
