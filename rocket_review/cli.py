@@ -293,10 +293,28 @@ def get_diff(staged: bool) -> str:
     # last changed line is part of the patch, and this snapshot must be byte-identical to
     # what every backend reviews.
     if not result.stdout.strip():
-        label = "staged changes" if staged else "uncommitted changes"
-        print(f"Error: no {label} found.", file=sys.stderr)
-        sys.exit(1)
+        _exit_no_changes(staged)
     return result.stdout
+
+
+def _exit_no_changes(staged: bool) -> None:
+    """An empty diff usually means the work moved somewhere `rr` was not asked
+    to look — most often committed, frequently in the same compound command
+    that called `rr`. Naming where to look next saves the round trip of
+    finding the flag in `--help`. The two paths need different advice: an
+    empty `--staged` can mean unstaged *or* committed, while an empty `--diff`
+    rules out the working tree already."""
+    if staged:
+        hint = (
+            "Stage them with `git add`, review the working tree with "
+            "`rr --diff`, or if the work is already committed, "
+            "`rr --commit HEAD`."
+        )
+    else:
+        hint = "If the work is already committed, review it with `rr --commit HEAD`."
+    label = "staged changes" if staged else "uncommitted changes"
+    print(f"Error: no {label} found. {hint}", file=sys.stderr)
+    sys.exit(1)
 
 
 def ensure_diff_exists(staged: bool) -> None:
@@ -306,9 +324,7 @@ def ensure_diff_exists(staged: bool) -> None:
     cmd.append("--staged" if staged else "HEAD")
     result = run_capture(cmd)
     if result.returncode == 0:
-        label = "staged changes" if staged else "uncommitted changes"
-        print(f"Error: no {label} found.", file=sys.stderr)
-        sys.exit(1)
+        _exit_no_changes(staged)
     if result.returncode != 1:
         print(f"Error: {' '.join(cmd)} failed: {result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)

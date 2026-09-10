@@ -990,7 +990,29 @@ def test_ensure_diff_exists_clean_tree_errors(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit) as e:
         ensure_diff_exists(False)
     assert e.value.code == 1
-    assert "no uncommitted changes" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "no uncommitted changes" in err
+    # An empty diff most often means the work was just committed, so the error
+    # names the flag that reviews it rather than leaving the reader to find
+    # --commit in --help.
+    assert "rr --commit HEAD" in err
+
+
+def test_ensure_diff_exists_clean_index_points_at_all_three_places(
+    tmp_path, monkeypatch, capsys
+):
+    # An empty --staged is ambiguous in a way an empty --diff is not: the work
+    # may be unstaged or already committed, so the hint has to cover both.
+    _git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as e:
+        ensure_diff_exists(True)
+    assert e.value.code == 1
+    err = capsys.readouterr().err
+    assert "no staged changes" in err
+    assert "git add" in err
+    assert "rr --diff" in err
+    assert "rr --commit HEAD" in err
 
 
 def test_ensure_diff_exists_dirty_tree_passes(tmp_path, monkeypatch):
