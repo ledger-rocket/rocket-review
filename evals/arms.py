@@ -29,6 +29,12 @@ import rocket_review.prompts as rr_prompts
 # format sections private — under `--json`, which is how every measured run is made, the
 # assembled prompt is arm bytes throughout: the arm's mode body, its standards addendum
 # when the case supplies docs, and its JSON section.
+#
+# Two blocks an arm cannot vary sit outside that, in an agentic run only: the
+# backend's sandbox description and the private evidence rule in `rocket_review.prompts`.
+# Both are fixed text, so an arm's content hash no longer covers every byte the model reads;
+# rows recorded before and after those blocks existed are separated by `harness_commit` and
+# `runtime_rr_version`, not by the arm hash, and are not comparable on prompt bytes alone.
 PROMPT_CONSTANTS = (
     "PLAN_REVIEW_PROMPT",
     "CODE_REVIEW_PROMPT",

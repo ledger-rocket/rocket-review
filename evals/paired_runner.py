@@ -103,6 +103,9 @@ class Provenance:
     #: --python pointing elsewhere these differ, and the second one is the thing measured.
     runtime_rr_version: str | None
     runtime_rr_path: str | None
+    #: sha256 of the runtime's fixed agentic prompt blocks — the backends' sandbox
+    #: descriptions and the evidence rule — which sit outside every arm's hash.
+    runtime_prompt_hash: str | None
     #: HEAD of the harness checkout. The PyPI version is constant across source commits, so
     #: it alone cannot say which prompts and which harness code a result came from.
     harness_commit: str | None
@@ -158,6 +161,40 @@ def probe_runtime(python: str) -> tuple[str | None, str | None]:
     return version, path
 
 
+def probe_runtime_prompt_hash(python: str) -> str | None:
+    """Fingerprint the prompt text the runtime adds that no arm can vary.
+
+    An arm's content hash covers the mode bodies and the addenda. An agentic run also carries
+    each backend's sandbox description and the private evidence rule, which an arm cannot
+    change, so two rows with the same arm hash can still have read different prompts —
+    `--python` can point at any checkout, and a released version string does not move when
+    those blocks change. None means the runtime has no such blocks (a rocket-review from
+    from before they existed) or could not be asked.
+    """
+    code = (
+        "import hashlib\n"
+        "from rocket_review import prompts\n"
+        "from rocket_review.backends import claude, codex, opencode\n"
+        "from rocket_review.backends.base import ReviewJob\n"
+        "job = ReviewJob(mode='diff', content='d', docs_content=None, extra=None,\n"
+        "                commit=None, pr=False, git_cmd=None, model=None)\n"
+        "parts = [prompts._REVIEW_EVIDENCE_RULE, claude._environment(job), opencode.ENVIRONMENT]\n"
+        "parts += [codex.SANDBOX_ENVIRONMENTS[k] for k in sorted(codex.SANDBOX_ENVIRONMENTS)]\n"
+        "print(hashlib.sha256('\\n'.join(parts).encode('utf-8')).hexdigest())"
+    )
+    try:
+        proc = subprocess.run(
+            [python, "-c", code], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    digest = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+    return digest if len(digest) == 64 and all(c in "0123456789abcdef" for c in digest) else None
+
+
 def harness_head_commit() -> str | None:
     try:
         proc = subprocess.run(
@@ -194,6 +231,9 @@ class PairedRecord:
     harness_rr_version: str | None
     #: The rocket-review that actually ran this review, and the harness commit it ran from.
     runtime_rr_version: str | None
+    #: sha256 of the runtime's fixed agentic prompt blocks, which no arm owns.
+    #: null when that runtime predates them.
+    runtime_prompt_hash: str | None
     harness_commit: str | None
     rep: int
     #: Position in this case/backend's interleaved sequence, so the alternation can be
@@ -406,6 +446,7 @@ def run_attempt(
         "backend_version": provenance.backend_versions.get(task.backend),
         "harness_rr_version": provenance.harness_rr_version,
         "runtime_rr_version": provenance.runtime_rr_version,
+        "runtime_prompt_hash": provenance.runtime_prompt_hash,
         "harness_commit": provenance.harness_commit, "rep": task.rep,
         "order_index": task.order_index, "attempt": attempt, "command": command,
         "cwd": str(task.materialized.cwd), "exit_code": exit_code,
@@ -610,11 +651,13 @@ def main(argv: list[str] | None = None) -> int:
             staged[case.id] = materialize(case, args.repo, workdir)
         groups = build_rep_groups(cases, staged, specs, control, treatment, args.runs)
         runtime_version, runtime_path = probe_runtime(args.python)
+        runtime_prompt_hash = probe_runtime_prompt_hash(args.python)
         provenance = Provenance(
             sweep_id=uuid.uuid4().hex,
             harness_rr_version=harness_rr_version(),
             runtime_rr_version=runtime_version,
             runtime_rr_path=runtime_path,
+            runtime_prompt_hash=runtime_prompt_hash,
             harness_commit=harness_head_commit(),
             backend_versions=backend_versions(backends),
         )
@@ -649,6 +692,7 @@ def _execute(
         "harness_commit": provenance.harness_commit,
         "runtime_rr_version": provenance.runtime_rr_version,
         "runtime_rr_path": provenance.runtime_rr_path,
+        "runtime_prompt_hash": provenance.runtime_prompt_hash,
         "python": args.python,
         "launcher": str(LAUNCHER),
         "arms": {

@@ -5,6 +5,7 @@ import pytest
 
 from rocket_review.backends import BACKENDS, api, base, claude, codex, opencode
 from rocket_review.backends.base import BackendError, ReviewJob
+from rocket_review.config import CODEX_SANDBOX_MODES
 from rocket_review.models import REVIEW_SCHEMA
 
 
@@ -507,6 +508,65 @@ def test_claude_git_view_rule_is_exact_match_not_wildcard(monkeypatch):
     assert "Bash(git show deadbeef)" in allow and "Bash(git show:*)" not in allow
 
 
+def test_claude_prompt_states_its_read_only_tools(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["stdin"] = stdin
+        return "ok"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    claude.review(job())
+    assert "You can use only the Read, Glob and Grep tools." in captured["stdin"]
+    assert "Every other command is denied" in captured["stdin"]
+    assert "which checks you ran" in captured["stdin"]
+
+    claude.review(job(content=None, commit="deadbeef"))
+    assert "and the single shell command `git show deadbeef`" in captured["stdin"]
+
+
+def test_claude_prompt_names_exactly_the_allow_listed_git_command(monkeypatch):
+    # The prompt and --allowedTools are built from one source, so they cannot drift apart.
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"], captured["stdin"] = cmd, stdin
+        return "ok"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    claude.review(job(content=None, git_cmd="git diff --staged"))
+    allow = captured["cmd"][captured["cmd"].index("--allowedTools") + 1]
+    assert "Bash(git diff --staged)" in allow
+    assert "the single shell command `git diff --staged`" in captured["stdin"]
+
+
+@pytest.mark.parametrize("source", [
+    dict(content=None, commit="deadbeef"),
+    dict(content=None, git_cmd="git diff HEAD"),
+    dict(pr=True, content="PR BODY AND DIFF"),
+    dict(commit="deadbeef", git_cmd="git diff HEAD", content=None),
+])
+def test_claude_asks_for_exactly_the_command_it_allow_lists(monkeypatch, source):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"], captured["stdin"] = cmd, stdin
+        return "ok"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    claude.review(job(**source))
+    allow = captured["cmd"][captured["cmd"].index("--allowedTools") + 1]
+    command = claude._git_view_command(job(**source))
+    if command:
+        assert f"Bash({command})" in allow
+        assert f"Run `{command}`" in captured["stdin"]
+        assert f"the single shell command `{command}`" in captured["stdin"]
+    else:
+        assert "Bash(" not in allow
+        assert "Run `git" not in captured["stdin"]
+        assert "single shell command" not in captured["stdin"]
+
+
 def test_claude_default_model_omits_flag(monkeypatch):
     captured = {}
 
@@ -534,6 +594,50 @@ def test_opencode_run_command_with_model(monkeypatch):
     assert "--agent" in cmd and "plan" in cmd
     assert "--model" in cmd and "google/gemini-3-pro" in cmd
     assert "Do not modify any files" in captured["stdin"]  # prompt travels via stdin
+
+
+@pytest.mark.parametrize("mode", CODEX_SANDBOX_MODES)
+def test_codex_prompt_states_the_sandbox_policy_it_runs_under(monkeypatch, mode):
+    captured = {}
+    real_write = base.write_prompt_file
+
+    def capture_prompt(text):
+        captured["prompt"] = text
+        return real_write(text)
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        with open(cmd[cmd.index("-o") + 1], "w") as f:
+            f.write("REVIEW TEXT")
+        return ""
+
+    monkeypatch.setattr(base, "write_prompt_file", capture_prompt)
+    monkeypatch.setattr(base, "run_command", fake_run)
+    codex.review(job(codex_sandbox=mode))
+    assert codex.SANDBOX_ENVIRONMENTS[mode] in captured["prompt"]
+    assert "which checks you ran" in captured["prompt"]
+
+
+def test_codex_describes_every_sandbox_mode():
+    assert set(codex.SANDBOX_ENVIRONMENTS) == set(CODEX_SANDBOX_MODES)
+
+
+def test_codex_refuses_a_sandbox_it_cannot_describe(monkeypatch):
+    monkeypatch.setattr(base, "run_command", lambda *a, **k: pytest.fail("codex must not launch"))
+    with pytest.raises(BackendError, match="no sandbox description"):
+        codex.review(job(codex_sandbox="unknown-mode"))
+
+
+def test_opencode_prompt_states_the_plan_agent_limits(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["stdin"] = stdin
+        return "ok"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    opencode.review(job())
+    assert opencode.ENVIRONMENT in captured["stdin"]
+    assert "which checks you ran" in captured["stdin"]
 
 
 def test_opencode_empty_output_raises(monkeypatch):

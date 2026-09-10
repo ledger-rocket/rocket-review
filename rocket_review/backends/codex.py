@@ -12,9 +12,39 @@ BINARY = "codex"
 INSTALL_HINT = "npm install -g @openai/codex (https://github.com/openai/codex)"
 DEFAULT_MODEL = None  # honor the user's codex default (~/.codex/config.toml)
 
+# What each `codex exec -s <mode>` policy means for the reviewer, stated in its prompt
+# The keys cover config.CODEX_SANDBOX_MODES; a test pins that.
+SANDBOX_ENVIRONMENTS = {
+    "read-only": (
+        "This review runs under Codex's read-only sandbox policy: the sandbox permits reading "
+        "files only, and network access is restricted. A test, build or package manager that "
+        "writes a cache or fetches a dependency fails here."
+    ),
+    "workspace-write": (
+        "This review runs under Codex's workspace-write sandbox policy: the sandbox permits "
+        "reading files, and editing files in the working directory and the sandbox's other "
+        "writable roots, which normally include a temporary directory; editing anywhere else "
+        "needs approval, and network access is restricted. Do not modify the project's files."
+    ),
+    "danger-full-access": (
+        "This review runs with no Codex sandbox (danger-full-access): there is no filesystem "
+        "sandboxing and network access is enabled. Do not modify any files, and run only "
+        "commands that inspect."
+    ),
+}
+
+
+def _environment(job: ReviewJob) -> str:
+    try:
+        return SANDBOX_ENVIRONMENTS[job.codex_sandbox]
+    except KeyError:
+        raise BackendError(
+            f"no sandbox description for codex sandbox {job.codex_sandbox!r}"
+        ) from None
+
 
 def review(job: ReviewJob) -> str:
-    prompt_file = base.write_prompt_file(build_agent_prompt(job))
+    prompt_file = base.write_prompt_file(build_agent_prompt(job, _environment(job)))
     with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
         outfile = Path(f.name)
     schema_file = None
