@@ -32,6 +32,11 @@ from rocket_review.repo import (
 
 RAW_TRUNCATE_LIMIT = 4000
 
+# What an agentic backend is told to run for --diff and --staged. Named once, because
+# `rr --fingerprint` assembles the prompt for both and must probe the text a review sends.
+DIFF_GIT_CMD = "git diff HEAD"
+STAGED_GIT_CMD = "git diff --staged"
+
 # Stand-ins when a mode's default is not available, closest substitute first: the other
 # agentic CLI reviews the same way, opencode is agentic but provider-dependent, and api
 # cannot navigate the project at all (and needs a key).
@@ -942,6 +947,7 @@ def _run():
         docs = collect_docs(settings.docs, args.llms, source=docs_source(settings, layers))
         doc = fingerprint.describe(
             mode=mode, specs=specs, settings=settings, docs_content=docs, extra=args.prompt,
+            foreign_repo=bool(args.repo),
         )
         print(json.dumps(doc, indent=2))
         sys.exit(0)
@@ -984,7 +990,7 @@ def _run():
             content = get_diff(args.staged)  # one snapshot for every backend
         else:
             ensure_diff_exists(args.staged)
-            git_cmd = "git diff --staged" if args.staged else "git diff HEAD"
+            git_cmd = STAGED_GIT_CMD if args.staged else DIFF_GIT_CMD
         changed_paths = git_diff_changed_paths(args.staged)
     elif args.files:
         content = read_files(args.files)

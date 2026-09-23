@@ -19,7 +19,8 @@ from rocket_review.backends import BACKENDS, api, claude, codex, opencode
 from rocket_review.cli import main
 from rocket_review.models import REVIEW_SCHEMA
 
-BASE_ARGS = ["--fingerprint", "--mode", "diff", "--json", "--backend", "codex:m1,claude:m2"]
+BASE_ARGS = ["--fingerprint", "--mode", "diff", "--json", "--effort", "medium",
+             "--backend", "codex:m1,claude:m2"]
 
 
 @pytest.fixture(autouse=True)
@@ -29,6 +30,7 @@ def no_review(monkeypatch):
         raise AssertionError("--fingerprint started a review")
 
     monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
+    monkeypatch.setattr("rocket_review.fingerprint.cli_version", lambda binary: f"{binary} 1.0")
     monkeypatch.setattr(
         "rocket_review.cli.run_one",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("--fingerprint started a review")),
@@ -66,9 +68,10 @@ def test_prints_a_versioned_sha256_fingerprint_and_reviews_nothing(monkeypatch, 
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", doc["fingerprint"])
     assert doc["mode"] == "diff"
     assert doc["backends"] == [
-        {"name": "codex", "model": "m1"}, {"name": "claude", "model": "m2"},
+        {"name": "codex", "model": "m1", "cli_version": "codex 1.0"},
+        {"name": "claude", "model": "m2", "cli_version": "claude 1.0"},
     ]
-    assert doc["models_pinned"] is True
+    assert doc["pinned"] is True
 
 
 def test_is_stable_across_runs(monkeypatch, capsys):
@@ -112,6 +115,22 @@ def test_a_source_flag_decides_the_mode_without_being_read(monkeypatch, capsys):
     assert doc["mode"] == "diff"
 
 
+@pytest.mark.parametrize("source, mode", [
+    (["--staged"], "diff"), (["--commit", "HEAD"], "diff"), (["--pr", "5"], "diff"),
+    (["plan.md"], "plan"), (["src/app.py"], "code"),
+])
+def test_no_source_is_resolved_or_read(monkeypatch, capsys, source, mode):
+    # The fingerprint exits before the content is gathered: no git, no gh, no file read.
+    for name in ("ensure_diff_exists", "resolve_commit", "get_pr_content", "read_files",
+                 "get_diff", "get_commit_diff"):
+        monkeypatch.setattr(
+            f"rocket_review.cli.{name}",
+            lambda *a, _n=name, **k: (_ for _ in ()).throw(AssertionError(f"{_n} ran")),
+        )
+    doc = fp(monkeypatch, capsys, ["--fingerprint", *source, "--backend", "claude:m"])
+    assert doc["mode"] == mode
+
+
 def test_refuses_the_settings_a_review_would_refuse(monkeypatch, capsys):
     # A fingerprint of a review that cannot start would key a receipt nobody can mint.
     code, doc, _ = run(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--fail-on", "high"])
@@ -130,15 +149,38 @@ def test_refuses_a_backend_that_is_not_installed(monkeypatch, capsys):
 def test_an_unpinned_model_is_reported_as_unpinned(monkeypatch, capsys):
     # codex and claude with no pin run whatever the CLI's own default is, which can change
     # under an unchanged fingerprint. The caller is told, so it can decline to reuse.
-    doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--backend", "codex,claude:m"])
-    assert doc["backends"] == [{"name": "codex", "model": None}, {"name": "claude", "model": "m"}]
-    assert doc["models_pinned"] is False
+    doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--effort", "high",
+                                   "--backend", "codex,claude:m"])
+    assert [b["model"] for b in doc["backends"]] == [None, "m"]
+    assert doc["pinned"] is False
+
+
+def test_an_unset_effort_is_reported_as_unpinned(monkeypatch, capsys):
+    # With no effort rr passes none, and each CLI applies a default of its own.
+    doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--backend", "codex:m"])
+    assert doc["pinned"] is False
+
+
+def test_a_cli_that_cannot_say_its_version_is_reported_as_unpinned(monkeypatch, capsys):
+    monkeypatch.setattr("rocket_review.fingerprint.cli_version", lambda binary: None)
+    doc = fp(monkeypatch, capsys)
+    assert [b["cli_version"] for b in doc["backends"]] == [None, None]
+    assert doc["pinned"] is False
 
 
 def test_api_counts_as_pinned_through_its_own_default(monkeypatch, capsys):
-    doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--backend", "api"])
-    assert doc["backends"] == [{"name": "api", "model": api.DEFAULT_MODEL}]
-    assert doc["models_pinned"] is True
+    doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--effort", "high",
+                                   "--backend", "api"])
+    assert doc["backends"] == [{"name": "api", "model": api.DEFAULT_MODEL, "cli_version": None}]
+    assert doc["pinned"] is True
+
+
+def test_an_api_alias_rr_resolves_at_run_time_is_unpinned(monkeypatch, capsys):
+    # A non-canonical name is resolved to the newest dated snapshot the account lists, so the
+    # model can change between two runs under the same name.
+    doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--effort", "high",
+                                   "--backend", "api:custom"])
+    assert doc["pinned"] is False
 
 
 def test_a_models_table_in_the_user_config_pins_the_model(monkeypatch, capsys, tmp_path):
@@ -146,7 +188,7 @@ def test_a_models_table_in_the_user_config_pins_the_model(monkeypatch, capsys, t
     user.parent.mkdir(parents=True)
     user.write_text('[models]\ncodex = "from-config"\n')
     doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--backend", "codex"])
-    assert doc["backends"] == [{"name": "codex", "model": "from-config"}]
+    assert doc["backends"][0]["model"] == "from-config"
 
 
 # Each of these changes what a reviewer is asked or who asks it, so each must move the hash.
@@ -154,6 +196,8 @@ MOVES = {
     "backend list": BASE_ARGS[:-1] + ["codex:m1"],
     "backend model": BASE_ARGS[:-1] + ["codex:m1,claude:other"],
     "effort": BASE_ARGS + ["--effort", "high"],
+    # api drops its file attachments when too little of the timeout is left for them.
+    "timeout": BASE_ARGS + ["--timeout", "3300"],
     "codex sandbox": BASE_ARGS + ["--codex-sandbox", "workspace-write"],
     "fail-on threshold": BASE_ARGS + ["--fail-on", "medium"],
     "json mode": [a for a in BASE_ARGS if a != "--json"],
@@ -181,7 +225,50 @@ def test_moves_with_a_config_file_setting(monkeypatch, capsys, tmp_path):
     before = fp(monkeypatch, capsys)["fingerprint"]
     user = tmp_path / "config-home" / "rocket-review" / "config.toml"
     user.parent.mkdir(parents=True)
-    user.write_text('effort = "high"\n')
+    user.write_text('codex_sandbox = "workspace-write"\n')
+    assert fp(monkeypatch, capsys)["fingerprint"] != before
+
+
+def test_moves_with_a_backend_cli_version(monkeypatch, capsys):
+    # Each CLI release brings its own system prompt, tools and defaults.
+    before = fp(monkeypatch, capsys)["fingerprint"]
+    monkeypatch.setattr("rocket_review.fingerprint.cli_version", lambda binary: f"{binary} 2.0")
+    assert fp(monkeypatch, capsys)["fingerprint"] != before
+
+
+def test_moves_when_the_text_under_review_is_from_another_repository(monkeypatch, capsys):
+    # --repo turns off api's file attachments, so the same PR text is reviewed with less.
+    monkeypatch.setattr(
+        "rocket_review.cli.get_pr_content",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("the PR was fetched")),
+    )
+    args = ["--fingerprint", "--pr", "5", "--effort", "high", "--backend", "api"]
+    assert (fp(monkeypatch, capsys, args)["fingerprint"]
+            != fp(monkeypatch, capsys, args + ["--repo", "acme/api"])["fingerprint"])
+
+
+def test_moves_with_rr_own_code(monkeypatch, capsys):
+    # The version string does not move in a source checkout or an editable install, and the
+    # code that parses and gates a review decides the verdict as much as the prompt does.
+    before = fp(monkeypatch, capsys)["fingerprint"]
+    monkeypatch.setattr("rocket_review.fingerprint.code_digest", lambda: "0" * 64)
+    assert fp(monkeypatch, capsys)["fingerprint"] != before
+
+
+def test_the_code_digest_covers_every_module_in_the_package(tmp_path):
+    (tmp_path / "backends").mkdir()
+    (tmp_path / "cli.py").write_text("a = 1\n")
+    (tmp_path / "backends" / "api.py").write_text("b = 1\n")
+    before = fingerprint.code_digest(tmp_path)
+    (tmp_path / "backends" / "api.py").write_text("b = 2\n")
+    assert fingerprint.code_digest(tmp_path) != before
+
+
+def test_moves_with_the_staged_git_command(monkeypatch, capsys):
+    # The per-source instruction for --staged names its own command; the fingerprint probes
+    # the constant the review uses rather than a copy of it.
+    before = fp(monkeypatch, capsys)["fingerprint"]
+    monkeypatch.setattr("rocket_review.cli.STAGED_GIT_CMD", "git diff --cached")
     assert fp(monkeypatch, capsys)["fingerprint"] != before
 
 
@@ -237,11 +324,10 @@ def test_moves_with_the_git_command_a_diff_job_is_told_to_run(monkeypatch, capsy
     assert fp(monkeypatch, capsys)["fingerprint"] != before
 
 
-def test_holds_still_for_the_timeout(monkeypatch, capsys):
-    # The timeout decides whether a backend answers, never what it answers, and a timed-out
-    # review is not a verdict anyone keeps.
+def test_holds_still_for_full_output(monkeypatch, capsys):
+    # --full only decides how much of an answer is printed.
     assert (fp(monkeypatch, capsys)["fingerprint"]
-            == fp(monkeypatch, capsys, BASE_ARGS + ["--timeout", "3300"])["fingerprint"])
+            == fp(monkeypatch, capsys, BASE_ARGS + ["--full"])["fingerprint"])
 
 
 def test_holds_still_for_where_the_same_checkout_sits(monkeypatch, capsys, tmp_path):
@@ -251,17 +337,18 @@ def test_holds_still_for_where_the_same_checkout_sits(monkeypatch, capsys, tmp_p
     for name in ("wt-a", "wt-b"):
         root = tmp_path / name
         root.mkdir()
-        (root / ".rocket-review.toml").write_text('effort = "low"\ndocs = ["STANDARDS.md"]\n')
+        (root / ".rocket-review.toml").write_text('timeout = 1234\ndocs = ["STANDARDS.md"]\n')
         (root / "STANDARDS.md").write_text("rule\n")
         # A project config's docs are read only when the repository tracks them at HEAD.
         for cmd in (["init", "-q"], ["add", "-A"],
-                    ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c"]):
+                    ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+                     "commit", "-qm", "c"]):
             subprocess.run(["git", "-C", str(root), *cmd], check=True, capture_output=True)
         repo.clear_caches()
         monkeypatch.chdir(root)
         results.append(fp(monkeypatch, capsys, BASE_ARGS))
     assert results[0]["fingerprint"] == results[1]["fingerprint"]
-    assert results[0]["effort"] == "low"
+    assert results[0]["timeout"] == 1234
     assert results[0]["docs_sha256"] is not None
 
 

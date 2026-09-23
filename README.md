@@ -278,19 +278,26 @@ the reviewed content plus this value and reuse it only when neither moved.
 - **Pass the review's own flags.** The fingerprint is computed from the same parser, config
   files and backend resolution a review with those flags would use. With no review source
   flag, `--mode` is required; stdin is never read and never counts as a source.
-- **What is hashed:** the rr version, the mode, each backend and the model it runs, `effort`,
-  `codex_sandbox`, `fail_on`, `json`, the standards docs as read (`docs_sha256`), the extra
-  instructions (`extra_sha256`), and the prompt each backend assembles for every source shape,
-  with the output schema in JSON mode (`prompt_sha256`). The prompt is there because the
-  version string does not move in a source checkout or an editable install.
-- **What is not:** `timeout`, which decides whether a backend answers but never what it
-  answers, and `full`, which only decides how much of an answer is printed. Config files
-  enter through the settings they resolve to, never as bytes or paths, so a comment edit
-  or the same project at another path is the same fingerprint.
-- **`models_pinned`** is `false` when a backend runs its CLI's own default model (codex,
-  claude or opencode with no pin). That default can change under an unchanged fingerprint,
-  so a cache should decline to reuse a verdict then. `api` counts as pinned through its
-  own default.
+- **What is hashed:** the rr version and a hash of rr's own code (`code_sha256`); the
+  mode; each backend with the model it runs and its CLI's `--version`; `effort`,
+  `codex_sandbox`, `fail_on`, `json` and `timeout` (`api` drops its file attachments when
+  too little of the timeout is left); whether `--repo` names another repository, which
+  also turns attachments off; the standards docs as read (`docs_sha256`); the extra
+  instructions (`extra_sha256`); and the prompt each backend assembles for every source
+  shape, with the output schema in JSON mode (`prompt_sha256`). The code and prompt hashes
+  are there because the version string does not move in a source checkout or an editable
+  install.
+- **What is not:** `full`, which only decides how much of an answer is printed. Config
+  files enter through the settings they resolve to, never as bytes or paths, so a comment
+  edit or the same project at another path is the same fingerprint. Nor can rr see the
+  instruction and settings files each backend CLI loads for itself (`~/.claude/CLAUDE.md`,
+  `~/.codex/AGENTS.md` and the like); a cache that must track those keys on them itself.
+- **`pinned`** is `false` when a choice is left to a default the fingerprint cannot see: a
+  backend with no model pin (codex, claude or opencode run their CLI's own default), no
+  `effort` (each CLI applies its own), a CLI that does not answer `--version`, or an `api`
+  model name that is not canonical (rr resolves it to the newest dated snapshot at run
+  time). Those defaults can change under an unchanged fingerprint, so a cache should
+  decline to reuse a verdict then.
 - **Refuses what a review refuses.** Settings `rr` will not review with, or a backend that is
   not installed, exit 1 with the same message and print no document.
 - **`fingerprint_version`** (currently `"1"`) bumps when the hashed material changes
