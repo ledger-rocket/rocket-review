@@ -43,8 +43,13 @@ def _environment(job: ReviewJob) -> str:
         ) from None
 
 
+def prompt(job: ReviewJob) -> str:
+    """The instructions this backend sends, and the text `rr --fingerprint` hashes."""
+    return build_agent_prompt(job, _environment(job))
+
+
 def review(job: ReviewJob) -> str:
-    prompt_file = base.write_prompt_file(build_agent_prompt(job, _environment(job)))
+    prompt_file = base.write_prompt_file(prompt(job))
     with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
         outfile = Path(f.name)
     schema_file = None

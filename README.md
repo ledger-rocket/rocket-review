@@ -115,6 +115,7 @@ rr src/auth.py --docs             # review files against your documented standar
 rr --diff --no-config             # ignore the config files (hermetic run)
 rr init                           # write the default user config file
 rr doctor                         # check this host: config, backends, logins
+rr --fingerprint --mode diff --json  # hash the reviewer config; reviews nothing
 rr --version                      # print the installed version
 ```
 
@@ -262,6 +263,38 @@ rr --staged --json --fail-on high && git commit   # block the commit on high+ fi
   the full length. This bounds the envelope and keeps review text — which may quote
   proprietary code — off disk. `--full` inlines the untruncated output instead.
 - **Failures fail the gate closed**, both parse failures and backend errors.
+
+### Reviewer fingerprint (`--fingerprint`)
+
+```bash
+rr --fingerprint --mode diff --docs --json --fail-on high --backend codex,claude
+```
+
+Prints one JSON document and exits 0 without reviewing anything. Its `fingerprint`
+(`sha256:<hex>`) hashes everything besides the content that decides a review's verdict, so
+a tool that caches verdicts — a pre-push hook keeping review receipts — can key a verdict on
+the reviewed content plus this value and reuse it only when neither moved.
+
+- **Pass the review's own flags.** The fingerprint is computed from the same parser, config
+  files and backend resolution a review with those flags would use. With no review source
+  flag, `--mode` is required; stdin is never read and never counts as a source.
+- **What is hashed:** the rr version, the mode, each backend and the model it runs, `effort`,
+  `codex_sandbox`, `fail_on`, `json`, the standards docs as read (`docs_sha256`), the extra
+  instructions (`extra_sha256`), and the prompt each backend assembles for every source shape,
+  with the output schema in JSON mode (`prompt_sha256`). The prompt is there because the
+  version string does not move in a source checkout or an editable install.
+- **What is not:** `timeout`, which decides whether a backend answers but never what it
+  answers, and `full`, which only decides how much of an answer is printed. Config files
+  enter through the settings they resolve to, never as bytes or paths, so a comment edit
+  or the same project at another path is the same fingerprint.
+- **`models_pinned`** is `false` when a backend runs its CLI's own default model (codex,
+  claude or opencode with no pin). That default can change under an unchanged fingerprint,
+  so a cache should decline to reuse a verdict then. `api` counts as pinned through its
+  own default.
+- **Refuses what a review refuses.** Settings `rr` will not review with, or a backend that is
+  not installed, exit 1 with the same message and print no document.
+- **`fingerprint_version`** (currently `"1"`) bumps when the hashed material changes
+  meaning. Compare fingerprints only between documents of the same version.
 
 ## Review modes
 

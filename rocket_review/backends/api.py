@@ -19,12 +19,21 @@ INSTALL_HINT = "set OPENAI_API_KEY (or put it in .env)"
 DEFAULT_MODEL = "gpt-5.6-terra"
 
 
+def prompt(job: ReviewJob) -> str:
+    """The system instructions this backend sends, and the text `rr --fingerprint` hashes.
+
+    The extra instructions travel in the user message instead (_call_openai), and the
+    fingerprint carries them on their own.
+    """
+    return get_prompt(job.mode, job.docs_content, job.json_output)
+
+
 def review(job: ReviewJob) -> str:
     content = job.content or ""
     if job.docs_content:
         content = (f"=== PROJECT STANDARDS ===\n{job.docs_content}\n"
                    f"=== END PROJECT STANDARDS ===\n\n{content}")
-    system_prompt = get_prompt(job.mode, job.docs_content, job.json_output)
+    system_prompt = prompt(job)
     # Reviewing another repository's text against this checkout's files is not something a
     # gate can make safe: "does the repository track it" would be asked of the wrong
     # repository, so a path the remote PR names and this checkout happens to track would be

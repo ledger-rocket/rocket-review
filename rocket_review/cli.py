@@ -719,6 +719,7 @@ def _run():
             "  git diff | rr                          # review a diff piped on stdin\n"
             "  rr init                                # write the default user config\n"
             "  rr doctor                              # check this host's setup, exit 1 on a gap\n"
+            "  rr --fingerprint --mode diff --json    # hash the reviewer config, review nothing\n"
             "  rr --version                           # print the installed version\n"
         ),
     )
@@ -811,6 +812,12 @@ def _run():
         "--no-config", action="store_true",
         help="Ignore .rocket-review.toml and ~/.config/rocket-review/config.toml",
     )
+    parser.add_argument(
+        "--fingerprint", action="store_true",
+        help="Print a JSON document hashing everything besides the content that decides this "
+             "review's verdict, then exit without reviewing. Takes the review's own flags; "
+             "needs --mode when no source flag names one.",
+    )
 
     args = parser.parse_args()
 
@@ -868,7 +875,9 @@ def _run():
         args.diff or args.staged,
         bool(args.files),
     ])
-    sources = explicit_sources + int(stdin_has_input())
+    # --fingerprint reads no content, so a pipe on stdin is not a source it could collide
+    # with: a hook runs it with the push's ref lines, or a diff, already waiting there.
+    sources = explicit_sources + (0 if args.fingerprint else int(stdin_has_input()))
     if sources > 1:
         print("Error: specify only one review source (files, --diff, --staged, --commit, --pr, or stdin).", file=sys.stderr)
         sys.exit(1)
@@ -880,6 +889,14 @@ def _run():
         mode = "diff"
     elif args.files:
         mode = detect_mode(args.files)
+    elif args.fingerprint:
+        # Guessing "diff" from a non-tty stdin, as a review does, would make the answer
+        # depend on how the caller wired its streams rather than on what it asked for.
+        if not args.mode:
+            print("Error: --fingerprint needs --mode (plan, code or diff) when no review "
+                  "source names one.", file=sys.stderr)
+            sys.exit(1)
+        mode = args.mode
     elif not sys.stdin.isatty():
         mode = "diff"
     else:
@@ -916,6 +933,19 @@ def _run():
             print(f"Error: backend '{name}' unavailable — {hint}{backend_origin}",
                   file=sys.stderr)
             sys.exit(1)
+    if args.fingerprint:
+        # Here and no earlier: every check a review makes before it touches content has run,
+        # so a review that could not start has no fingerprint either. Imported here for the
+        # reason doctor is — a review should not pay for what it never uses.
+        from rocket_review import fingerprint
+
+        docs = collect_docs(settings.docs, args.llms, source=docs_source(settings, layers))
+        doc = fingerprint.describe(
+            mode=mode, specs=specs, settings=settings, docs_content=docs, extra=args.prompt,
+        )
+        print(json.dumps(doc, indent=2))
+        sys.exit(0)
+
     # api has no repo to navigate, and opencode's read-only `plan` agent may be denied the
     # tools it would need to run git itself in non-interactive mode — so if either is
     # selected we materialize content for them. A mutable working-tree diff is captured

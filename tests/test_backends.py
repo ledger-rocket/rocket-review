@@ -1057,3 +1057,49 @@ def test_opencode_custom_timeout_passed_through(monkeypatch):
     monkeypatch.setattr(base, "run_command", fake_run)
     opencode.review(job(timeout=1800))
     assert captured["timeout"] == 1800
+
+
+# `rr --fingerprint` hashes each backend's `prompt(job)`. These pin that `review` sends
+# exactly that text, so a fingerprint cannot hold still while what a backend sends moves.
+PARITY_JOB = dict(docs_content="STANDARDS", extra="check the locking", json_output=True)
+
+
+@pytest.mark.parametrize("mod", [claude, opencode])
+def test_stdin_backends_send_the_prompt_the_fingerprint_hashes(monkeypatch, mod):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["stdin"] = stdin
+        return "REVIEW TEXT"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    mod.review(job(**PARITY_JOB))
+    assert captured["stdin"] == mod.prompt(job(**PARITY_JOB))
+
+
+def test_codex_sends_the_prompt_the_fingerprint_hashes(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        prompt_file = cmd[-1].split()[3]
+        with open(prompt_file) as f:
+            captured["prompt"] = f.read()
+        with open(cmd[cmd.index("-o") + 1], "w") as f:
+            f.write("REVIEW TEXT")
+        return ""
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    codex.review(job(**PARITY_JOB))
+    assert captured["prompt"] == codex.prompt(job(**PARITY_JOB))
+
+
+def test_api_sends_the_prompt_the_fingerprint_hashes(monkeypatch):
+    captured = {}
+
+    def fake_call(content, system_prompt, *rest, **kwargs):
+        captured["system"] = system_prompt
+        return "REVIEW TEXT"
+
+    monkeypatch.setattr(api, "_call_openai", fake_call)
+    api.review(job(**PARITY_JOB))
+    assert captured["system"] == api.prompt(job(**PARITY_JOB))
