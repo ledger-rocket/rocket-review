@@ -243,14 +243,33 @@ every measured run is `--json`, where `get_prompt` returns the arm's mode body, 
 `PROJECT_STANDARDS_ADDENDUM` when the case supplies docs, and its `JSON_OUTPUT_ADDENDUM` —
 arm bytes throughout, with no live text anywhere in it. Asserted in `test_arms.py`.
 
-An agentic backend adds two blocks the arm does not own: the backend's own
-description of what its sandbox allows, and the private evidence rule in `prompts.py` that
-makes a review say which checks it ran. Both are fixed text, so for an agentic run the arm's
-content hash no longer covers every byte the model reads. Every row and the header therefore
-carry `runtime_prompt_hash`: the sha256 of those blocks as the *runtime* interpreter defines
-them, asked of `--python` itself rather than inferred from a version string. Two rows with the
-same arm hash and the same `runtime_prompt_hash` read the same prompt bytes; a row with
-`null` there ran a rocket-review from before those blocks existed.
+An agentic backend reads more than the arm owns: the wrapper `build_agent_prompt` puts
+around it, the per-source instruction that wrapper chooses, each backend's own description of
+what its sandbox allows, and the private evidence rule in `prompts.py` that makes a review say
+which checks it ran. All of that is fixed text, so for an agentic run the arm's content hash no
+longer covers every byte the model reads. Every row and the header therefore carry
+`runtime_prompt_hash`, asked of `--python` itself rather than inferred from a version string.
+
+The hash is not taken over a written list of blocks. Such a list is only as complete as its
+author's memory, and it can only ever see the one job shape it builds. The probe instead
+replaces the five arm-owned constants and assembles the real prompt through
+`build_agent_prompt` for every mode, every JSON setting, and every source shape, then hashes
+the result. What is left is exactly the text no arm can vary, including the branches an
+inline-content job never reaches, such as the git command a `--diff` or `--commit` case is
+told to run.
+
+Two details of that replacement matter:
+
+- Each constant becomes its own name, `<DIFF_REVIEW_PROMPT>`, not `""`. A blank erases which
+  constant the wrapper chose, so a runtime that hands a diff job the CODE body would assemble
+  text identical to one that hands it the DIFF body, and the hash would sit still on exactly
+  the change it exists to catch.
+- The shapes include a job with no docs and no extra. `build_command` runs the paired
+  evaluations with `--no-config` and neither `--docs` nor `--prompt`, so that is the shape the
+  measurement actually runs.
+
+Two rows with the same arm hash and the same `runtime_prompt_hash` read the same prompt bytes;
+a row with `null` there ran a rocket-review from before those blocks existed.
 
 ## The injection seam
 
