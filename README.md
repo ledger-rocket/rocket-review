@@ -115,6 +115,7 @@ rr src/auth.py --docs             # review files against your documented standar
 rr --diff --no-config             # ignore the config files (hermetic run)
 rr init                           # write the default user config file
 rr doctor                         # check this host: config, backends, logins
+rr --fingerprint --mode diff --json  # hash the reviewer config; reviews nothing
 rr --version                      # print the installed version
 ```
 
@@ -262,6 +263,59 @@ rr --staged --json --fail-on high && git commit   # block the commit on high+ fi
   the full length. This bounds the envelope and keeps review text — which may quote
   proprietary code — off disk. `--full` inlines the untruncated output instead.
 - **Failures fail the gate closed**, both parse failures and backend errors.
+
+### Reviewer fingerprint (`--fingerprint`)
+
+```bash
+rr --fingerprint --mode diff --docs --json --fail-on high --backend codex,claude
+```
+
+Prints one JSON document and exits 0 without reviewing anything. Its `fingerprint`
+(`sha256:<hex>`) hashes everything besides the content that decides a review's verdict, so
+a tool that caches verdicts — a pre-push hook keeping review receipts — can key a verdict on
+the reviewed content plus this value and reuse it only when neither moved.
+
+- **Pass the review's own flags.** The fingerprint is computed from the same parser, config
+  files and backend resolution a review with those flags would use. With no review source
+  flag, `--mode` is required; stdin is never read and never counts as a source.
+- **What is hashed:** the rr version and a hash of rr's own code (`code_sha256`); the
+  mode and which source flag was given (`source`: `pr`, `commit`, `staged`, `diff`,
+  `files`, or `unspecified` when only `--mode` was); each backend with the model it runs
+  and its CLI's `--version` (for `api`, the OpenAI SDK's version and a hash of
+  `OPENAI_BASE_URL` without its userinfo, never the URL itself); `effort`, `codex_sandbox`,
+  `fail_on`, `json` and `timeout` (`api` drops its file attachments when too little of the
+  timeout is left); whether `--repo` names another repository, which also turns
+  attachments off; the standards docs as read (`docs_sha256`); the extra instructions
+  (`extra_sha256`); and the prompt each backend assembles for every source shape, with the
+  output schema in JSON mode (`prompt_sha256`). The code hash is there because the version
+  string does not move in a source checkout or an editable install. Every prompt source is
+  a `.py` file today, so the prompt hash moves only with the code hash; it stays as a check
+  that holds if prompt text ever comes from elsewhere, and it tells a reader which part
+  moved.
+- **What is not:** `full`, which only decides how much of an answer is printed. Config
+  files enter through the settings they resolve to, never as bytes or paths, so a comment
+  edit or the same project at another path is the same fingerprint. Nor can rr see the
+  instruction, settings and environment each backend CLI reads for itself
+  (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `ANTHROPIC_BASE_URL`,
+  `CLAUDE_CODE_USE_BEDROCK` and the like); a cache that must track those keys on them
+  itself.
+- **`pinned`** is `false` when a choice is left to a default the fingerprint cannot see: a
+  backend with no model pin (codex, claude or opencode run their CLI's own default); no
+  `effort` or an empty one (each CLI applies its own — so an `opencode` backend, which
+  takes no `--effort`, is never pinned); a model name ending in `-latest`; a CLI that does
+  not answer `--version`; a claude model given as one of Claude Code's aliases (`default`,
+  `opus`, `sonnet`, ...) rather than a `claude-*` id; a bare OpenAI family name (`gpt-5.6`,
+  `gpt-6`) for codex; or an `api` model that is neither a dated snapshot nor
+  `gpt-5.6-sol`/`-terra`/`-luna` (the bare `gpt-5.6` can be remapped, and other names are
+  resolved to the newest dated snapshot at run time). Those defaults can change under an
+  unchanged fingerprint, so a cache should decline to reuse a verdict then. A name that
+  passes can still be one the vendor moves on its side, which rr cannot see.
+- **Refuses what a review refuses before it starts.** Settings `rr` will not review with,
+  or a backend CLI that is not on `PATH`, exit 1 with the same message and print no
+  document. What a review only finds out when a backend runs — no `OPENAI_API_KEY`, no
+  OpenAI SDK — is not checked; without the SDK, `api` is reported unpinned.
+- **`fingerprint_version`** (currently `"1"`) bumps when the hashed material changes
+  meaning. Compare fingerprints only between documents of the same version.
 
 ## Review modes
 

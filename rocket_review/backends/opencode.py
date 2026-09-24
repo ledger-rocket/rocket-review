@@ -14,6 +14,11 @@ ENVIRONMENT = (
 )
 
 
+def prompt(job: ReviewJob) -> str:
+    """The instructions this backend sends, and the text `rr --fingerprint` hashes."""
+    return build_agent_prompt(job, ENVIRONMENT)
+
+
 def review(job: ReviewJob) -> str:
     # `plan` is opencode's built-in read-only agent: it denies edit/write at the tool
     # level, matching codex `-s read-only` and claude's read-only allowlist.
@@ -28,7 +33,7 @@ def review(job: ReviewJob) -> str:
     # `--file` attachment (opencode's array-valued flag swallows the trailing message, and
     # its Read tool caps attachments at 50 KiB, silently truncating a large diff).
     timeout = base.TIMEOUT if job.timeout is None else job.timeout
-    output = base.run_command(cmd, stdin=build_agent_prompt(job, ENVIRONMENT), timeout=timeout).strip()
+    output = base.run_command(cmd, stdin=prompt(job), timeout=timeout).strip()
     if not output:
         raise BackendError("opencode produced no output")
     return output

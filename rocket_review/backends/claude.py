@@ -70,6 +70,11 @@ def _environment(job: ReviewJob) -> str:
     )
 
 
+def prompt(job: ReviewJob) -> str:
+    """The instructions this backend sends, and the text `rr --fingerprint` hashes."""
+    return build_agent_prompt(job, _environment(job))
+
+
 def review(job: ReviewJob) -> str:
     allowed = READ_ONLY_TOOLS
     git_rule = _git_view_rule(job)
@@ -87,7 +92,7 @@ def review(job: ReviewJob) -> str:
     # Prompt goes via stdin: no ARG_MAX concern and no temp file needed.
     timeout = base.TIMEOUT if job.timeout is None else job.timeout
     output = base.run_command(
-        cmd, stdin=build_agent_prompt(job, _environment(job)), timeout=timeout
+        cmd, stdin=prompt(job), timeout=timeout
     ).strip()
     if not output:
         raise BackendError("claude produced no output")
