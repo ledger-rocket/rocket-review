@@ -281,26 +281,30 @@ the reviewed content plus this value and reuse it only when neither moved.
 - **What is hashed:** the rr version and a hash of rr's own code (`code_sha256`); the
   mode and which source flag was given (`source`: `pr`, `commit`, `staged`, `diff`,
   `files`, or `unspecified` when only `--mode` was); each backend with the model it runs and its CLI's `--version` (for `api`, the
-  OpenAI SDK's version and a hash of where `OPENAI_BASE_URL` points, without its
-  credentials or query); `effort`,
+  OpenAI SDK's version and a hash of `OPENAI_BASE_URL` without its userinfo, never the URL
+  itself); `effort`,
   `codex_sandbox`, `fail_on`, `json` and `timeout` (`api` drops its file attachments when
   too little of the timeout is left); whether `--repo` names another repository, which
   also turns attachments off; the standards docs as read (`docs_sha256`); the extra
   instructions (`extra_sha256`); and the prompt each backend assembles for every source
-  shape, with the output schema in JSON mode (`prompt_sha256`). The code and prompt hashes
-  are there because the version string does not move in a source checkout or an editable
-  install.
+  shape, with the output schema in JSON mode (`prompt_sha256`). The code hash is there
+  because the version string does not move in a source checkout or an editable install.
+  Every prompt source is a `.py` file today, so the prompt hash moves only with the code
+  hash; it stays as a check that holds if prompt text ever comes from elsewhere, and it
+  tells a reader which part moved.
 - **What is not:** `full`, which only decides how much of an answer is printed. Config
   files enter through the settings they resolve to, never as bytes or paths, so a comment
   edit or the same project at another path is the same fingerprint. Nor can rr see the
-  instruction and settings files each backend CLI loads for itself (`~/.claude/CLAUDE.md`,
-  `~/.codex/AGENTS.md` and the like); a cache that must track those keys on them itself.
+  instruction, settings and environment each backend CLI reads for itself
+  (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `ANTHROPIC_BASE_URL`,
+  `CLAUDE_CODE_USE_BEDROCK` and the like); a cache that must track those keys on them
+  itself.
 - **`pinned`** is `false` when a choice is left to a default the fingerprint cannot see: a
   backend with no model pin (codex, claude or opencode run their CLI's own default), no
   `effort` (each CLI applies its own — so an `opencode` backend, which takes no `--effort`,
   is never pinned), a CLI that does not answer `--version`, a claude model given as one of
-  Claude Code's aliases (`default`, `opus`, `sonnet`, ...) rather than a `claude-*` id, or
-  an `api` model that is neither a dated snapshot nor `gpt-5.6-sol`/`-terra`/`-luna` (the
+  Claude Code's aliases (`default`, `opus`, `sonnet`, ...) rather than a `claude-*` id, a
+  bare OpenAI family name (`gpt-5.6`, `gpt-6`) for codex, or an `api` model that is neither a dated snapshot nor `gpt-5.6-sol`/`-terra`/`-luna` (the
   bare `gpt-5.6` can be remapped, and other names are resolved to the newest dated snapshot
   at run time). Those defaults can change under an unchanged fingerprint, so a cache
   should decline to reuse a verdict then. A name that passes can still be one the vendor

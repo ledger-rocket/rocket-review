@@ -17,9 +17,10 @@ Config files enter through the settings they resolve to, never as bytes or paths
 edit is not a different reviewer, and a hook that reviews in a fresh temporary worktree
 finds the same project config at a new path every time.
 
-What rr cannot see is not in either: the instruction and settings files each backend CLI
-loads for itself (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md and the like). `pinned` covers
-the defaults rr can see — a model, an effort or a CLI version it does not know.
+What rr cannot see is not in either: the instruction, settings and environment each
+backend CLI reads for itself (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ANTHROPIC_BASE_URL,
+CLAUDE_CODE_USE_BEDROCK and the like). `pinned` covers the defaults rr can see — a model,
+an effort or a CLI version it does not know.
 """
 
 import hashlib
@@ -115,16 +116,27 @@ def sdk_version() -> str | None:
 _API_FIXED_MODEL = re.compile(r"-20\d\d-\d\d-\d\d$|^gpt-5\.6-(sol|terra|luna)$")
 
 
-def _endpoint(url: str | None) -> str | None:
-    """Where a request goes — scheme, host, port, path — without userinfo or query.
+#: A bare OpenAI family name (gpt-5.6, gpt-6): the alias rr's api backend documents as one
+#: OpenAI remaps, whichever backend sends it.
+_OPENAI_FAMILY_ALIAS = re.compile(r"^gpt-\d+(\.\d+)?$")
 
-    The URL can carry a credential, and a rotated one changes nothing about the reviewer.
+
+def _endpoint(url: str | None) -> str | None:
+    """The URL a request is sent to, as written, less any userinfo.
+
+    A rotated password in the URL is not another reviewer; the host, port, path and query
+    all decide what receives the request, so all of them stay. A URL too malformed to split
+    is kept whole: the SDK refuses it when a review runs, and it is only ever hashed.
     """
     if not url:
         return None
-    parts = urlsplit(url)
-    port = f":{parts.port}" if parts.port else ""
-    return f"{parts.scheme}://{parts.hostname}{port}{parts.path.rstrip('/')}"
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    netloc = parts.netloc.rpartition("@")[2]
+    query = f"?{parts.query}" if parts.query else ""
+    return f"{parts.scheme}://{netloc}{parts.path}{query}"
 
 
 def prompt_digest(
@@ -197,6 +209,8 @@ def _pinned(backends: list[dict[str, Any]], effort: str | None) -> bool:
             return False
         if backend["name"] == "claude" and not model.startswith("claude-"):
             return False
+        if backend["name"] == "codex" and _OPENAI_FAMILY_ALIAS.match(model):
+            return False
     return True
 
 
@@ -227,7 +241,7 @@ def describe(
         }
         if mod is api:
             # The SDK sends to OPENAI_BASE_URL when it is set. Hashed rather than printed,
-            # and without its credentials (_endpoint).
+            # and without its userinfo (_endpoint).
             entry["sdk_version"] = sdk_version()
             entry["endpoint_sha256"] = _sha256(_endpoint(os.environ.get("OPENAI_BASE_URL")))
         backends.append(entry)

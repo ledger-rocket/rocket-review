@@ -206,6 +206,18 @@ def test_a_claude_code_alias_is_unpinned(monkeypatch, capsys, model, pinned):
     assert doc["pinned"] is pinned
 
 
+@pytest.mark.parametrize("model, pinned", [
+    ("gpt-6-astra", True), ("gpt-5.6-sol", True),
+    # The bare family name is the one rr's api backend documents as remappable, and codex
+    # sends it to the same vendor.
+    ("gpt-5.6", False), ("gpt-6", False),
+])
+def test_a_bare_openai_family_name_is_unpinned_for_codex_too(monkeypatch, capsys, model, pinned):
+    doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--effort", "high",
+                                   "--backend", f"codex:{model}"])
+    assert doc["pinned"] is pinned
+
+
 def test_opencode_is_never_pinned(monkeypatch, capsys):
     # opencode takes no --effort, so its effort is always its own config's.
     doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff",
@@ -225,15 +237,31 @@ def test_moves_with_the_api_endpoint_without_printing_it(monkeypatch, capsys):
     assert "s3cret" not in json.dumps(doc)
 
 
-def test_the_endpoint_hash_ignores_credentials_and_query(monkeypatch, capsys):
-    # Where the request goes decides the reviewer; a rotated token in the URL does not.
+def test_the_endpoint_hash_ignores_only_the_credentials(monkeypatch, capsys):
+    # A rotated password in the URL is not another reviewer. Everything the SDK sends the
+    # request with is: the host, the port, the path as written, a routing query.
     args = ["--fingerprint", "--mode", "diff", "--effort", "high", "--backend", "api"]
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://user:one@gateway.example/v1/?key=a")
-    before = fp(monkeypatch, capsys, args)["fingerprint"]
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://user:two@gateway.example/v1?key=b")
-    assert fp(monkeypatch, capsys, args)["fingerprint"] == before
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://other.example/v1")
-    assert fp(monkeypatch, capsys, args)["fingerprint"] != before
+
+    def at(url):
+        monkeypatch.setenv("OPENAI_BASE_URL", url)
+        return fp(monkeypatch, capsys, args)["fingerprint"]
+
+    base = at("https://user:one@gateway.example:8443/v1?deployment=a")
+    assert at("https://user:two@gateway.example:8443/v1?deployment=a") == base
+    for other in ("https://gateway.example:9443/v1?deployment=a",
+                  "https://gateway.example:8443/v1?deployment=b",
+                  "https://gateway.example:8443/v1/?deployment=a",
+                  "https://other.example:8443/v1?deployment=a"):
+        assert at(other) != base, other
+
+
+@pytest.mark.parametrize("url", ["https://gateway.example:bad/v1", "https://[::1/v1"])
+def test_a_malformed_endpoint_is_hashed_not_raised(monkeypatch, capsys, url):
+    # The SDK rejects it when a review runs; the fingerprint has no reason to crash first.
+    monkeypatch.setenv("OPENAI_BASE_URL", url)
+    doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--effort", "high",
+                                   "--backend", "api"])
+    assert doc["backends"][0]["endpoint_sha256"] is not None
 
 
 @pytest.mark.parametrize("source, name", [
