@@ -23,7 +23,7 @@ from rocket_review.models import REVIEW_SCHEMA
 REAL_CLI_VERSION = fingerprint.cli_version
 
 BASE_ARGS = ["--fingerprint", "--mode", "diff", "--json", "--effort", "medium",
-             "--backend", "codex:m1,claude:m2"]
+             "--backend", "codex:m1,claude:claude-m2"]
 
 
 @pytest.fixture(autouse=True)
@@ -74,7 +74,7 @@ def test_prints_a_versioned_sha256_fingerprint_and_reviews_nothing(monkeypatch, 
     assert doc["mode"] == "diff"
     assert doc["backends"] == [
         {"name": "codex", "model": "m1", "cli_version": "codex 1.0"},
-        {"name": "claude", "model": "m2", "cli_version": "claude 1.0"},
+        {"name": "claude", "model": "claude-m2", "cli_version": "claude 1.0"},
     ]
     assert doc["pinned"] is True
 
@@ -185,12 +185,24 @@ def test_api_counts_as_pinned_through_its_own_default(monkeypatch, capsys):
 
 @pytest.mark.parametrize("model, pinned", [
     ("gpt-5.6-sol", True), ("gpt-5.6-sol-2026-01-01", True), ("custom-2026-01-01", True),
-    # rr's own api backend documents the bare family name as one OpenAI can remap.
-    ("gpt-5.6", False),
+    # rr's own api backend documents the bare family name as one OpenAI can remap, and a
+    # suffix outside the known tiers is no promise of one model.
+    ("gpt-5.6", False), ("gpt-5.6-latest", False),
 ])
 def test_an_api_model_is_pinned_only_when_it_names_one_model(monkeypatch, capsys, model, pinned):
     doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--effort", "high",
                                    "--backend", f"api:{model}"])
+    assert doc["pinned"] is pinned
+
+
+@pytest.mark.parametrize("model, pinned", [
+    ("claude-opus-5-5", True),
+    # Claude Code's own aliases pick whatever the account's current mapping is.
+    ("default", False), ("opus", False), ("sonnet", False),
+])
+def test_a_claude_code_alias_is_unpinned(monkeypatch, capsys, model, pinned):
+    doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--effort", "high",
+                                   "--backend", f"claude:{model}"])
     assert doc["pinned"] is pinned
 
 
@@ -211,6 +223,36 @@ def test_moves_with_the_api_endpoint_without_printing_it(monkeypatch, capsys):
     assert code == 0, err
     assert doc["fingerprint"] != before
     assert "s3cret" not in json.dumps(doc)
+
+
+def test_the_endpoint_hash_ignores_credentials_and_query(monkeypatch, capsys):
+    # Where the request goes decides the reviewer; a rotated token in the URL does not.
+    args = ["--fingerprint", "--mode", "diff", "--effort", "high", "--backend", "api"]
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://user:one@gateway.example/v1/?key=a")
+    before = fp(monkeypatch, capsys, args)["fingerprint"]
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://user:two@gateway.example/v1?key=b")
+    assert fp(monkeypatch, capsys, args)["fingerprint"] == before
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://other.example/v1")
+    assert fp(monkeypatch, capsys, args)["fingerprint"] != before
+
+
+@pytest.mark.parametrize("source, name", [
+    ([], "unspecified"), (["--diff"], "diff"), (["--staged"], "staged"),
+    (["--commit", "HEAD"], "commit"), (["--pr", "5"], "pr"), (["a.py"], "files"),
+])
+def test_records_which_source_the_review_reads(monkeypatch, capsys, source, name):
+    # The same content arrives with different instructions per source: a PR is inlined with
+    # PR wording, a --diff is a command to run. Hashing every shape says what could run; the
+    # source says which one does.
+    monkeypatch.setattr("rocket_review.cli.ensure_diff_exists", lambda staged: None)
+    args = ["--fingerprint", "--mode", "diff", *source, "--backend", "claude:m"]
+    assert fp(monkeypatch, capsys, args)["source"] == name
+
+
+def test_moves_with_the_source(monkeypatch, capsys):
+    monkeypatch.setattr("rocket_review.cli.get_pr_content", lambda *a, **k: None)
+    assert (fp(monkeypatch, capsys, BASE_ARGS)["fingerprint"]
+            != fp(monkeypatch, capsys, BASE_ARGS + ["--pr", "5"])["fingerprint"])
 
 
 def test_moves_with_the_api_sdk_version(monkeypatch, capsys):

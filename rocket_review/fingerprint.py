@@ -6,7 +6,7 @@ that holds still across a change to the reviewer hands back a verdict that revie
 gave, while one that moves on a change that cannot matter costs one fresh review. So
 everything rr decides is in, and only what provably cannot change an answer is out.
 
-In: rr's version and its own code; the mode; each backend, the model it runs and its CLI's
+In: rr's version and its own code; the mode and which source flag was given; each backend, the model it runs and its CLI's
 version (for api, the OpenAI SDK's version and the endpoint it sends to); effort; the codex sandbox; the fail-on threshold; JSON mode; the timeout, because
 api drops its file attachments when too little of it is left; whether the text comes from
 another repository, which also turns attachments off; the standards docs as read; the extra
@@ -30,6 +30,7 @@ import subprocess
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import rocket_review
 from rocket_review import cli, config
@@ -108,10 +109,22 @@ def sdk_version() -> str | None:
         return None
 
 
-#: An api model name that names one model: a dated snapshot, or a family name with its tier
-#: suffix, which rr passes verbatim. The bare family name is the alias rr's api backend says
+#: An api model name that names one model: a dated snapshot, or a family name with one of its
+#: tiers, which rr passes verbatim. The bare family name is the alias rr's api backend says
 #: OpenAI can remap; any other name is resolved to the newest dated snapshot at run time.
-_API_FIXED_MODEL = re.compile(r"-20\d\d-\d\d-\d\d$|^gpt-5\.6-[a-z]+$")
+_API_FIXED_MODEL = re.compile(r"-20\d\d-\d\d-\d\d$|^gpt-5\.6-(sol|terra|luna)$")
+
+
+def _endpoint(url: str | None) -> str | None:
+    """Where a request goes — scheme, host, port, path — without userinfo or query.
+
+    The URL can carry a credential, and a rotated one changes nothing about the reviewer.
+    """
+    if not url:
+        return None
+    parts = urlsplit(url)
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{parts.hostname}{port}{parts.path.rstrip('/')}"
 
 
 def prompt_digest(
@@ -164,7 +177,11 @@ def _pinned(backends: list[dict[str, Any]], effort: str | None) -> bool:
     A model rr passes no name for, an effort it passes none for, and a CLI that will not say
     its version are each a default that can change under an unchanged fingerprint. So an
     opencode backend is never pinned: it takes no --effort and applies its own config's. An
-    api name has to name one model (_API_FIXED_MODEL).
+    api name has to name one model (_API_FIXED_MODEL), and a claude one has to be a model id
+    rather than one of Claude Code's aliases (default, opus, sonnet, ...), which follow the
+    account's current mapping.
+
+    A name that passes can still be one the vendor moves on its side; rr cannot see that.
     """
     if effort is None:
         return False
@@ -175,7 +192,10 @@ def _pinned(backends: list[dict[str, Any]], effort: str | None) -> bool:
         if backend["name"] == "api":
             if not _API_FIXED_MODEL.search(model) or backend["sdk_version"] is None:
                 return False
-        elif backend["cli_version"] is None:
+            continue
+        if backend["cli_version"] is None:
+            return False
+        if backend["name"] == "claude" and not model.startswith("claude-"):
             return False
     return True
 
@@ -183,6 +203,7 @@ def _pinned(backends: list[dict[str, Any]], effort: str | None) -> bool:
 def describe(
     *,
     mode: str,
+    source: str,
     specs: list[tuple[str, str | None]],
     settings: config.Settings,
     docs_content: str | None,
@@ -205,16 +226,17 @@ def describe(
             "cli_version": cli_version(mod.BINARY) if mod.BINARY else None,
         }
         if mod is api:
-            # The SDK sends to OPENAI_BASE_URL when it is set. Hashed, not printed: the URL
-            # can carry a credential.
+            # The SDK sends to OPENAI_BASE_URL when it is set. Hashed rather than printed,
+            # and without its credentials (_endpoint).
             entry["sdk_version"] = sdk_version()
-            entry["endpoint_sha256"] = _sha256(os.environ.get("OPENAI_BASE_URL"))
+            entry["endpoint_sha256"] = _sha256(_endpoint(os.environ.get("OPENAI_BASE_URL")))
         backends.append(entry)
     doc: dict[str, Any] = {
         "fingerprint_version": FINGERPRINT_VERSION,
         "rr_version": rr_version(),
         "code_sha256": code_digest(),
         "mode": mode,
+        "source": source,
         "backends": backends,
         "effort": settings.effort,
         "codex_sandbox": settings.codex_sandbox,

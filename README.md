@@ -279,8 +279,10 @@ the reviewed content plus this value and reuse it only when neither moved.
   files and backend resolution a review with those flags would use. With no review source
   flag, `--mode` is required; stdin is never read and never counts as a source.
 - **What is hashed:** the rr version and a hash of rr's own code (`code_sha256`); the
-  mode; each backend with the model it runs and its CLI's `--version` (for `api`, the
-  OpenAI SDK's version and a hash of `OPENAI_BASE_URL`, never the URL itself); `effort`,
+  mode and which source flag was given (`source`: `pr`, `commit`, `staged`, `diff`,
+  `files`, or `unspecified` when only `--mode` was); each backend with the model it runs and its CLI's `--version` (for `api`, the
+  OpenAI SDK's version and a hash of where `OPENAI_BASE_URL` points, without its
+  credentials or query); `effort`,
   `codex_sandbox`, `fail_on`, `json` and `timeout` (`api` drops its file attachments when
   too little of the timeout is left); whether `--repo` names another repository, which
   also turns attachments off; the standards docs as read (`docs_sha256`); the extra
@@ -296,13 +298,17 @@ the reviewed content plus this value and reuse it only when neither moved.
 - **`pinned`** is `false` when a choice is left to a default the fingerprint cannot see: a
   backend with no model pin (codex, claude or opencode run their CLI's own default), no
   `effort` (each CLI applies its own — so an `opencode` backend, which takes no `--effort`,
-  is never pinned), a CLI that does not answer `--version`, or an `api` model that is
-  neither a dated snapshot nor a tier-suffixed name like `gpt-5.6-terra` (the bare
-  `gpt-5.6` can be remapped, and other names are resolved to the newest dated snapshot at
-  run time). Those defaults can change under an unchanged fingerprint, so a cache should
-  decline to reuse a verdict then.
-- **Refuses what a review refuses.** Settings `rr` will not review with, or a backend that is
-  not installed, exit 1 with the same message and print no document.
+  is never pinned), a CLI that does not answer `--version`, a claude model given as one of
+  Claude Code's aliases (`default`, `opus`, `sonnet`, ...) rather than a `claude-*` id, or
+  an `api` model that is neither a dated snapshot nor `gpt-5.6-sol`/`-terra`/`-luna` (the
+  bare `gpt-5.6` can be remapped, and other names are resolved to the newest dated snapshot
+  at run time). Those defaults can change under an unchanged fingerprint, so a cache
+  should decline to reuse a verdict then. A name that passes can still be one the vendor
+  moves on its side, which rr cannot see.
+- **Refuses what a review refuses before it starts.** Settings `rr` will not review with,
+  or a backend CLI that is not on `PATH`, exit 1 with the same message and print no
+  document. What a review only finds out when a backend runs — no `OPENAI_API_KEY`, no
+  OpenAI SDK — is not checked; without the SDK, `api` is reported unpinned.
 - **`fingerprint_version`** (currently `"1"`) bumps when the hashed material changes
   meaning. Compare fingerprints only between documents of the same version.
 

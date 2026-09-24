@@ -945,9 +945,17 @@ def _run():
         from rocket_review import fingerprint
 
         docs = collect_docs(settings.docs, args.llms, source=docs_source(settings, layers))
+        # Which source flag was given, never what it holds: stdin is not read here, so a
+        # review fed on stdin is fingerprinted as "unspecified" every time.
+        source = next(
+            (name for name, given in (("pr", args.pr), ("commit", args.commit),
+                                      ("staged", args.staged), ("diff", args.diff),
+                                      ("files", args.files)) if given),
+            "unspecified",
+        )
         doc = fingerprint.describe(
-            mode=mode, specs=specs, settings=settings, docs_content=docs, extra=args.prompt,
-            foreign_repo=bool(args.repo),
+            mode=mode, source=source, specs=specs, settings=settings, docs_content=docs,
+            extra=args.prompt, foreign_repo=bool(args.repo),
         )
         print(json.dumps(doc, indent=2))
         sys.exit(0)
