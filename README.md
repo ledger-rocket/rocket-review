@@ -280,18 +280,18 @@ the reviewed content plus this value and reuse it only when neither moved.
   flag, `--mode` is required; stdin is never read and never counts as a source.
 - **What is hashed:** the rr version and a hash of rr's own code (`code_sha256`); the
   mode and which source flag was given (`source`: `pr`, `commit`, `staged`, `diff`,
-  `files`, or `unspecified` when only `--mode` was); each backend with the model it runs and its CLI's `--version` (for `api`, the
-  OpenAI SDK's version and a hash of `OPENAI_BASE_URL` without its userinfo, never the URL
-  itself); `effort`,
-  `codex_sandbox`, `fail_on`, `json` and `timeout` (`api` drops its file attachments when
-  too little of the timeout is left); whether `--repo` names another repository, which
-  also turns attachments off; the standards docs as read (`docs_sha256`); the extra
-  instructions (`extra_sha256`); and the prompt each backend assembles for every source
-  shape, with the output schema in JSON mode (`prompt_sha256`). The code hash is there
-  because the version string does not move in a source checkout or an editable install.
-  Every prompt source is a `.py` file today, so the prompt hash moves only with the code
-  hash; it stays as a check that holds if prompt text ever comes from elsewhere, and it
-  tells a reader which part moved.
+  `files`, or `unspecified` when only `--mode` was); each backend with the model it runs
+  and its CLI's `--version` (for `api`, the OpenAI SDK's version and a hash of
+  `OPENAI_BASE_URL` without its userinfo, never the URL itself); `effort`, `codex_sandbox`,
+  `fail_on`, `json` and `timeout` (`api` drops its file attachments when too little of the
+  timeout is left); whether `--repo` names another repository, which also turns
+  attachments off; the standards docs as read (`docs_sha256`); the extra instructions
+  (`extra_sha256`); and the prompt each backend assembles for every source shape, with the
+  output schema in JSON mode (`prompt_sha256`). The code hash is there because the version
+  string does not move in a source checkout or an editable install. Every prompt source is
+  a `.py` file today, so the prompt hash moves only with the code hash; it stays as a check
+  that holds if prompt text ever comes from elsewhere, and it tells a reader which part
+  moved.
 - **What is not:** `full`, which only decides how much of an answer is printed. Config
   files enter through the settings they resolve to, never as bytes or paths, so a comment
   edit or the same project at another path is the same fingerprint. Nor can rr see the
