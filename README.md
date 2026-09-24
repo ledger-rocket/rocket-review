@@ -300,15 +300,16 @@ the reviewed content plus this value and reuse it only when neither moved.
   `CLAUDE_CODE_USE_BEDROCK` and the like); a cache that must track those keys on them
   itself.
 - **`pinned`** is `false` when a choice is left to a default the fingerprint cannot see: a
-  backend with no model pin (codex, claude or opencode run their CLI's own default), no
+  backend with no model pin (codex, claude or opencode run their CLI's own default); no
   `effort` or an empty one (each CLI applies its own — so an `opencode` backend, which
-  takes no `--effort`, is never pinned), a model name ending in `-latest`, a CLI that does not answer `--version`, a claude model given as one of
-  Claude Code's aliases (`default`, `opus`, `sonnet`, ...) rather than a `claude-*` id, a
-  bare OpenAI family name (`gpt-5.6`, `gpt-6`) for codex, or an `api` model that is neither a dated snapshot nor `gpt-5.6-sol`/`-terra`/`-luna` (the
-  bare `gpt-5.6` can be remapped, and other names are resolved to the newest dated snapshot
-  at run time). Those defaults can change under an unchanged fingerprint, so a cache
-  should decline to reuse a verdict then. A name that passes can still be one the vendor
-  moves on its side, which rr cannot see.
+  takes no `--effort`, is never pinned); a model name ending in `-latest`; a CLI that does
+  not answer `--version`; a claude model given as one of Claude Code's aliases (`default`,
+  `opus`, `sonnet`, ...) rather than a `claude-*` id; a bare OpenAI family name (`gpt-5.6`,
+  `gpt-6`) for codex; or an `api` model that is neither a dated snapshot nor
+  `gpt-5.6-sol`/`-terra`/`-luna` (the bare `gpt-5.6` can be remapped, and other names are
+  resolved to the newest dated snapshot at run time). Those defaults can change under an
+  unchanged fingerprint, so a cache should decline to reuse a verdict then. A name that
+  passes can still be one the vendor moves on its side, which rr cannot see.
 - **Refuses what a review refuses before it starts.** Settings `rr` will not review with,
   or a backend CLI that is not on `PATH`, exit 1 with the same message and print no
   document. What a review only finds out when a backend runs — no `OPENAI_API_KEY`, no
