@@ -1,3 +1,4 @@
+import re
 import threading
 import types
 
@@ -1081,7 +1082,7 @@ def test_codex_sends_the_prompt_the_fingerprint_hashes(monkeypatch):
     captured = {}
 
     def fake_run(cmd, *, stdin=None, timeout=900):
-        prompt_file = cmd[-1].split()[3]
+        prompt_file = re.search(r"Read the file (.+?) for your full instructions", cmd[-1]).group(1)
         with open(prompt_file) as f:
             captured["prompt"] = f.read()
         with open(cmd[cmd.index("-o") + 1], "w") as f:

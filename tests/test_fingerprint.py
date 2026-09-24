@@ -19,6 +19,9 @@ from rocket_review.backends import BACKENDS, api, claude, codex, opencode
 from rocket_review.cli import main
 from rocket_review.models import REVIEW_SCHEMA
 
+#: The real probe, kept before the autouse fixture replaces it, for the cases that test it.
+REAL_CLI_VERSION = fingerprint.cli_version
+
 BASE_ARGS = ["--fingerprint", "--mode", "diff", "--json", "--effort", "medium",
              "--backend", "codex:m1,claude:m2"]
 
@@ -31,6 +34,8 @@ def no_review(monkeypatch):
 
     monkeypatch.setattr("rocket_review.cli.missing_binary", lambda name: None)
     monkeypatch.setattr("rocket_review.fingerprint.cli_version", lambda binary: f"{binary} 1.0")
+    monkeypatch.setattr("rocket_review.fingerprint.sdk_version", lambda: "openai 1.0")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setattr(
         "rocket_review.cli.run_one",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("--fingerprint started a review")),
@@ -171,8 +176,70 @@ def test_a_cli_that_cannot_say_its_version_is_reported_as_unpinned(monkeypatch, 
 def test_api_counts_as_pinned_through_its_own_default(monkeypatch, capsys):
     doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--effort", "high",
                                    "--backend", "api"])
-    assert doc["backends"] == [{"name": "api", "model": api.DEFAULT_MODEL, "cli_version": None}]
+    assert doc["backends"] == [{
+        "name": "api", "model": api.DEFAULT_MODEL, "cli_version": None,
+        "sdk_version": "openai 1.0", "endpoint_sha256": None,
+    }]
     assert doc["pinned"] is True
+
+
+@pytest.mark.parametrize("model, pinned", [
+    ("gpt-5.6-sol", True), ("gpt-5.6-sol-2026-01-01", True), ("custom-2026-01-01", True),
+    # rr's own api backend documents the bare family name as one OpenAI can remap.
+    ("gpt-5.6", False),
+])
+def test_an_api_model_is_pinned_only_when_it_names_one_model(monkeypatch, capsys, model, pinned):
+    doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--effort", "high",
+                                   "--backend", f"api:{model}"])
+    assert doc["pinned"] is pinned
+
+
+def test_opencode_is_never_pinned(monkeypatch, capsys):
+    # opencode takes no --effort, so its effort is always its own config's.
+    doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff",
+                                   "--backend", "opencode:provider/model"])
+    assert doc["pinned"] is False
+
+
+def test_moves_with_the_api_endpoint_without_printing_it(monkeypatch, capsys):
+    # The OpenAI SDK sends to OPENAI_BASE_URL when it is set: another gateway, another
+    # reviewer. The URL can carry a credential, so only its hash is printed.
+    args = ["--fingerprint", "--mode", "diff", "--effort", "high", "--backend", "api"]
+    before = fp(monkeypatch, capsys, args)["fingerprint"]
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://user:s3cret@gateway.example/v1")
+    code, doc, err = run(monkeypatch, capsys, args)
+    assert code == 0, err
+    assert doc["fingerprint"] != before
+    assert "s3cret" not in json.dumps(doc)
+
+
+def test_moves_with_the_api_sdk_version(monkeypatch, capsys):
+    args = ["--fingerprint", "--mode", "diff", "--effort", "high", "--backend", "api"]
+    before = fp(monkeypatch, capsys, args)["fingerprint"]
+    monkeypatch.setattr("rocket_review.fingerprint.sdk_version", lambda: "openai 2.0")
+    assert fp(monkeypatch, capsys, args)["fingerprint"] != before
+
+
+def _fake_cli(tmp_path, body):
+    path = tmp_path / "fake-cli"
+    path.write_text(f"#!/bin/sh\n{body}\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+@pytest.mark.parametrize("body, expected", [
+    ("echo 'fake 1.2.3'", "fake 1.2.3"),
+    ("echo 'fake 1.2.3'; exit 1", None),
+    ("echo 'fake 1.2.3' >&2", None),
+    ("sleep 10", None),
+])
+def test_cli_version_answers_only_from_a_clean_version_line(monkeypatch, tmp_path, body, expected):
+    monkeypatch.setattr(fingerprint, "VERSION_TIMEOUT", 0.5)
+    assert REAL_CLI_VERSION(_fake_cli(tmp_path, body)) == expected
+
+
+def test_cli_version_of_a_missing_binary_is_none(tmp_path):
+    assert REAL_CLI_VERSION(str(tmp_path / "absent")) is None
 
 
 def test_an_api_alias_rr_resolves_at_run_time_is_unpinned(monkeypatch, capsys):

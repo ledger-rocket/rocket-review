@@ -7,7 +7,7 @@ gave, while one that moves on a change that cannot matter costs one fresh review
 everything rr decides is in, and only what provably cannot change an answer is out.
 
 In: rr's version and its own code; the mode; each backend, the model it runs and its CLI's
-version; effort; the codex sandbox; the fail-on threshold; JSON mode; the timeout, because
+version (for api, the OpenAI SDK's version and the endpoint it sends to); effort; the codex sandbox; the fail-on threshold; JSON mode; the timeout, because
 api drops its file attachments when too little of it is left; whether the text comes from
 another repository, which also turns attachments off; the standards docs as read; the extra
 instructions; and the prompt each backend assembles for every source shape. Out: --full,
@@ -24,7 +24,10 @@ the defaults rr can see — a model, an effort or a CLI version it does not know
 
 import hashlib
 import json
+import os
+import re
 import subprocess
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +100,20 @@ def cli_version(binary: str) -> str | None:
     return version if result.returncode == 0 and version else None
 
 
+def sdk_version() -> str | None:
+    """The installed OpenAI SDK's version, which decides how api's request reaches the model."""
+    try:
+        return f"openai {version('openai')}"
+    except PackageNotFoundError:
+        return None
+
+
+#: An api model name that names one model: a dated snapshot, or a family name with its tier
+#: suffix, which rr passes verbatim. The bare family name is the alias rr's api backend says
+#: OpenAI can remap; any other name is resolved to the newest dated snapshot at run time.
+_API_FIXED_MODEL = re.compile(r"-20\d\d-\d\d-\d\d$|^gpt-5\.6-[a-z]+$")
+
+
 def prompt_digest(
     mode: str,
     specs: list[tuple[str, str | None]],
@@ -145,9 +162,9 @@ def _pinned(backends: list[dict[str, Any]], effort: str | None) -> bool:
     """Whether every choice a backend would otherwise make for itself is written down here.
 
     A model rr passes no name for, an effort it passes none for, and a CLI that will not say
-    its version are each a default that can change under an unchanged fingerprint. An api
-    name that is not canonical is resolved to the newest dated snapshot the account lists at
-    run time, so it names no fixed model either.
+    its version are each a default that can change under an unchanged fingerprint. So an
+    opencode backend is never pinned: it takes no --effort and applies its own config's. An
+    api name has to name one model (_API_FIXED_MODEL).
     """
     if effort is None:
         return False
@@ -156,7 +173,7 @@ def _pinned(backends: list[dict[str, Any]], effort: str | None) -> bool:
         if model is None:
             return False
         if backend["name"] == "api":
-            if not api._is_canonical(model):
+            if not _API_FIXED_MODEL.search(model) or backend["sdk_version"] is None:
                 return False
         elif backend["cli_version"] is None:
             return False
@@ -182,11 +199,17 @@ def describe(
     backends = []
     for name, model in specs:
         mod = BACKENDS[name]
-        backends.append({
+        entry: dict[str, Any] = {
             "name": name,
             "model": model or mod.DEFAULT_MODEL,
             "cli_version": cli_version(mod.BINARY) if mod.BINARY else None,
-        })
+        }
+        if mod is api:
+            # The SDK sends to OPENAI_BASE_URL when it is set. Hashed, not printed: the URL
+            # can carry a credential.
+            entry["sdk_version"] = sdk_version()
+            entry["endpoint_sha256"] = _sha256(os.environ.get("OPENAI_BASE_URL"))
+        backends.append(entry)
     doc: dict[str, Any] = {
         "fingerprint_version": FINGERPRINT_VERSION,
         "rr_version": rr_version(),

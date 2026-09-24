@@ -279,7 +279,8 @@ the reviewed content plus this value and reuse it only when neither moved.
   files and backend resolution a review with those flags would use. With no review source
   flag, `--mode` is required; stdin is never read and never counts as a source.
 - **What is hashed:** the rr version and a hash of rr's own code (`code_sha256`); the
-  mode; each backend with the model it runs and its CLI's `--version`; `effort`,
+  mode; each backend with the model it runs and its CLI's `--version` (for `api`, the
+  OpenAI SDK's version and a hash of `OPENAI_BASE_URL`, never the URL itself); `effort`,
   `codex_sandbox`, `fail_on`, `json` and `timeout` (`api` drops its file attachments when
   too little of the timeout is left); whether `--repo` names another repository, which
   also turns attachments off; the standards docs as read (`docs_sha256`); the extra
@@ -294,9 +295,11 @@ the reviewed content plus this value and reuse it only when neither moved.
   `~/.codex/AGENTS.md` and the like); a cache that must track those keys on them itself.
 - **`pinned`** is `false` when a choice is left to a default the fingerprint cannot see: a
   backend with no model pin (codex, claude or opencode run their CLI's own default), no
-  `effort` (each CLI applies its own), a CLI that does not answer `--version`, or an `api`
-  model name that is not canonical (rr resolves it to the newest dated snapshot at run
-  time). Those defaults can change under an unchanged fingerprint, so a cache should
+  `effort` (each CLI applies its own — so an `opencode` backend, which takes no `--effort`,
+  is never pinned), a CLI that does not answer `--version`, or an `api` model that is
+  neither a dated snapshot nor a tier-suffixed name like `gpt-5.6-terra` (the bare
+  `gpt-5.6` can be remapped, and other names are resolved to the newest dated snapshot at
+  run time). Those defaults can change under an unchanged fingerprint, so a cache should
   decline to reuse a verdict then.
 - **Refuses what a review refuses.** Settings `rr` will not review with, or a backend that is
   not installed, exit 1 with the same message and print no document.
