@@ -301,8 +301,8 @@ the reviewed content plus this value and reuse it only when neither moved.
   itself.
 - **`pinned`** is `false` when a choice is left to a default the fingerprint cannot see: a
   backend with no model pin (codex, claude or opencode run their CLI's own default), no
-  `effort` (each CLI applies its own — so an `opencode` backend, which takes no `--effort`,
-  is never pinned), a CLI that does not answer `--version`, a claude model given as one of
+  `effort` or an empty one (each CLI applies its own — so an `opencode` backend, which
+  takes no `--effort`, is never pinned), a model name ending in `-latest`, a CLI that does not answer `--version`, a claude model given as one of
   Claude Code's aliases (`default`, `opus`, `sonnet`, ...) rather than a `claude-*` id, a
   bare OpenAI family name (`gpt-5.6`, `gpt-6`) for codex, or an `api` model that is neither a dated snapshot nor `gpt-5.6-sol`/`-terra`/`-luna` (the
   bare `gpt-5.6` can be remapped, and other names are resolved to the newest dated snapshot

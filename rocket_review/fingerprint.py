@@ -187,7 +187,9 @@ def _pinned(backends: list[dict[str, Any]], effort: str | None) -> bool:
     """Whether every choice a backend would otherwise make for itself is written down here.
 
     A model rr passes no name for, an effort it passes none for, and a CLI that will not say
-    its version are each a default that can change under an unchanged fingerprint. So an
+    its version are each a default that can change under an unchanged fingerprint, and a
+    `-latest` name says in itself that it moves. An empty effort counts as none, because
+    every backend drops it. So an
     opencode backend is never pinned: it takes no --effort and applies its own config's. An
     api name has to name one model (_API_FIXED_MODEL), and a claude one has to be a model id
     rather than one of Claude Code's aliases (default, opus, sonnet, ...), which follow the
@@ -195,11 +197,11 @@ def _pinned(backends: list[dict[str, Any]], effort: str | None) -> bool:
 
     A name that passes can still be one the vendor moves on its side; rr cannot see that.
     """
-    if effort is None:
+    if not effort:
         return False
     for backend in backends:
         model = backend["model"]
-        if model is None:
+        if model is None or model.endswith("-latest"):
             return False
         if backend["name"] == "api":
             if not _API_FIXED_MODEL.search(model) or backend["sdk_version"] is None:

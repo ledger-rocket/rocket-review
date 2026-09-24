@@ -160,9 +160,27 @@ def test_an_unpinned_model_is_reported_as_unpinned(monkeypatch, capsys):
     assert doc["pinned"] is False
 
 
-def test_an_unset_effort_is_reported_as_unpinned(monkeypatch, capsys):
-    # With no effort rr passes none, and each CLI applies a default of its own.
-    doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--backend", "codex:m"])
+@pytest.mark.parametrize("effort", [[], ["--effort", ""]])
+def test_an_unset_effort_is_reported_as_unpinned(monkeypatch, capsys, effort):
+    # With no effort — or an empty one, which every backend drops — rr passes none, and
+    # each CLI applies a default of its own.
+    doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", *effort,
+                                   "--backend", "codex:m"])
+    assert doc["pinned"] is False
+
+
+def test_api_without_the_sdk_is_unpinned(monkeypatch, capsys):
+    monkeypatch.setattr("rocket_review.fingerprint.sdk_version", lambda: None)
+    doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--effort", "high",
+                                   "--backend", "api"])
+    assert doc["pinned"] is False
+
+
+@pytest.mark.parametrize("backend", ["claude:claude-3-7-sonnet-latest", "codex:codex-mini-latest"])
+def test_a_latest_alias_is_unpinned_on_every_backend(monkeypatch, capsys, backend):
+    # A -latest name says in itself that it moves.
+    doc = fp(monkeypatch, capsys, ["--fingerprint", "--mode", "diff", "--effort", "high",
+                                   "--backend", backend])
     assert doc["pinned"] is False
 
 
