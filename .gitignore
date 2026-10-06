@@ -21,3 +21,6 @@ evals/results/
 # the same content `results/` does and are ignored by default for the same reason. A
 # sweep whose verdict is worth publishing can be committed with an explicit `git add -f`.
 evals/adjudications/
+
+# Agent working files: commit messages, PR bodies, probes and logs.
+.tmp/

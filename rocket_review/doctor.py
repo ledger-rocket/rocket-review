@@ -8,6 +8,8 @@ push and must never block on input.
 
 import argparse
 import os
+import re
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -30,6 +32,21 @@ FAILED = "failed"
 #: no status command, one too old to have it, a timeout — and treating that as a gap would
 #: fail a pre-push hook on hosts where everything is fine.
 GAPS = (MISSING, FAILED)
+
+#: What a status command prints when it tries to open the terminal to ask for a login and
+#: its session has none: the open fails with ENXIO, and each runtime passes the system's
+#: words for it through. Linux says "No such device or address", macOS says "Device not
+#: configured", and Node also puts the errno name in front of them. An older CLI without the
+#: status subcommand never gets that far: its argument parser refuses the subcommand first
+#: and prints usage, which carries none of these. A CLI's own words ("not a terminal") do not
+#: count, because usage text has them too.
+NO_TERMINAL = ("no such device or address", "device not configured", "enxio")
+#: ENXIO is not only a terminal's error (a socket opened as a file gives it too), so the
+#: output must also name the terminal device as a whole path, ended the way each runtime
+#: ends it: a quote, a colon, whitespace, or the end. Not /dev/ttyUSB0, /dev/tty.usbserial-1
+#: or a "tty" inside another name. Any other form, and a CLI that prints the bare system
+#: words with no path as a Rust io::Error does, reads unknown: no evidence of the terminal.
+TERMINAL = re.compile(r"/dev/tty(?=[\s'\":]|$)")
 
 #: Seconds for one status probe. A doctor run must stay under a few seconds in total, and a
 #: backend CLI that needs longer than this to say whether it is logged in cannot say.
@@ -73,25 +90,59 @@ AUTH_PROBES = {
 }
 
 
+def _probe_env() -> dict[str, str]:
+    """This environment, with messages in the C locale.
+
+    NO_TERMINAL and every refusal are English, and a runtime that prints strerror() prints
+    it in the language of LC_MESSAGES. Only that category changes: LC_ALL would outrank
+    LC_MESSAGES, so its value moves to LANG, and the LC_* variables it was hiding are
+    dropped, which leaves every other category where LC_ALL had put it.
+    """
+    env = dict(os.environ)
+    every = env.pop("LC_ALL", "")
+    if every:
+        for key in [key for key in env if key.startswith("LC_")]:
+            del env[key]
+        env["LANG"] = every
+    env["LC_MESSAGES"] = "C"
+    return env
+
+
 def _probe(cmd: list[str]) -> subprocess.CompletedProcess | None:
     """Run one status command, or return None when the host cannot answer.
 
-    stdin is closed so a CLI that would prompt gets EOF instead of hanging a hook, and the
-    timeout bounds the rest. Every failure to *run* is None (unknown); only a command that
-    ran and spoke gets an opinion read out of it.
+    The command starts in a session of its own, so it has no controlling terminal: a CLI
+    that would prompt for a login on /dev/tty fails at once and says so (NO_TERMINAL),
+    where in the caller's session it would wait on the prompt, or stop on SIGTTIN under a
+    hook, until the timeout. stdin is closed for the same reason. Every failure to *run* is
+    None (unknown); only a command that ran and spoke gets an opinion read out of it.
+
+    A Ctrl-C at the terminal no longer reaches the probe's process group, so on a timeout or
+    any interrupt that group is killed here before the probe is reaped. Until then its pid,
+    and so its group id, cannot be reused, which is why the kill comes before the reap and
+    never after a probe that has exited. The group is what a terminal's Ctrl-C reached
+    before: a child that moved to a group or a session of its own is out of reach of both.
     """
     try:
-        return subprocess.run(
+        with subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
             stdin=subprocess.DEVNULL,
-            timeout=PROBE_TIMEOUT,
-        )
+            start_new_session=True,
+            env=_probe_env(),
+        ) as proc:
+            try:
+                stdout, stderr = proc.communicate(timeout=PROBE_TIMEOUT)
+            finally:
+                if proc.returncode is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
     except (OSError, subprocess.SubprocessError):
         return None
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 def _install_channel() -> str:
@@ -291,6 +342,8 @@ def _auth_state(name: str) -> tuple[str, str]:
         return FAILED, "not logged in"
     if result.returncode == 0:
         return OK, ""
+    if TERMINAL.search(spoken) and any(words in spoken for words in NO_TERMINAL):
+        return FAILED, f"{name} needs a login: its status command asked for a terminal"
     # Ran, said nothing this version of rr recognises — an older CLI without the
     # subcommand lands here, and it is not evidence of a broken login.
     return UNKNOWN, f"status command exited {result.returncode}"

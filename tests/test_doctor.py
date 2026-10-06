@@ -1,5 +1,9 @@
+import os
 import shutil
+import signal
 import subprocess
+import sys
+import time
 import types
 from pathlib import Path
 
@@ -510,31 +514,273 @@ def test_the_api_probe_never_shells_out(monkeypatch):
 # --- the probe itself -----------------------------------------------------------------
 
 
+def fake_cli(tmp_path, body):
+    """A status command that runs `body` as Python, isolated from this repository's modules."""
+    script = tmp_path / "fake_cli.py"
+    script.write_text(body)
+    return [sys.executable, "-I", str(script)]
+
+
 def test_probe_is_bounded_and_reads_no_input(monkeypatch):
-    seen = {}
-
-    def fake_run(cmd, **kwargs):
-        seen.update(kwargs, cmd=cmd)
-        return probe_result()
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    assert REAL_PROBE(["codex", "login", "status"]) is not None
-    assert 0 < seen["timeout"] <= 10
-    assert seen["stdin"] == subprocess.DEVNULL
-    assert seen["capture_output"] is True
+    assert 0 < doctor.PROBE_TIMEOUT <= 10
+    monkeypatch.setattr(doctor, "PROBE_TIMEOUT", 0.5)
+    started = time.monotonic()
+    assert REAL_PROBE(["sleep", "30"]) is None
+    assert time.monotonic() - started < 3
+    stdin_is_devnull = (
+        "import os; s, n = os.fstat(0), os.stat(os.devnull); "
+        "print((s.st_dev, s.st_ino) == (n.st_dev, n.st_ino))"
+    )
+    # A pipe on this process's own stdin, so a probe that inherited it would see the pipe.
+    read_end, write_end = os.pipe()
+    saved = os.dup(0)
+    os.dup2(read_end, 0)
+    try:
+        result = REAL_PROBE([sys.executable, "-I", "-c", stdin_is_devnull])
+    finally:
+        os.dup2(saved, 0)
+        for fd in (saved, read_end, write_end):
+            os.close(fd)
+    assert result is not None and result.stdout.strip() == "True"
 
 
 def test_probe_swallows_a_timeout(monkeypatch):
-    def fake_run(cmd, **kwargs):
-        raise subprocess.TimeoutExpired(cmd, 5)
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    assert REAL_PROBE(["codex", "login", "status"]) is None
+    monkeypatch.setattr(doctor, "PROBE_TIMEOUT", 0.3)
+    assert REAL_PROBE(["sleep", "30"]) is None
 
 
-def test_probe_swallows_a_missing_binary(monkeypatch):
-    def fake_run(cmd, **kwargs):
-        raise OSError("no such file")
+def test_probe_swallows_a_missing_binary(tmp_path):
+    assert REAL_PROBE([str(tmp_path / "no-such-cli"), "login", "status"]) is None
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    assert REAL_PROBE(["codex", "login", "status"]) is None
+
+# --- a probe with no terminal -----------------------------------------------------------
+
+
+def run_fake_codex(monkeypatch, cmd):
+    """rr doctor --backend codex, with the real probe running `cmd` as codex's status."""
+    monkeypatch.setattr(doctor, "_probe", REAL_PROBE)
+    refusals = doctor.AUTH_PROBES["codex"].refusals
+    monkeypatch.setattr(
+        doctor, "AUTH_PROBES",
+        {"codex": doctor.AuthProbe(cmd=cmd, refusals=refusals, login="codex login")},
+    )
+    return run_doctor(["--backend", "codex"])
+
+
+def codex_line(out):
+    return next(ln for ln in out.splitlines() if "backend codex" in ln)
+
+
+def test_probe_runs_in_a_session_without_a_terminal(tmp_path):
+    """A session leader of its own has no controlling terminal until it opens one."""
+    cmd = fake_cli(tmp_path, "import os\nprint(os.getsid(0) == os.getpid())\n")
+    result = REAL_PROBE(cmd)
+    assert result is not None and result.stdout.strip() == "True"
+
+
+def test_a_probe_that_reads_the_terminal_is_failed_and_needs_a_login(
+    monkeypatch, capsys, tmp_path
+):
+    """The PRO-8328 case: a CLI that asks for its login on /dev/tty. With no terminal the
+    open fails at once, and that failure is a gap, never `unknown`."""
+    cmd = fake_cli(tmp_path, (
+        "import sys\n"
+        "try:\n"
+        "    with open('/dev/tty', 'r+') as tty:\n"
+        "        tty.write('Log in: ')\n"
+        "        tty.readline()\n"
+        "except OSError as e:\n"
+        "    sys.exit(f'Error: {e}')\n"
+    ))
+    started = time.monotonic()
+    assert run_fake_codex(monkeypatch, cmd) == 1
+    assert time.monotonic() - started < doctor.PROBE_TIMEOUT
+    out = capsys.readouterr().out
+    line = codex_line(out)
+    assert line.startswith("failed") and "codex needs a login" in line
+    assert "authenticate codex: run `codex login`" in out.split("fixes:")[1]
+
+
+@pytest.mark.parametrize("spoken", [
+    "Error: ENXIO: no such device or address, open '/dev/tty'",  # Node
+    "OSError: [Errno 6] No such device or address: '/dev/tty'",  # Python, Linux
+    "OSError: [Errno 6] Device not configured: '/dev/tty'",  # Python, macOS
+    "open /dev/tty: no such device or address",  # Go
+    "Error: open /dev/tty\n\nCaused by:\n    No such device or address (os error 6)",  # Rust
+    "bash: line 1: /dev/tty: No such device or address",  # a shell wrapper
+    "error: no such device or address, cannot open /dev/tty",  # the path last
+])
+def test_a_no_terminal_failure_is_failed_however_the_runtime_spells_it(
+    monkeypatch, capsys, spoken
+):
+    monkeypatch.setattr(doctor, "_probe", lambda cmd: probe_result(returncode=1, stderr=spoken))
+    assert run_doctor(["--backend", "codex"]) == 1
+    assert codex_line(capsys.readouterr().out).startswith("failed")
+
+
+@pytest.mark.parametrize("spoken", [
+    "Error: open /run/agent.sock: No such device or address",  # a socket opened as a file
+    "Error: No such device or address (os error 6)",  # a Rust io::Error, with no path
+    "Error: connect /tmp/kitty-agent.sock: No such device or address",  # "tty" in a name
+    "Error: open /dev/ttyUSB0: No such device or address",  # another tty device
+    "Error: open /dev/tty.usbserial-1: Device not configured",  # a macOS serial device
+    "Error: connect /dev/tty-agent.sock: No such device or address",  # a name that starts so
+])
+def test_a_device_error_that_names_no_terminal_is_unknown(monkeypatch, capsys, spoken):
+    """ENXIO alone is not evidence of a login prompt; the output must name the terminal."""
+    monkeypatch.setattr(doctor, "_probe", lambda cmd: probe_result(returncode=1, stderr=spoken))
+    assert run_doctor(["--backend", "codex"]) == 0
+    assert codex_line(capsys.readouterr().out).startswith("unknown")
+
+
+LOCALE_VARS = ("LC_ALL", "LC_MESSAGES", "LC_TIME", "LANG")
+
+
+@pytest.mark.parametrize("given, seen", [
+    (
+        {"LC_ALL": "de_DE.UTF-8", "LC_TIME": "fr_FR.UTF-8", "LANG": "es_ES.UTF-8"},
+        {"LC_ALL": None, "LC_MESSAGES": "C", "LC_TIME": None, "LANG": "de_DE.UTF-8"},
+    ),
+    (
+        {"LC_ALL": None, "LC_TIME": "fr_FR.UTF-8", "LANG": "es_ES.UTF-8"},
+        {"LC_ALL": None, "LC_MESSAGES": "C", "LC_TIME": "fr_FR.UTF-8", "LANG": "es_ES.UTF-8"},
+    ),
+])
+def test_probe_reads_messages_in_the_c_locale(monkeypatch, tmp_path, given, seen):
+    """strerror() is English only in the C locale; every other category keeps its locale."""
+    for key in LOCALE_VARS:
+        monkeypatch.delenv(key, raising=False)
+    for key, value in given.items():
+        if value is not None:
+            monkeypatch.setenv(key, value)
+    cmd = fake_cli(tmp_path, f"import os\nprint([os.environ.get(k) for k in {LOCALE_VARS!r}])\n")
+    result = REAL_PROBE(cmd)
+    assert result is not None
+    assert result.stdout.strip() == str([seen[key] for key in LOCALE_VARS])
+
+
+def test_no_terminal_words_with_exit_0_are_ok(monkeypatch, capsys):
+    """A status command that answered yes is logged in, whatever else it printed."""
+    monkeypatch.setattr(
+        doctor, "_probe",
+        lambda cmd: probe_result(stdout="logged in", stderr="/dev/tty: No such device or address"),
+    )
+    assert run_doctor(["--backend", "codex"]) == 0
+    assert codex_line(capsys.readouterr().out).startswith("ok")
+
+
+def test_an_older_cli_without_the_subcommand_is_unknown_with_no_terminal(
+    monkeypatch, capsys, tmp_path
+):
+    """The case the exit code cannot tell from a login prompt: it refuses the subcommand
+    before any terminal open, and its usage text talks about terminals in its own words."""
+    cmd = fake_cli(tmp_path, (
+        "import sys\n"
+        "sys.exit(\"error: unrecognized subcommand 'status'\\n\\n\"\n"
+        "         \"Usage: codex [OPTIONS] <COMMAND>\\n\"\n"
+        "         \"  --no-tty  fail if stdin is not a terminal; never open /dev/tty\")\n"
+    ))
+    assert run_fake_codex(monkeypatch, cmd) == 0
+    line = codex_line(capsys.readouterr().out)
+    assert line.startswith("unknown") and "status command exited 1" in line
+
+
+def test_a_terminal_failure_in_the_clis_own_words_is_unknown(monkeypatch, capsys):
+    """The limit of NO_TERMINAL: without the system's words there is no evidence."""
+    monkeypatch.setattr(
+        doctor, "_probe",
+        lambda cmd: probe_result(returncode=1, stderr="Error: cannot prompt for a login here"),
+    )
+    assert run_doctor(["--backend", "codex"]) == 0
+    assert codex_line(capsys.readouterr().out).startswith("unknown")
+
+
+def test_a_refusal_from_a_slow_probe_inside_the_timeout_is_failed(
+    monkeypatch, capsys, tmp_path
+):
+    monkeypatch.setattr(doctor, "PROBE_TIMEOUT", 3.0)
+    cmd = fake_cli(tmp_path, (
+        "import sys, time\n"
+        "time.sleep(0.5)\n"
+        "sys.exit('Not logged in. Run `codex login`.')\n"
+    ))
+    assert run_fake_codex(monkeypatch, cmd) == 1
+    line = codex_line(capsys.readouterr().out)
+    assert line.startswith("failed") and "not logged in" in line
+
+
+SLOW_WITH_A_CHILD = (
+    "import subprocess, sys, time\n"
+    "child = subprocess.Popen(['sleep', '30'])\n"
+    "with open(sys.argv[1], 'w') as f:\n"
+    "    f.write(str(child.pid))\n"
+    "time.sleep(30)\n"
+)
+
+
+def gone(pid, within=3.0):
+    """Whether `pid` has exited (a zombie waiting for its reaper counts) within `within` s."""
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        stat = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+        ).stdout.strip()
+        if not stat or stat.startswith("Z"):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def wait_for_pid(path, within=3.0):
+    deadline = time.monotonic() + within
+    while not path.exists() or not path.read_text():
+        assert time.monotonic() < deadline, "the probe never started its child"
+        time.sleep(0.02)
+    return int(path.read_text())
+
+
+def kill_quietly(pid):
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def test_a_probe_past_the_timeout_is_unknown_and_its_group_is_killed(
+    monkeypatch, capsys, tmp_path
+):
+    """Its child holds the output pipe open; neither may outlive the doctor run."""
+    monkeypatch.setattr(doctor, "PROBE_TIMEOUT", 1.0)
+    pidfile = tmp_path / "child.pid"
+    started = time.monotonic()
+    assert run_fake_codex(monkeypatch, [*fake_cli(tmp_path, SLOW_WITH_A_CHILD), str(pidfile)]) == 0
+    assert time.monotonic() - started < 4
+    line = codex_line(capsys.readouterr().out)
+    assert line.startswith("unknown") and "did not answer" in line
+    child = wait_for_pid(pidfile)
+    try:
+        assert gone(child)
+    finally:
+        kill_quietly(child)
+
+
+def test_an_interrupt_during_a_probe_kills_its_group(monkeypatch, tmp_path):
+    """Ctrl-C reaches rr, not the probe's process group, so rr must kill that group itself."""
+    pidfile = tmp_path / "child.pid"
+
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGALRM, interrupt)
+    signal.setitimer(signal.ITIMER_REAL, 1.0)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            REAL_PROBE([*fake_cli(tmp_path, SLOW_WITH_A_CHILD), str(pidfile)])
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    child = wait_for_pid(pidfile)
+    try:
+        assert gone(child)
+    finally:
+        kill_quietly(child)

@@ -149,6 +149,12 @@ command (`codex login status`, `claude auth status`), with a few seconds' timeou
 that cannot answer — no status command, too old to have one, a timeout — reads `unknown`,
 which is never counted as broken.
 
+Each status command runs in a session of its own, with no terminal, no stdin and messages
+in the C locale. A CLI that tries to ask for a login on the terminal therefore fails at
+once instead of waiting on the prompt, and that failure reads `failed`, with the login to
+run under `fixes:`. On a timeout or a Ctrl-C, `rr doctor` kills the process group of the
+status command.
+
 - **Exit code** — 0 when every backend this host depends on is installed and not refusing
   a login; 1 when one of them is missing or refusing, when the config file is invalid, or
   when it holds a combination `rr` refuses to review with (`fail_on` or `full` without
