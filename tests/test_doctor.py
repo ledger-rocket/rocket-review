@@ -606,7 +606,7 @@ def test_a_probe_that_reads_the_terminal_is_failed_and_needs_a_login(
     "OSError: [Errno 6] No such device or address: '/dev/tty'",  # Python, Linux
     "OSError: [Errno 6] Device not configured: '/dev/tty'",  # Python, macOS
     "open /dev/tty: no such device or address",  # Go
-    "Error: No such device or address (os error 6)",  # Rust
+    "Error: open /dev/tty\n\nCaused by:\n    No such device or address (os error 6)",  # Rust
     "bash: line 1: /dev/tty: No such device or address",  # a shell wrapper
 ])
 def test_a_no_terminal_failure_is_failed_however_the_runtime_spells_it(
@@ -615,6 +615,43 @@ def test_a_no_terminal_failure_is_failed_however_the_runtime_spells_it(
     monkeypatch.setattr(doctor, "_probe", lambda cmd: probe_result(returncode=1, stderr=spoken))
     assert run_doctor(["--backend", "codex"]) == 1
     assert codex_line(capsys.readouterr().out).startswith("failed")
+
+
+@pytest.mark.parametrize("spoken", [
+    "Error: open /run/agent.sock: No such device or address",  # a socket opened as a file
+    "Error: No such device or address (os error 6)",  # a Rust io::Error, with no path
+])
+def test_a_device_error_that_names_no_terminal_is_unknown(monkeypatch, capsys, spoken):
+    """ENXIO alone is not evidence of a login prompt; the output must name the terminal."""
+    monkeypatch.setattr(doctor, "_probe", lambda cmd: probe_result(returncode=1, stderr=spoken))
+    assert run_doctor(["--backend", "codex"]) == 0
+    assert codex_line(capsys.readouterr().out).startswith("unknown")
+
+
+LOCALE_VARS = ("LC_ALL", "LC_MESSAGES", "LC_TIME", "LANG")
+
+
+@pytest.mark.parametrize("given, seen", [
+    (
+        {"LC_ALL": "de_DE.UTF-8", "LC_TIME": "fr_FR.UTF-8", "LANG": "es_ES.UTF-8"},
+        {"LC_ALL": None, "LC_MESSAGES": "C", "LC_TIME": None, "LANG": "de_DE.UTF-8"},
+    ),
+    (
+        {"LC_ALL": None, "LC_TIME": "fr_FR.UTF-8", "LANG": "es_ES.UTF-8"},
+        {"LC_ALL": None, "LC_MESSAGES": "C", "LC_TIME": "fr_FR.UTF-8", "LANG": "es_ES.UTF-8"},
+    ),
+])
+def test_probe_reads_messages_in_the_c_locale(monkeypatch, tmp_path, given, seen):
+    """strerror() is English only in the C locale; every other category keeps its locale."""
+    for key in LOCALE_VARS:
+        monkeypatch.delenv(key, raising=False)
+    for key, value in given.items():
+        if value is not None:
+            monkeypatch.setenv(key, value)
+    cmd = fake_cli(tmp_path, f"import os\nprint([os.environ.get(k) for k in {LOCALE_VARS!r}])\n")
+    result = REAL_PROBE(cmd)
+    assert result is not None
+    assert result.stdout.strip() == str([seen[key] for key in LOCALE_VARS])
 
 
 def test_no_terminal_words_with_exit_0_are_ok(monkeypatch, capsys):
@@ -704,7 +741,7 @@ def kill_quietly(pid):
         pass
 
 
-def test_a_probe_past_the_timeout_is_unknown_and_its_session_is_killed(
+def test_a_probe_past_the_timeout_is_unknown_and_its_group_is_killed(
     monkeypatch, capsys, tmp_path
 ):
     """Its child holds the output pipe open; neither may outlive the doctor run."""
@@ -722,8 +759,8 @@ def test_a_probe_past_the_timeout_is_unknown_and_its_session_is_killed(
         kill_quietly(child)
 
 
-def test_an_interrupt_during_a_probe_kills_its_session(monkeypatch, tmp_path):
-    """Ctrl-C reaches rr, not the probe's session, so rr must end that session itself."""
+def test_an_interrupt_during_a_probe_kills_its_group(monkeypatch, tmp_path):
+    """Ctrl-C reaches rr, not the probe's process group, so rr must kill that group itself."""
     pidfile = tmp_path / "child.pid"
 
     def interrupt(signum, frame):

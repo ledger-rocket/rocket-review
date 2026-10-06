@@ -37,9 +37,13 @@ GAPS = (MISSING, FAILED)
 #: words for it through. Linux says "No such device or address", macOS says "Device not
 #: configured", and Node also puts the errno name in front of them. An older CLI without the
 #: status subcommand never gets that far: its argument parser refuses the subcommand first
-#: and prints usage, which carries none of these. Only the system's words count, not a
-#: CLI's own ("not a terminal", "/dev/tty"), because those also turn up in usage text.
+#: and prints usage, which carries none of these. A CLI's own words ("not a terminal") do not
+#: count, because usage text has them too.
 NO_TERMINAL = ("no such device or address", "device not configured", "enxio")
+#: ENXIO is not only a terminal's error (a socket opened as a file gives it too), so the
+#: output must also name the terminal. A CLI that prints the bare system words with no path,
+#: as a Rust io::Error does, therefore reads unknown: there is no evidence it was the tty.
+TERMINAL = "tty"
 
 #: Seconds for one status probe. A doctor run must stay under a few seconds in total, and a
 #: backend CLI that needs longer than this to say whether it is logged in cannot say.
@@ -83,6 +87,24 @@ AUTH_PROBES = {
 }
 
 
+def _probe_env() -> dict[str, str]:
+    """This environment, with messages in the C locale.
+
+    NO_TERMINAL and every refusal are English, and a runtime that prints strerror() prints
+    it in the language of LC_MESSAGES. Only that category changes: LC_ALL would outrank
+    LC_MESSAGES, so its value moves to LANG, and the LC_* variables it was hiding are
+    dropped, which leaves every other category where LC_ALL had put it.
+    """
+    env = dict(os.environ)
+    every = env.pop("LC_ALL", "")
+    if every:
+        for key in [key for key in env if key.startswith("LC_")]:
+            del env[key]
+        env["LANG"] = every
+    env["LC_MESSAGES"] = "C"
+    return env
+
+
 def _probe(cmd: list[str]) -> subprocess.CompletedProcess | None:
     """Run one status command, or return None when the host cannot answer.
 
@@ -92,11 +114,11 @@ def _probe(cmd: list[str]) -> subprocess.CompletedProcess | None:
     hook, until the timeout. stdin is closed for the same reason. Every failure to *run* is
     None (unknown); only a command that ran and spoke gets an opinion read out of it.
 
-    The terminal no longer stops the probe's own children on Ctrl-C, so on a timeout or any
-    interrupt the whole session is killed here before the probe is reaped. Until then its
-    pid, and so its group id, cannot be reused, which is why the kill comes before the
-    reap and never after a probe that has exited: a child that already left the session
-    with a setsid() of its own is out of reach either way.
+    A Ctrl-C at the terminal no longer reaches the probe's process group, so on a timeout or
+    any interrupt that group is killed here before the probe is reaped. Until then its pid,
+    and so its group id, cannot be reused, which is why the kill comes before the reap and
+    never after a probe that has exited. The group is what a terminal's Ctrl-C reached
+    before: a child that moved to a group or a session of its own is out of reach of both.
     """
     try:
         with subprocess.Popen(
@@ -108,6 +130,7 @@ def _probe(cmd: list[str]) -> subprocess.CompletedProcess | None:
             errors="replace",
             stdin=subprocess.DEVNULL,
             start_new_session=True,
+            env=_probe_env(),
         ) as proc:
             try:
                 stdout, stderr = proc.communicate(timeout=PROBE_TIMEOUT)
@@ -316,7 +339,7 @@ def _auth_state(name: str) -> tuple[str, str]:
         return FAILED, "not logged in"
     if result.returncode == 0:
         return OK, ""
-    if any(words in spoken for words in NO_TERMINAL):
+    if TERMINAL in spoken and any(words in spoken for words in NO_TERMINAL):
         return FAILED, f"{name} needs a login: its status command asked for a terminal"
     # Ran, said nothing this version of rr recognises — an older CLI without the
     # subcommand lands here, and it is not evidence of a broken login.
