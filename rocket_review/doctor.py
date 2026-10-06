@@ -8,6 +8,7 @@ push and must never block on input.
 
 import argparse
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -41,9 +42,10 @@ GAPS = (MISSING, FAILED)
 #: count, because usage text has them too.
 NO_TERMINAL = ("no such device or address", "device not configured", "enxio")
 #: ENXIO is not only a terminal's error (a socket opened as a file gives it too), so the
-#: output must also name the terminal. A CLI that prints the bare system words with no path,
-#: as a Rust io::Error does, therefore reads unknown: there is no evidence it was the tty.
-TERMINAL = "tty"
+#: output must also name the terminal device, as a whole path: not /dev/ttyUSB0, and not a
+#: "tty" inside another name. A CLI that prints the bare system words with no path, as a
+#: Rust io::Error does, therefore reads unknown: there is no evidence it was the terminal.
+TERMINAL = re.compile(r"/dev/tty\b")
 
 #: Seconds for one status probe. A doctor run must stay under a few seconds in total, and a
 #: backend CLI that needs longer than this to say whether it is logged in cannot say.
@@ -339,7 +341,7 @@ def _auth_state(name: str) -> tuple[str, str]:
         return FAILED, "not logged in"
     if result.returncode == 0:
         return OK, ""
-    if TERMINAL in spoken and any(words in spoken for words in NO_TERMINAL):
+    if TERMINAL.search(spoken) and any(words in spoken for words in NO_TERMINAL):
         return FAILED, f"{name} needs a login: its status command asked for a terminal"
     # Ran, said nothing this version of rr recognises — an older CLI without the
     # subcommand lands here, and it is not evidence of a broken login.

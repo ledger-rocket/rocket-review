@@ -620,6 +620,8 @@ def test_a_no_terminal_failure_is_failed_however_the_runtime_spells_it(
 @pytest.mark.parametrize("spoken", [
     "Error: open /run/agent.sock: No such device or address",  # a socket opened as a file
     "Error: No such device or address (os error 6)",  # a Rust io::Error, with no path
+    "Error: connect /tmp/kitty-agent.sock: No such device or address",  # "tty" in a name
+    "Error: open /dev/ttyUSB0: No such device or address",  # another tty device
 ])
 def test_a_device_error_that_names_no_terminal_is_unknown(monkeypatch, capsys, spoken):
     """ENXIO alone is not evidence of a login prompt; the output must name the terminal."""
