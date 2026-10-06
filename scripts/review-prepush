@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# scripts/review-prepush: the pre-push review. `just review-prepush` runs it
+# from the repository root, and .githooks/pre-push runs that after the
+# preflight.
+#
+# It pipes the branch diff, from the merge base with origin/main to HEAD, to
+# the installed rr with --json --fail-on high. Every rr exit other than 0
+# refuses the push: 2 is a finding at or above high, and 1 is an rr fault or a
+# run in which every backend failed. A push that no model reviewed is always
+# refused, so REVIEW_PREPUSH_STRICT=1, which a push driver may set, changes
+# nothing here.
+#
+# The rr on PATH reviews, never this checkout's own code: a branch must not
+# supply the reviewer that grades it.
+#
+# The patch comes from git's own diff machinery. A diff.external helper or a
+# textconv driver in the local config would replace the patch with the
+# helper's output, and rr would give a verdict on text it never saw.
+set -euo pipefail
+
+backends="${REVIEW_BACKENDS:-codex,claude}"
+
+command -v rr >/dev/null 2>&1 || {
+  echo "review-prepush: rr is not on PATH, so no review can run. Install rocket-review (pipx install rocket-review), run rr init and rr doctor, then push again." >&2
+  exit 1
+}
+base=$(git merge-base origin/main HEAD) || {
+  echo "review-prepush: HEAD has no merge base with origin/main, so there is no branch diff to review. Run git fetch origin main, then push again." >&2
+  exit 1
+}
+[ "$base" != "$(git rev-parse HEAD)" ] || {
+  echo "review-prepush: HEAD has no commits beyond origin/main, so there is nothing to review." >&2
+  exit 1
+}
+
+rc=0
+git diff --no-ext-diff --no-textconv "$base" HEAD \
+  | rr --json --fail-on high --backend "$backends" --timeout 3300 || rc=$?
+case $rc in
+  0) echo "review-prepush: rr found no finding at or above high." >&2 ;;
+  2) echo "review-prepush: rr found a finding at or above high; the envelope above lists it. Fix it, then push again." >&2 ;;
+  *) echo "review-prepush: the review exited $rc, so no review verdict exists. The push is refused." >&2 ;;
+esac
+exit "$rc"

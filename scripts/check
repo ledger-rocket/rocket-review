@@ -1,0 +1,76 @@
+#!/bin/sh
+# scripts/check: the gates CI runs, in CI's order; stops at the first failure.
+# scripts/check <step>: one gate. Each job in .github/workflows/ci.yml runs one.
+# scripts/check --quick: lint only, the justfile's quick-gate.
+#
+# CI calls this script rather than repeating its commands, so `just preflight`
+# on a laptop and the CI run on a pull request run the same commands. The tool
+# pins live here; the linters' pins also sit in pyproject.toml's [dev] extra.
+# Bump both together.
+#
+# Each venv is made fresh in a temporary directory outside the tree, as CI
+# makes it on a fresh runner, and removed on exit. A venv inside the tree
+# would be linted by the steps that read the whole tree.
+set -eu
+
+steps="lint types test build yaml audit"
+usage() { echo "usage: scripts/check [--quick | lint | types | test | build | yaml | audit]" >&2; exit 2; }
+case "$#:${1:-}" in
+  0:) run=$steps ;;
+  1:--quick) run=lint ;;
+  1:lint | 1:types | 1:test | 1:build | 1:yaml | 1:audit) run=$1 ;;
+  *) usage ;;
+esac
+cd "$(dirname "$0")/.."
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 1' HUP INT TERM
+
+# venv <dir>: a fresh venv with the project and its [dev] extra installed.
+venv() {
+  uv venv --quiet "$1"
+  uv pip install --quiet --python "$1/bin/python" -e ".[dev]"
+}
+
+step_lint() { uvx ruff@0.14.0 check .; }
+
+step_types() { uvx --with openai mypy@1.18.2 rocket_review/; }
+
+# The eval corpus pins each case to a commit oid, and its manifest tests read
+# that commit from the object database, so the clone needs full history.
+step_test() {
+  venv "$tmp/test"
+  "$tmp/test/bin/pytest" -q
+}
+
+step_build() {
+  uv build --out-dir "$tmp/dist"
+  uv venv --quiet "$tmp/smoke"
+  uv pip install --quiet --python "$tmp/smoke/bin/python" "$tmp"/dist/*.whl
+  "$tmp/smoke/bin/python" -c \
+    "import rocket_review.cli, rocket_review.models, rocket_review.prompts, rocket_review.backends"
+}
+
+step_yaml() { uvx yamllint@1.37.1 .; }
+
+# `dependencies` is empty and there is no lockfile, so the set to audit is
+# resolved first. `[dev]` is the widest target: it pulls in `[api]`, so every
+# package a user can install is audited, plus the linters CI runs. Because the
+# set is resolved, an upstream release can turn this red on a change that
+# touched nothing, which is correct for a security gate. `--ignore-vuln ID` is
+# the release valve for an advisory with no fix.
+#
+# -s osv queries the OSV database, which covers advisories PyPI's own service
+# does not. --no-deps audits the literal pins of the freeze. --strict exits
+# non-zero on a scan error, so a broken audit cannot pass as a clean one.
+step_audit() {
+  venv "$tmp/audit"
+  uv pip freeze --python "$tmp/audit/bin/python" --exclude-editable >"$tmp/audit-requirements.txt"
+  uvx pip-audit@2.10.1 --strict --no-deps -s osv --requirement "$tmp/audit-requirements.txt"
+}
+
+for step in $run; do
+  echo "== check $step"
+  "step_$step"
+done

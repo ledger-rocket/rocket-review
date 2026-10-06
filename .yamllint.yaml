@@ -1,5 +1,8 @@
 # yamllint config (120-column limit)
 extends: default
+# `yamllint .` reads every file under the tree, including a .venv and a
+# scratch .tmp/; those are not the repository's YAML.
+ignore-from-file: .gitignore
 rules:
   line-length:
     max: 120

@@ -1,0 +1,46 @@
+#!/bin/sh
+# pre-push: `just preflight` (scripts/check, what CI runs), then
+# `just review-prepush` (scripts/review-prepush, the rr review of the branch
+# diff), before every push. `just install-hooks` installs it.
+#
+# The gates grade the working tree, so the hook refuses a push of a commit
+# other than HEAD, and a tree with changes: either would grade one tree and
+# push another. A ref deletion (all-zero local object) sends no commit. The
+# gates take minutes, so the hook checks HEAD and the tree again after them.
+# A failed preflight stops the push before the review, so it costs no review.
+set -eu
+
+# Stop unless the tree is clean. A git status that fails says nothing about
+# the tree, so it stops the push too.
+require_clean() {
+  status=$(git status --porcelain --untracked-files=all) || {
+    echo "pre-push: git status failed $1, so the hook cannot tell what the gates grade. Repair the repository, then push again." >&2
+    exit 1
+  }
+  [ -z "$status" ] || {
+    echo "pre-push: the tree has changes $1 that the push does not send. Commit or remove them, then push again." >&2
+    exit 1
+  }
+}
+
+head=$(git rev-parse HEAD)
+while read -r _ local _ _; do
+  case $local in
+    *[!0]*) [ "$local" = "$head" ] || {
+      echo "pre-push: this push sends $local, not HEAD $head. The gates grade the working tree; check out that commit and push from there." >&2
+      exit 1
+    } ;;
+  esac
+done
+require_clean "before the gates"
+# The suite makes repositories of its own; git's GIT_DIR and the rest must not reach them.
+unset $(git rev-parse --local-env-vars)
+# set -e ends the hook with the gate's own status when a gate fails.
+just preflight
+just review-prepush
+after=$(git rev-parse HEAD)
+[ "$after" = "$head" ] || {
+  echo "pre-push: HEAD moved from $head to $after during the gates, so they did not grade the pushed commit. Push again." >&2
+  exit 1
+}
+require_clean "after the gates"
