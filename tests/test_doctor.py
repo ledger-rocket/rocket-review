@@ -608,6 +608,7 @@ def test_a_probe_that_reads_the_terminal_is_failed_and_needs_a_login(
     "open /dev/tty: no such device or address",  # Go
     "Error: open /dev/tty\n\nCaused by:\n    No such device or address (os error 6)",  # Rust
     "bash: line 1: /dev/tty: No such device or address",  # a shell wrapper
+    "error: no such device or address, cannot open /dev/tty",  # the path last
 ])
 def test_a_no_terminal_failure_is_failed_however_the_runtime_spells_it(
     monkeypatch, capsys, spoken
@@ -622,6 +623,8 @@ def test_a_no_terminal_failure_is_failed_however_the_runtime_spells_it(
     "Error: No such device or address (os error 6)",  # a Rust io::Error, with no path
     "Error: connect /tmp/kitty-agent.sock: No such device or address",  # "tty" in a name
     "Error: open /dev/ttyUSB0: No such device or address",  # another tty device
+    "Error: open /dev/tty.usbserial-1: Device not configured",  # a macOS serial device
+    "Error: connect /dev/tty-agent.sock: No such device or address",  # a name that starts so
 ])
 def test_a_device_error_that_names_no_terminal_is_unknown(monkeypatch, capsys, spoken):
     """ENXIO alone is not evidence of a login prompt; the output must name the terminal."""

@@ -42,10 +42,11 @@ GAPS = (MISSING, FAILED)
 #: count, because usage text has them too.
 NO_TERMINAL = ("no such device or address", "device not configured", "enxio")
 #: ENXIO is not only a terminal's error (a socket opened as a file gives it too), so the
-#: output must also name the terminal device, as a whole path: not /dev/ttyUSB0, and not a
-#: "tty" inside another name. A CLI that prints the bare system words with no path, as a
-#: Rust io::Error does, therefore reads unknown: there is no evidence it was the terminal.
-TERMINAL = re.compile(r"/dev/tty\b")
+#: output must also name the terminal device as a whole path, ended the way each runtime
+#: ends it: a quote, a colon, whitespace, or the end. Not /dev/ttyUSB0, /dev/tty.usbserial-1
+#: or a "tty" inside another name. Any other form, and a CLI that prints the bare system
+#: words with no path as a Rust io::Error does, reads unknown: no evidence of the terminal.
+TERMINAL = re.compile(r"/dev/tty(?=[\s'\":]|$)")
 
 #: Seconds for one status probe. A doctor run must stay under a few seconds in total, and a
 #: backend CLI that needs longer than this to say whether it is logged in cannot say.
