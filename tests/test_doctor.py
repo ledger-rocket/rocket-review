@@ -660,7 +660,7 @@ def test_no_terminal_words_with_exit_0_are_ok(monkeypatch, capsys):
     """A status command that answered yes is logged in, whatever else it printed."""
     monkeypatch.setattr(
         doctor, "_probe",
-        lambda cmd: probe_result(stdout="logged in", stderr="tty: No such device or address"),
+        lambda cmd: probe_result(stdout="logged in", stderr="/dev/tty: No such device or address"),
     )
     assert run_doctor(["--backend", "codex"]) == 0
     assert codex_line(capsys.readouterr().out).startswith("ok")
