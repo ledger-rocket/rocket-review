@@ -8,6 +8,7 @@ push and must never block on input.
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -30,6 +31,15 @@ FAILED = "failed"
 #: no status command, one too old to have it, a timeout — and treating that as a gap would
 #: fail a pre-push hook on hosts where everything is fine.
 GAPS = (MISSING, FAILED)
+
+#: What a status command prints when it tries to open the terminal to ask for a login and
+#: its session has none: the open fails with ENXIO, and each runtime passes the system's
+#: words for it through. Linux says "No such device or address", macOS says "Device not
+#: configured", and Node also puts the errno name in front of them. An older CLI without the
+#: status subcommand never gets that far: its argument parser refuses the subcommand first
+#: and prints usage, which carries none of these. Only the system's words count, not a
+#: CLI's own ("not a terminal", "/dev/tty"), because those also turn up in usage text.
+NO_TERMINAL = ("no such device or address", "device not configured", "enxio")
 
 #: Seconds for one status probe. A doctor run must stay under a few seconds in total, and a
 #: backend CLI that needs longer than this to say whether it is logged in cannot say.
@@ -76,22 +86,37 @@ AUTH_PROBES = {
 def _probe(cmd: list[str]) -> subprocess.CompletedProcess | None:
     """Run one status command, or return None when the host cannot answer.
 
-    stdin is closed so a CLI that would prompt gets EOF instead of hanging a hook, and the
-    timeout bounds the rest. Every failure to *run* is None (unknown); only a command that
-    ran and spoke gets an opinion read out of it.
+    The command starts in a session of its own, so it has no controlling terminal: a CLI
+    that would prompt for a login on /dev/tty fails at once and says so (NO_TERMINAL),
+    where in the caller's session it would wait on the prompt, or stop on SIGTTIN under a
+    hook, until the timeout. stdin is closed for the same reason. Every failure to *run* is
+    None (unknown); only a command that ran and spoke gets an opinion read out of it.
+
+    The terminal no longer stops the probe's own children on Ctrl-C, so on a timeout or any
+    interrupt the whole session is killed here before the probe is reaped. Until then its
+    pid, and so its group id, cannot be reused, which is why the kill comes before the
+    reap and never after a probe that has exited: a child that already left the session
+    with a setsid() of its own is out of reach either way.
     """
     try:
-        return subprocess.run(
+        with subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
             stdin=subprocess.DEVNULL,
-            timeout=PROBE_TIMEOUT,
-        )
+            start_new_session=True,
+        ) as proc:
+            try:
+                stdout, stderr = proc.communicate(timeout=PROBE_TIMEOUT)
+            finally:
+                if proc.returncode is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
     except (OSError, subprocess.SubprocessError):
         return None
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 def _install_channel() -> str:
@@ -291,6 +316,8 @@ def _auth_state(name: str) -> tuple[str, str]:
         return FAILED, "not logged in"
     if result.returncode == 0:
         return OK, ""
+    if any(words in spoken for words in NO_TERMINAL):
+        return FAILED, f"{name} needs a login: its status command asked for a terminal"
     # Ran, said nothing this version of rr recognises — an older CLI without the
     # subcommand lands here, and it is not evidence of a broken login.
     return UNKNOWN, f"status command exited {result.returncode}"
