@@ -175,13 +175,15 @@ Rank a finding by its consequence, not by its kind.
 - HIGH: Bugs or regressions introduced by this change
 - MEDIUM: A defect in this change with bounded consequence (a wrong result in an edge \
 case, a gate or check that misses a case, an error handled in a way that hides a \
-failure); a maintainability problem likely to cause a defect (logic duplicated in two \
-places that must change together, one contract enforced in two places that can \
-diverge, a name or comment that states the wrong behaviour); a test that cannot fail \
-or does not exercise the changed path it claims to cover
-- LOW: Missing tests for changed behaviour (coverage gates own coverage), other \
-maintainability and readability improvements, minor improvements (but not style — \
-leave that to linters)
+failure). The finding must state a concrete failure scenario: the specific input or \
+state, and the wrong result it produces. A maintainability or test-validity finding \
+(logic duplicated in two places that must change together, one contract enforced in \
+two places that can diverge, a name or comment that states the wrong behaviour, a test \
+that cannot fail or does not exercise the changed path) is MEDIUM only with such a \
+scenario, for example "these two copies already disagree on X, so input Y gives Z"
+- LOW: Missing tests for changed behaviour (coverage gates own coverage); \
+maintainability and test-validity findings without a failure scenario; readability and \
+minor improvements (but not style — leave that to linters)
 
 Label each finding with one of the severity levels above. An unlabelled finding is \
 malformed — do not emit one.

@@ -108,6 +108,18 @@ def test_diff_severity_ranks_by_consequence_not_kind():
     assert "Missing tests" not in medium
 
 
+def test_diff_medium_requires_a_failure_scenario():
+    # Without this bar a reviewer files every test-validity or duplication point as MEDIUM
+    # and a `--fail-on medium` gate refuses clean diffs. The scenario is what separates a
+    # finding that can fail a build from a suggestion.
+    medium = diff_section("- MEDIUM:", "- LOW:")
+    low = diff_section("- LOW:", "Label each finding")
+    assert "must state a concrete failure scenario" in medium
+    assert "the specific input or state, and the wrong result it produces" in medium
+    assert "is MEDIUM only with such a scenario" in medium
+    assert "maintainability and test-validity findings without a failure scenario" in low
+
+
 def test_diff_review_focus_asks_whether_the_tests_can_fail():
     # COMPLETENESS leaves missing tests out, so a reviewer does not rank them as a gap in
     # the change. The TESTS item asks whether the tests that exist can prove anything.

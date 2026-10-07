@@ -204,8 +204,8 @@ def test_the_lang_python_arm_carries_its_block_in_the_diff_body_alone():
     )
 
 
-#: The treatment of the consequence-rubric experiment (PRO-8570), pinned for the same
-#: reason as the arms above.
+#: The first treatment of the consequence-rubric experiment, pinned for the same reason as
+#: the arms above.
 CONSEQUENCE_RUBRIC_HASH = (
     "42d7f16f9c7d35da32c5e8f23a221e02bec38757a802c2a245b5023d21554f83"
 )
@@ -231,6 +231,26 @@ def test_the_consequence_rubric_arm_edits_the_diff_body_alone():
     )
     assert arm_hash(texts) == CONSEQUENCE_RUBRIC_BASE_HASH, (
         "consequence-rubric/ edits a file other than DIFF_REVIEW_PROMPT.txt"
+    )
+
+
+#: The second treatment of the same experiment, and the rubric that shipped. Same base.
+CONSEQUENCE_RUBRIC_V2_HASH = (
+    "1367797e8c767f9cf3a6f4cc052035c2c7c9ca62ed2ed475a9c3f8518b0ff03a"
+)
+
+
+def test_the_consequence_rubric_v2_arm_is_frozen():
+    assert load_arm("consequence-rubric-v2").content_hash == CONSEQUENCE_RUBRIC_V2_HASH
+
+
+def test_the_consequence_rubric_v2_arm_edits_the_diff_body_alone():
+    texts = dict(load_arm("consequence-rubric-v2").texts)
+    texts["DIFF_REVIEW_PROMPT"] = without_paragraph(
+        load_arm("lang-python").texts["DIFF_REVIEW_PROMPT"], PYTHON_CHECKS_HEADING
+    )
+    assert arm_hash(texts) == CONSEQUENCE_RUBRIC_BASE_HASH, (
+        "consequence-rubric-v2/ edits a file other than DIFF_REVIEW_PROMPT.txt"
     )
 
 
