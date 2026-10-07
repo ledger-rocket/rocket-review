@@ -7,6 +7,10 @@ name: CI
 # Gates: ruff (lint), mypy (type-check), pytest (unit suite), package build +
 # import smoke, yamllint, and a pip-audit dependency vulnerability scan.
 #
+# Each job runs one step of scripts/check, which holds the commands and the
+# tool pins. `just preflight` runs the same script with no argument, so a
+# local preflight and this workflow run the same commands.
+#
 # The `CI Success` aggregator is the single required status check in the
 # branch ruleset, so gates can be added or removed above without a ruleset
 # edit.
@@ -29,7 +33,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
       - name: Ruff lint
-        run: uvx ruff@0.14.0 check .
+        run: scripts/check lint
 
   typecheck:
     runs-on: ubuntu-latest
@@ -39,7 +43,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
       - name: Mypy type-check
-        run: uvx --with openai mypy@1.18.2 rocket_review/
+        run: scripts/check types
 
   test:
     runs-on: ubuntu-latest
@@ -54,10 +58,7 @@ jobs:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
       - name: Run test suite
-        run: |
-          uv venv
-          uv pip install -e ".[dev]"
-          .venv/bin/pytest -q
+        run: scripts/check test
 
   build:
     runs-on: ubuntu-latest
@@ -66,14 +67,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
-      - name: Build package
-        run: uv build
-      - name: Import smoke test
-        run: |
-          uv venv
-          uv pip install dist/*.whl
-          .venv/bin/python -c \
-            "import rocket_review.cli, rocket_review.models, rocket_review.prompts, rocket_review.backends"
+      - name: Build package and import smoke test
+        run: scripts/check build
 
   yaml-lint:
     runs-on: ubuntu-latest
@@ -83,7 +78,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
       - name: Yamllint
-        run: uvx yamllint@1.37.1 .
+        run: scripts/check yaml
 
   vuln-scan:
     runs-on: ubuntu-latest
@@ -92,37 +87,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
-      # `dependencies` is empty and there is no lockfile, so there is no pinned
-      # set on disk to audit — it has to be resolved first. `[dev]` is the widest
-      # target: it pulls in `[api]`, so every package a user can install is
-      # covered, plus the linters that run here as CI-executed code. A dev-only
-      # advisory blocking a PR is the intended trade; `--ignore-vuln ID` is the
-      # release valve if one ever lands with no fix available.
-      #
-      # Resolving instead of reading a lockfile means the audit set tracks what
-      # PyPI would give a user today, not what was pinned months ago. The cost is
-      # that an upstream release can turn this red on a PR that changed nothing —
-      # correct for a security gate, and the reason it is a separate job rather
-      # than a step bolted onto `test`, where a red pytest would hide it and a
-      # CVE would report as a test failure.
-      - name: Resolve the dev install set
-        run: |
-          uv venv
-          uv pip install -e ".[dev]"
-          uv pip freeze --exclude-editable > "${RUNNER_TEMP}/audit-requirements.txt"
-      # pip-audit comes straight from PyPI rather than through a wrapper action.
-      # The wrapper runs this same command underneath, `uvx <tool>@<version>` is
-      # how every other gate in this file pins its tooling, and it keeps the
-      # third-party action count of a fork-PR-safe workflow at zero.
-      #
-      # -s osv queries the OSV database, which covers advisories PyPI's own
-      # service does not. --no-deps audits the literal pins from the freeze
-      # instead of re-resolving. --strict exits non-zero on a scan error, not
-      # just on a finding, so a broken audit cannot pass as a clean one.
+      # The audit is a separate job rather than a step bolted onto `test`: a red
+      # pytest would hide it, and a CVE would report as a test failure.
+      # scripts/check says why the set is resolved, not read from a lockfile.
       - name: Audit for known vulnerabilities
-        run: >-
-          uvx pip-audit@2.10.1 --strict --no-deps -s osv
-          --requirement "${RUNNER_TEMP}/audit-requirements.txt"
+        run: scripts/check audit
 
   # Single green/red target for branch protection. The ruleset requires only
   # this check by name. Every gate above runs unconditionally, so a `skipped`

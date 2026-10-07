@@ -558,12 +558,26 @@ Issues and PRs are welcome. To set up a dev environment:
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 .venv/bin/pytest -q                  # run the tests
-.venv/bin/ruff check .               # lint
-.venv/bin/mypy rocket_review/        # type-check
-.venv/bin/yamllint .                 # yaml lint
 ```
 
-CI gates all four plus a package build — run them before opening a PR.
+`scripts/check` runs the gates that CI runs, in CI's order, and stops at the first failure:
+ruff, mypy, pytest, the package build with an import smoke test, yamllint, and pip-audit.
+Each CI job runs one step of it (`scripts/check lint`, `scripts/check test`, and so on), so a
+local run and CI run the same commands with the same tool pins. It needs
+[uv](https://docs.astral.sh/uv/). Run it before you open a PR.
+
+With [just](https://just.systems/):
+
+- `just preflight` runs `scripts/check`.
+- `just quick-gate` runs `scripts/check --quick`, which is ruff only.
+- `just review-prepush` runs `scripts/review-prepush`. It sends the branch diff (from the
+  merge base with `origin/main` to `HEAD`) to the installed `rr` with
+  `--json --fail-on high --backend codex,claude`. `REVIEW_BACKENDS` changes the backends.
+  Every `rr` exit other than 0 fails it, so a push that no model reviewed fails too.
+- `just install-hooks` sets `core.hooksPath` to `.githooks` in this clone. The pre-push hook
+  then runs `just preflight` and `just review-prepush` before every push. It refuses a push of
+  a commit other than `HEAD`, and a tree with changes, because the gates grade the working
+  tree. It checks `HEAD` and the tree again after the gates.
 
 ## License
 

@@ -44,7 +44,7 @@ api = ["openai>=1.68"]
 # The three linters are pinned to the exact versions the workflows run, because their
 # version decides what passes: a newer ruff enforces rules the gate does not, and an
 # unpinned one already failed a release (publish.yml lints too, and v0.1.0 died on rules
-# CI never checked). Bump these and ci.yml/publish.yml together, or local runs stop
+# CI never checked). Bump these, scripts/check and publish.yml together, or local runs stop
 # predicting the gate. pytest and the parsers only need a floor — they gate nothing.
 dev = [
     "pytest>=8", "ruff==0.14.0", "mypy==1.18.2", "yamllint==1.37.1",
