@@ -354,6 +354,8 @@ MOVES = {
     # api drops its file attachments when too little of the timeout is left for them.
     "timeout": BASE_ARGS + ["--timeout", "3300"],
     "codex sandbox": BASE_ARGS + ["--codex-sandbox", "workspace-write"],
+    "exec mode": BASE_ARGS + ["--allow-exec"],
+    "claude setting sources": BASE_ARGS + ["--claude-setting-sources", "none"],
     "fail-on threshold": BASE_ARGS + ["--fail-on", "medium"],
     "json mode": [a for a in BASE_ARGS if a != "--json"],
     "mode": ["--fingerprint", "--mode", "code", *BASE_ARGS[3:]],
@@ -514,3 +516,31 @@ def test_holds_still_for_a_comment_in_a_config_file(monkeypatch, capsys, tmp_pat
     before = fp(monkeypatch, capsys)["fingerprint"]
     user.write_text('# the everyday setting\neffort = "high"\n')
     assert fp(monkeypatch, capsys)["fingerprint"] == before
+
+
+def test_records_the_commands_exec_mode_allows(monkeypatch, capsys, tmp_path):
+    assert fp(monkeypatch, capsys)["exec_commands"] == []
+    user = tmp_path / "config-home" / "rocket-review" / "config.toml"
+    user.parent.mkdir(parents=True)
+    user.write_text('allow_exec = true\nexec_commands = ["make check"]\n')
+    assert fp(monkeypatch, capsys)["exec_commands"] == ["make check"]
+
+
+def test_records_and_moves_with_a_command_line_exec_list(monkeypatch, capsys):
+    default = fp(monkeypatch, capsys, BASE_ARGS + ["--allow-exec"])
+    custom = fp(monkeypatch, capsys, BASE_ARGS + ["--allow-exec", "--exec-command", "make check"])
+    assert custom["exec_commands"] == ["make check"]
+    assert custom["fingerprint"] != default["fingerprint"]
+
+
+def test_holds_still_when_the_claude_settings_values_change(monkeypatch, capsys):
+    # Only the mode is recorded, never what the user's settings file holds.
+    path = claude.user_settings_path()
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"apiKeyHelper": "/bin/a", "env": {"ANTHROPIC_BASE_URL": "x"}}))
+    before = fp(monkeypatch, capsys)
+    path.write_text(json.dumps({"apiKeyHelper": "/bin/b", "env": {"ANTHROPIC_BASE_URL": "y"}}))
+    after = fp(monkeypatch, capsys)
+    assert before["fingerprint"] == after["fingerprint"]
+    assert before["claude_setting_sources"] == "auth"
+    assert "/bin/a" not in json.dumps(before)

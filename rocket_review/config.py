@@ -1,7 +1,9 @@
 """File-based defaults for rr: an optional user config and an optional project config.
 
 Every key mirrors a flag, so a config file changes what rr does by default and never what
-it can do. Precedence — CLI flag > project file > user file > built-in default — lives in
+it can do. exec_commands and exec_commands_extra are the exceptions: they set what
+--allow-exec allows (--exec-command replaces both for one run), and only the user file may
+set them. Precedence — CLI flag > project file > user file > built-in default — lives in
 resolve() and nowhere else.
 """
 
@@ -38,7 +40,16 @@ FLAG_DEFAULTS: dict[str, Any] = {
     "full": False,
     "docs": None,
     "codex_sandbox": "read-only",
+    "allow_exec": False,
+    "claude_setting_sources": "auth",
 }
+
+# Which Claude Code settings the claude backend gets; the checkout's own never load.
+# "auth" passes only the user settings that decide how Claude Code reaches and
+# authenticates to a model, and which model. "user" loads the user's settings file whole,
+# with its permissions.allow rules, hooks, plugins and env. "none" loads no settings file.
+# See backends/claude.py for what "auth" keeps.
+CLAUDE_SETTING_SOURCES = ("auth", "user", "none")
 
 # What `codex exec -s` accepts. read-only is the built-in default: a review needs to read
 # the prompt file and the repository, nothing more. The wider modes exist for hosts where
@@ -47,8 +58,32 @@ FLAG_DEFAULTS: dict[str, Any] = {
 # environment is the boundary instead.
 CODEX_SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 
+# The command patterns `--allow-exec` lets the claude backend run, as Claude Code permission
+# patterns: a trailing `*` matches any suffix, and a pattern without one also takes
+# arguments. `exec_commands` replaces this list and `exec_commands_extra` adds to it.
+DEFAULT_EXEC_COMMANDS = (
+    "just test*",
+    "go test",
+    "pytest",
+    "uv run pytest",
+    "cargo test",
+    "node --test",
+    "npm test",
+)
+
+# Keys that widen the sandbox the reviewer runs in. A project file comes from the repository
+# under review, and letting it set one of these would let the code being reviewed choose how
+# much of the reviewer's machine it may touch. The user file and the flag decide them.
+USER_ONLY_KEYS = {
+    "codex_sandbox": "pass --codex-sandbox",
+    "allow_exec": "pass --allow-exec",
+    "claude_setting_sources": "pass --claude-setting-sources",
+    "exec_commands": None,
+    "exec_commands_extra": None,
+}
+
 FLAG_KEYS = tuple(FLAG_DEFAULTS)
-ACCEPTED_KEYS = (*FLAG_KEYS, "backends", "models")
+ACCEPTED_KEYS = (*FLAG_KEYS, "backends", "models", "exec_commands", "exec_commands_extra")
 
 # Precedence layer labels, as they appear in Settings.sources.
 COMMAND_LINE = "command line"
@@ -83,6 +118,13 @@ class Settings:
     docs: list[str] | None
     #: `codex exec -s <mode>`; one of CODEX_SANDBOX_MODES.
     codex_sandbox: str
+    #: `--allow-exec`: the claude backend may run the commands in exec_commands.
+    allow_exec: bool
+    #: one of CLAUDE_SETTING_SOURCES.
+    claude_setting_sources: str
+    #: --exec-command when given; else DEFAULT_EXEC_COMMANDS or the user file's
+    #: exec_commands, plus exec_commands_extra.
+    exec_commands: tuple[str, ...]
     #: mode -> backend name, with the built-in table already folded in.
     backends: dict[str, str]
     #: backend name -> model, i.e. what `--backend name:model` pins.
@@ -151,14 +193,12 @@ def load_file(path: Path, *, repo_supplied: bool) -> Layer:
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"invalid TOML in {path}: {e}") from e
     values = _validate(path, data)
-    if repo_supplied and "codex_sandbox" in values:
-        # The project file comes from the repository under review. Letting it widen the
-        # sandbox the reviewer runs in would let the code being reviewed choose how much
-        # of the reviewer's machine it may touch. The user file and the flag decide this.
-        raise ConfigError(
-            f"{path}: codex_sandbox is not accepted in a project file; "
-            "set it in the user config or pass --codex-sandbox."
-        )
+    for key, flag in USER_ONLY_KEYS.items():
+        if repo_supplied and key in values:
+            raise ConfigError(
+                f"{path}: {key} is not accepted in a project file; "
+                f"set it in the user config{f' or {flag}' if flag else ''}."
+            )
     return Layer(
         path=path,
         values=values,
@@ -219,7 +259,22 @@ def resolve(cli: dict[str, Any], layers: list[Layer]) -> Settings:
     for _, layer_values in reversed(stack):  # lowest first, so a higher layer overwrites
         models.update(layer_values.get("models") or {})
 
-    return Settings(**values, backends=backends, models=models, sources=sources)
+    # --exec-command is the whole list for its run; a file's list still takes its extras.
+    exec_commands: tuple[str, ...] = DEFAULT_EXEC_COMMANDS
+    replaced_by = BUILT_IN
+    for origin, layer_values in stack:
+        if layer_values.get("exec_commands") is not None:
+            exec_commands, replaced_by = layer_values["exec_commands"], origin
+            break
+    if replaced_by != COMMAND_LINE:
+        for _, layer_values in reversed(stack):
+            exec_commands += layer_values.get("exec_commands_extra", ())
+    exec_commands = tuple(dict.fromkeys(exec_commands))
+
+    return Settings(
+        **values, exec_commands=exec_commands, backends=backends, models=models,
+        sources=sources,
+    )
 
 
 def _names(items: list[str]) -> str:
@@ -243,13 +298,20 @@ def _validate(path: Path, data: dict[str, Any]) -> dict[str, Any]:
         values["effort"] = _effort(path, data["effort"])
     if "fail_on" in data:
         values["fail_on"] = _severity(path, data["fail_on"])
-    for key in ("json", "full"):
+    for key in ("json", "full", "allow_exec"):
         if key in data:
             values[key] = _bool(path, key, data[key])
     if "docs" in data:
         values["docs"] = _docs(path, data["docs"])
     if "codex_sandbox" in data:
         values["codex_sandbox"] = _codex_sandbox(path, data["codex_sandbox"])
+    for key in ("exec_commands", "exec_commands_extra"):
+        if key in data:
+            values[key] = exec_patterns(f"{path}: {key}", data[key])
+    if "claude_setting_sources" in data:
+        values["claude_setting_sources"] = _claude_setting_sources(
+            path, data["claude_setting_sources"]
+        )
     if "backends" in data:
         values["backends"] = _backends(path, data["backends"])
     if "models" in data:
@@ -283,6 +345,39 @@ def _codex_sandbox(path: Path, value: Any) -> str:
             f"got {value!r}"
         )
     return value
+
+
+def _claude_setting_sources(path: Path, value: Any) -> str:
+    if not isinstance(value, str) or value not in CLAUDE_SETTING_SOURCES:
+        raise ConfigError(
+            f"{path}: claude_setting_sources must be one of "
+            f"{', '.join(CLAUDE_SETTING_SOURCES)}, got {value!r}."
+        )
+    return value
+
+
+def exec_patterns(origin: str, value: Any) -> tuple[str, ...]:
+    """A non-empty list of command patterns, each safe to wrap as `Bash(<pattern>)`.
+
+    `origin` names where the list came from, a config key or a flag, for the error.
+
+    The patterns are joined into one --allowedTools argument, which Claude Code splits on
+    commas and reads parentheses in, so either character could end one rule and start
+    another. A leading `*` would match every command.
+    """
+    if (
+        not isinstance(value, list) or not value
+        or not all(isinstance(item, str) and item.strip() for item in value)
+    ):
+        raise ConfigError(f"{origin} must be a non-empty list of strings, got {value!r}.")
+    patterns = tuple(item.strip() for item in value)
+    for pattern in patterns:
+        if pattern.startswith("*") or any(c in pattern for c in "(),") or not pattern.isprintable():
+            raise ConfigError(
+                f"{origin} entry {pattern!r} must start with a command, and must not "
+                "contain parentheses, commas or control characters."
+            )
+    return patterns
 
 
 def _effort(path: Path, value: Any) -> str:

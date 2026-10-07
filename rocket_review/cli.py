@@ -778,6 +778,27 @@ def _run():
              "file only).",
     )
     parser.add_argument(
+        "--allow-exec", action=argparse.BooleanOptionalAction, default=None,
+        help="Let the claude backend run the project's test commands to confirm a suspected "
+             f"defect (by default: {', '.join(config.DEFAULT_EXEC_COMMANDS)}). For reviews of "
+             "your own code; refused with --pr. --no-allow-exec turns a configured "
+             "allow_exec off for one run. Config keys: allow_exec, exec_commands, "
+             "exec_commands_extra (user file only).",
+    )
+    parser.add_argument(
+        "--exec-command", action="append", default=None, metavar="PATTERN",
+        help="A command pattern --allow-exec allows, e.g. 'make test' or 'bash tests/*.sh'. "
+             "Repeat for more. Replaces the configured list for this run.",
+    )
+    parser.add_argument(
+        "--claude-setting-sources", default=None, choices=config.CLAUDE_SETTING_SOURCES,
+        help="Claude Code settings the claude backend gets. auth (default): only the user "
+             "settings that decide how Claude Code reaches a model and which model. user: "
+             "the user's settings file whole, with its permissions, hooks and plugins. "
+             "none: no settings file. The checkout's own settings never load. Config key: "
+             "claude_setting_sources (user file only).",
+    )
+    parser.add_argument(
         "--timeout", type=positive_int, default=None, metavar="SECONDS",
         help="Per-backend subprocess timeout in seconds (default: 900 = 15 min). "
              "Raise for slow high-effort reviews, e.g. --timeout 1800.",
@@ -830,7 +851,10 @@ def _run():
     # backend work, and every check below judges the effective value, not just the flag.
     try:
         layers = config.load(no_config=args.no_config, cwd=Path.cwd())
-        settings = config.resolve({key: getattr(args, key) for key in config.FLAG_KEYS}, layers)
+        cli_values = {key: getattr(args, key) for key in config.FLAG_KEYS}
+        if args.exec_command is not None:
+            cli_values["exec_commands"] = config.exec_patterns("--exec-command", args.exec_command)
+        settings = config.resolve(cli_values, layers)
     except config.ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -854,6 +878,29 @@ def _run():
     if args.repo and not args.pr:
         print("Error: --repo only applies with --pr.", file=sys.stderr)
         sys.exit(1)
+
+    # A pull request's diff comes from GitHub, and the working directory the commands would
+    # run in is whatever this checkout holds: often not that branch, and often someone else's
+    # code. The flag typed with --pr is a mistake worth stopping on; the config key is a
+    # standing default for the user's own reviews, so --pr runs read-only and says so.
+    if args.exec_command and args.pr:
+        print("Error: --exec-command does not apply to --pr reviews; the commands would run "
+              "in this checkout, not in the pull request.", file=sys.stderr)
+        sys.exit(1)
+    if args.exec_command and not settings.allow_exec:
+        print("Error: --exec-command needs --allow-exec."
+              + where_set(settings, "allow_exec"), file=sys.stderr)
+        sys.exit(1)
+    allow_exec = settings.allow_exec
+    if allow_exec and args.pr:
+        if settings.from_file("allow_exec") is None:
+            print("Error: --allow-exec does not apply to --pr reviews; the commands would run "
+                  "in this checkout, not in the pull request.", file=sys.stderr)
+            sys.exit(1)
+        print("Note: --pr reviews run read-only; ignoring allow_exec"
+              + where_set(settings, "allow_exec") + ".", file=sys.stderr)
+        allow_exec = False
+    exec_commands = settings.exec_commands if allow_exec else ()
 
     if args.diff and args.staged:
         # Not silently staged-only: the user likely expects both sets reviewed.
@@ -955,7 +1002,7 @@ def _run():
         )
         doc = fingerprint.describe(
             mode=mode, source=source, specs=specs, settings=settings, docs_content=docs,
-            extra=args.prompt, foreign_repo=bool(args.repo),
+            extra=args.prompt, foreign_repo=bool(args.repo), exec_commands=exec_commands,
         )
         print(json.dumps(doc, indent=2))
         sys.exit(0)
@@ -1033,6 +1080,8 @@ def _run():
         effort=settings.effort,
         timeout=settings.timeout,
         codex_sandbox=settings.codex_sandbox,
+        claude_setting_sources=settings.claude_setting_sources,
+        exec_commands=exec_commands,
         foreign_repo=bool(args.repo),
         changed_paths=changed_paths,
     )

@@ -1030,3 +1030,115 @@ def test_run_capture_replaces_non_utf8_output():
     ])
     assert result.returncode == 0
     assert "ok" in result.stdout and "end" in result.stdout  # no UnicodeDecodeError
+
+
+def record_jobs(monkeypatch):
+    """A fake claude backend that keeps every job it is handed."""
+    jobs = []
+
+    def review(job):
+        jobs.append(job)
+        return "REVIEW"
+
+    patch_backends(monkeypatch, {"claude": "unused"})
+    monkeypatch.setattr(
+        "rocket_review.cli.BACKENDS", {"claude": types.SimpleNamespace(review=review)}
+    )
+    monkeypatch.setattr("rocket_review.cli.git_diff_changed_paths", lambda staged: [])
+    monkeypatch.setattr(
+        "rocket_review.cli.get_pr_content", lambda ref, repo=None: ("body", "diff --git a/x b/x")
+    )
+    return jobs
+
+
+def write_user_config(tmp_path, body):
+    path = tmp_path / "config-home" / "rocket-review" / "config.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(body)
+    return path
+
+
+def test_exec_mode_is_off_by_default(monkeypatch):
+    jobs = record_jobs(monkeypatch)
+    assert run_main(monkeypatch, ["--diff", "--backend", "claude"]) == 0
+    assert jobs[0].exec_commands == ()
+
+
+def test_allow_exec_hands_the_default_commands_to_an_own_code_review(monkeypatch):
+    from rocket_review.config import DEFAULT_EXEC_COMMANDS
+
+    jobs = record_jobs(monkeypatch)
+    assert run_main(monkeypatch, ["--diff", "--allow-exec", "--backend", "claude"]) == 0
+    assert jobs[0].exec_commands == DEFAULT_EXEC_COMMANDS
+
+
+def test_allow_exec_flag_with_pr_is_refused(monkeypatch, capsys):
+    jobs = record_jobs(monkeypatch)
+    assert run_cli(monkeypatch, ["--pr", "5", "--allow-exec", "--backend", "claude"]) == 1
+    assert "--allow-exec does not apply to --pr" in capsys.readouterr().err
+    assert jobs == []
+
+
+def test_allow_exec_from_config_is_ignored_for_pr(monkeypatch, capsys, tmp_path):
+    path = write_user_config(tmp_path, 'allow_exec = true\nexec_commands = ["make check"]\n')
+    jobs = record_jobs(monkeypatch)
+    assert run_main(monkeypatch, ["--pr", "5", "--backend", "claude"]) == 0
+    assert jobs[0].exec_commands == ()
+    err = capsys.readouterr().err
+    assert "--pr reviews run read-only; ignoring allow_exec" in err and str(path) in err
+
+
+def test_allow_exec_from_config_applies_to_an_own_code_review(monkeypatch, tmp_path):
+    write_user_config(tmp_path, 'allow_exec = true\nexec_commands = ["make check"]\n')
+    jobs = record_jobs(monkeypatch)
+    assert run_main(monkeypatch, ["--diff", "--backend", "claude"]) == 0
+    assert jobs[0].exec_commands == ("make check",)
+
+
+def test_no_allow_exec_turns_a_configured_allow_exec_off_for_one_run(monkeypatch, tmp_path):
+    write_user_config(tmp_path, "allow_exec = true\n")
+    jobs = record_jobs(monkeypatch)
+    assert run_main(monkeypatch, ["--diff", "--no-allow-exec", "--backend", "claude"]) == 0
+    assert jobs[0].exec_commands == ()
+
+
+def test_exec_command_replaces_the_configured_list_for_one_run(monkeypatch, tmp_path):
+    write_user_config(tmp_path, 'allow_exec = true\nexec_commands = ["make check"]\n')
+    jobs = record_jobs(monkeypatch)
+    argv = ["--diff", "--exec-command", "mix test", "--exec-command", "bash tests/*.sh",
+            "--backend", "claude"]
+    assert run_main(monkeypatch, argv) == 0
+    assert jobs[0].exec_commands == ("mix test", "bash tests/*.sh")
+
+
+def test_exec_command_is_validated(monkeypatch, capsys):
+    jobs = record_jobs(monkeypatch)
+    argv = ["--diff", "--allow-exec", "--exec-command", "go test,Edit", "--backend", "claude"]
+    assert run_cli(monkeypatch, argv) == 1
+    assert "--exec-command entry 'go test,Edit'" in capsys.readouterr().err
+    assert jobs == []
+
+
+def test_exec_command_without_allow_exec_is_refused(monkeypatch, capsys):
+    jobs = record_jobs(monkeypatch)
+    assert run_cli(monkeypatch, ["--diff", "--exec-command", "make", "--backend", "claude"]) == 1
+    assert "--exec-command needs --allow-exec" in capsys.readouterr().err
+    assert jobs == []
+
+
+def test_exec_command_with_pr_is_refused(monkeypatch, capsys, tmp_path):
+    write_user_config(tmp_path, "allow_exec = true\n")
+    jobs = record_jobs(monkeypatch)
+    argv = ["--pr", "5", "--exec-command", "make", "--backend", "claude"]
+    assert run_cli(monkeypatch, argv) == 1
+    assert "--exec-command does not apply to --pr" in capsys.readouterr().err
+    assert jobs == []
+
+
+def test_claude_setting_sources_reaches_the_job(monkeypatch):
+    jobs = record_jobs(monkeypatch)
+    assert run_main(monkeypatch, ["--diff", "--backend", "claude"]) == 0
+    assert run_main(
+        monkeypatch, ["--diff", "--claude-setting-sources", "none", "--backend", "claude"]
+    ) == 0
+    assert [job.claude_setting_sources for job in jobs] == ["auth", "none"]

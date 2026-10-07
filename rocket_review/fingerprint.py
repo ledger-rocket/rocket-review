@@ -7,7 +7,7 @@ gave, while one that moves on a change that cannot matter costs one fresh review
 everything rr decides is in, and only what provably cannot change an answer is out.
 
 In: rr's version and its own code; the mode and which source flag was given; each backend, the model it runs and its CLI's
-version (for api, the OpenAI SDK's version and the endpoint it sends to); effort; the codex sandbox; the fail-on threshold; JSON mode; the timeout, because
+version (for api, the OpenAI SDK's version and the endpoint it sends to); effort; the codex sandbox; the Claude Code settings files the claude backend loads; the commands --allow-exec lets the reviewer run; the fail-on threshold; JSON mode; the timeout, because
 api drops its file attachments when too little of it is left; whether the text comes from
 another repository, which also turns attachments off; the standards docs as read; the extra
 instructions; and the prompt each backend assembles for every source shape. Out: --full,
@@ -147,6 +147,7 @@ def prompt_digest(
     extra: str | None,
     json_output: bool,
     codex_sandbox: str,
+    exec_commands: tuple[str, ...],
 ) -> str:
     """sha256 over the prompt each selected backend would send, for every source shape.
 
@@ -162,6 +163,7 @@ def prompt_digest(
                 mode=mode, content=None, docs_content=docs_content, extra=extra,
                 commit=None, pr=False, git_cmd=None, model=model,
                 json_output=json_output, codex_sandbox=codex_sandbox,
+                exec_commands=exec_commands,
             )
             for key, value in shape.items():
                 setattr(job, key, value)
@@ -225,6 +227,7 @@ def describe(
     docs_content: str | None,
     extra: str | None,
     foreign_repo: bool,
+    exec_commands: tuple[str, ...],
 ) -> dict[str, Any]:
     """The fingerprint document `rr --fingerprint` prints.
 
@@ -256,6 +259,8 @@ def describe(
         "backends": backends,
         "effort": settings.effort,
         "codex_sandbox": settings.codex_sandbox,
+        "claude_setting_sources": settings.claude_setting_sources,
+        "exec_commands": list(exec_commands),
         "fail_on": settings.fail_on,
         "json": settings.json,
         "timeout": settings.timeout,
@@ -265,6 +270,7 @@ def describe(
         "prompt_sha256": prompt_digest(
             mode, specs, docs_content=docs_content, extra=extra,
             json_output=settings.json, codex_sandbox=settings.codex_sandbox,
+            exec_commands=exec_commands,
         ),
     }
     doc["fingerprint"] = digest(material(doc))
