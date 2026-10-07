@@ -1244,14 +1244,14 @@ def test_sandbox_keys_are_rejected_in_a_project_file(tmp_path, key, value):
     ("exec_commands = ['go test) Write(x']", "must not contain parentheses"),
     ("exec_commands_extra = ['go test,Edit']", "must not contain parentheses, commas"),
     ("exec_commands = [\"go test\\nrm\"]", "control characters"),
-    ("claude_setting_sources = 'project'", "claude_setting_sources must be one of user, none"),
+    ("claude_setting_sources = 'project'", "claude_setting_sources must be one of auth, user, none"),
 ])
 def test_invalid_exec_settings_are_errors(tmp_path, body, fragment):
     assert fragment in error_from(write(tmp_path, body + "\n"))
 
 
-def test_claude_setting_sources_defaults_to_user_and_reads_the_user_file(tmp_path):
-    assert resolve_with([]).claude_setting_sources == "user"
+def test_claude_setting_sources_defaults_to_auth_and_reads_the_user_file(tmp_path):
+    assert resolve_with([]).claude_setting_sources == "auth"
     write_user_config('claude_setting_sources = "none"\n')
     settings = resolve_with(config.load(no_config=False, cwd=tmp_path))
     assert settings.claude_setting_sources == "none"

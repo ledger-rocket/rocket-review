@@ -1141,4 +1141,4 @@ def test_claude_setting_sources_reaches_the_job(monkeypatch):
     assert run_main(
         monkeypatch, ["--diff", "--claude-setting-sources", "none", "--backend", "claude"]
     ) == 0
-    assert [job.claude_setting_sources for job in jobs] == ["user", "none"]
+    assert [job.claude_setting_sources for job in jobs] == ["auth", "none"]

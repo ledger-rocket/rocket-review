@@ -41,16 +41,15 @@ FLAG_DEFAULTS: dict[str, Any] = {
     "docs": None,
     "codex_sandbox": "read-only",
     "allow_exec": False,
-    "claude_setting_sources": "user",
+    "claude_setting_sources": "auth",
 }
 
-# Which Claude Code settings files the claude backend loads. Never the checkout's own:
-# project and local settings could widen what the reviewer may run. "user" keeps the
-# user's settings, which often carry how Claude Code reaches a model (env for a proxy or a
-# cloud provider, apiKeyHelper) and also their permissions.allow rules, plugins and hooks.
-# "none" loads no user, project or local settings file, so none of those reach the reviewer
-# either. Managed (policy) settings apply either way.
-CLAUDE_SETTING_SOURCES = ("user", "none")
+# Which Claude Code settings the claude backend gets; the checkout's own never load.
+# "auth" passes only the user settings that decide how Claude Code reaches and
+# authenticates to a model, and which model. "user" loads the user's settings file whole,
+# with its permissions.allow rules, hooks, plugins and env. "none" loads no settings file.
+# See backends/claude.py for what "auth" keeps.
+CLAUDE_SETTING_SOURCES = ("auth", "user", "none")
 
 # What `codex exec -s` accepts. read-only is the built-in default: a review needs to read
 # the prompt file and the repository, nothing more. The wider modes exist for hosts where

@@ -531,3 +531,16 @@ def test_records_and_moves_with_a_command_line_exec_list(monkeypatch, capsys):
     custom = fp(monkeypatch, capsys, BASE_ARGS + ["--allow-exec", "--exec-command", "make check"])
     assert custom["exec_commands"] == ["make check"]
     assert custom["fingerprint"] != default["fingerprint"]
+
+
+def test_holds_still_when_the_claude_settings_values_change(monkeypatch, capsys):
+    # Only the mode is recorded, never what the user's settings file holds.
+    path = claude.user_settings_path()
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"apiKeyHelper": "/bin/a", "env": {"ANTHROPIC_BASE_URL": "x"}}))
+    before = fp(monkeypatch, capsys)
+    path.write_text(json.dumps({"apiKeyHelper": "/bin/b", "env": {"ANTHROPIC_BASE_URL": "y"}}))
+    after = fp(monkeypatch, capsys)
+    assert before["fingerprint"] == after["fingerprint"]
+    assert before["claude_setting_sources"] == "auth"
+    assert "/bin/a" not in json.dumps(before)

@@ -40,16 +40,19 @@ Each backend is constrained so the reviewer cannot modify your files:
   - The checkout's own Claude Code settings never load. In a workspace Claude Code
     trusts, `.claude/settings.json` and `.claude/settings.local.json` add their
     `permissions.allow` entries to the allowlist, so a branch under review could choose
-    what its reviewer may run. rr passes `--setting-sources user`, so only your user
-    settings load, and `--strict-mcp-config`, so a repository's `.mcp.json` starts no
-    MCP server. Your own user settings still apply by default: a `permissions.allow`
-    entry, plugin or hook in `~/.claude/settings.json` also applies to the reviewer.
-    `--claude-setting-sources none` (or `claude_setting_sources = "none"`) loads no user,
-    project or local settings file, so only rr's allowlist and any organisation managed
-    (policy) settings apply; the cost is that `env` and `apiKeyHelper` from the user
-    settings file do not apply either. Ignoring settings files also
-    stops Claude Code loading the project's `CLAUDE.md` as memory; pass `--docs` to review
-    against it.
+    what its reviewer may run. Your own user settings file can do the same, and also
+    brings its hooks, plugins and `env`. By default (`claude_setting_sources = "auth"`) rr
+    passes `--setting-sources ""`, so no settings file loads, and hands Claude Code a
+    `--settings` file that holds only the keys that decide how it reaches and
+    authenticates to a model. That file carries no permissions, hooks or plugins, and no
+    `env` entry outside a fixed list of endpoint, provider, proxy and certificate names.
+    It is written mode 0600 in a private temporary directory and removed when the review
+    ends; it is never passed inline, because a command line is readable by other local
+    users. `user` loads the user settings file whole; `none` passes nothing. rr also
+    passes `--strict-mcp-config`, so a repository's `.mcp.json` starts no MCP server.
+    Organisation managed (policy) settings apply in every mode. Ignoring settings files
+    also stops Claude Code loading the project's `CLAUDE.md` as memory; pass `--docs` to
+    review against it.
 - **opencode** — the built-in read-only `plan` agent, with edit/write denied at the
   tool level.
 

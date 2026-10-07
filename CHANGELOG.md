@@ -15,15 +15,15 @@
   reviews keep their rubrics.
 
 - Security: the claude backend no longer loads Claude Code settings from the checkout
-  under review, in every mode. Only the user's own settings load, and no MCP server
-  starts. New `--claude-setting-sources none` option and `claude_setting_sources` user
-  config key: load no user, project or local settings file, so the user's own permission
-  rules, plugins and hooks do not reach the reviewer either. Organisation managed (policy)
-  settings still apply. The default stays `user`, because user settings often carry the
-  `env` or `apiKeyHelper` that Claude Code needs to reach a model. One consequence of
-  ignoring settings files: Claude Code no longer loads the project's `CLAUDE.md` as memory
-  for the reviewer. The reviewer can still read it as a file, and `--docs` sends it as
-  project standards.
+  under review, in any mode, and starts no MCP server. New `--claude-setting-sources`
+  option and `claude_setting_sources` user-config key: `auth` (the default) loads no
+  settings file and passes only the user settings that decide how Claude Code reaches and
+  authenticates to a model, and which model; `user` loads the user settings file whole,
+  as before; `none` loads no settings file. Under `auth`, the user's own permission rules,
+  hooks and plugins no longer reach the reviewer. Organisation managed (policy) settings
+  apply in every mode. One consequence of ignoring settings files: Claude Code no longer
+  loads the project's `CLAUDE.md` as memory for the reviewer. The reviewer can still read
+  it as a file, and `--docs` sends it as project standards.
 - New `--allow-exec` flag and `allow_exec` user-config key, off by default. For a review
   of your own code, the claude backend may run the project's test commands to confirm a
   suspected defect, and the review names each command it ran. The default commands are

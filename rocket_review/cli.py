@@ -792,11 +792,11 @@ def _run():
     )
     parser.add_argument(
         "--claude-setting-sources", default=None, choices=config.CLAUDE_SETTING_SOURCES,
-        help="Claude Code settings files the claude backend loads: user (default) or none. "
-             "The checkout's project and local settings never load. none also keeps your "
-             "user settings' permissions, plugins and hooks away from the reviewer, but "
-             "drops their env and apiKeyHelper too. Config key: claude_setting_sources "
-             "(user file only).",
+        help="Claude Code settings the claude backend gets. auth (default): only the user "
+             "settings that decide how Claude Code reaches a model and which model. user: "
+             "the user's settings file whole, with its permissions, hooks and plugins. "
+             "none: no settings file. The checkout's own settings never load. Config key: "
+             "claude_setting_sources (user file only).",
     )
     parser.add_argument(
         "--timeout", type=positive_int, default=None, metavar="SECONDS",

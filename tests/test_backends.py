@@ -1,4 +1,7 @@
+import json
+import os
 import re
+import stat
 import threading
 import types
 
@@ -1128,9 +1131,9 @@ def _claude_call(monkeypatch, **kw):
 @pytest.mark.parametrize("exec_commands", [(), ("go test",)])
 def test_claude_never_loads_the_checkouts_settings(monkeypatch, source, exec_commands):
     # In a trusted workspace, project and local settings add their permissions.allow entries
-    # to --allowedTools. Only user settings may load, and no MCP server may start.
+    # to --allowedTools. By default no settings file loads, and no MCP server may start.
     cmd, _, _ = _claude_call(monkeypatch, exec_commands=exec_commands, **source)
-    assert cmd[cmd.index("--setting-sources") + 1] == "user"
+    assert cmd[cmd.index("--setting-sources") + 1] == ""
     assert "--strict-mcp-config" in cmd
     assert "--settings" not in cmd and "--mcp-config" not in cmd
 
@@ -1174,3 +1177,127 @@ def test_claude_setting_sources_none_loads_no_settings_file(monkeypatch):
 def test_claude_refuses_an_unknown_setting_sources_value(monkeypatch):
     with pytest.raises(BackendError, match="unknown claude setting sources"):
         _claude_call(monkeypatch, claude_setting_sources="project")
+
+
+MIXED_USER_SETTINGS = {
+    "permissions": {"allow": ["Bash(touch:*)"], "deny": ["Read"]},
+    "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "touch x"}]}]},
+    "enabledPlugins": {"some-plugin@market": True},
+    "statusLine": {"type": "command", "command": "echo hi"},
+    "apiKeyHelper": "/usr/local/bin/key-helper",
+    "model": "claude-opus-5",
+    "modelOverrides": {"claude-opus-5": "arn:example"},
+    "env": {
+        "ANTHROPIC_BASE_URL": "https://proxy.example",
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "AWS_REGION": "eu-west-1",
+        "HTTPS_PROXY": "http://proxy.example:3128",
+        "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "60000",
+        "CLAUDE_CODE_OAUTH_TOKEN": "token-from-setup-token",
+        "PATH": "/tmp/evil:/usr/bin",
+        "SECRET_TOKEN": "s3cret",
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    },
+}
+
+
+def write_claude_settings(data):
+    path = claude.user_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(data if isinstance(data, str) else json.dumps(data))
+    return path
+
+
+def test_auth_keeps_only_the_settings_that_reach_a_model(tmp_path):
+    path = write_claude_settings(MIXED_USER_SETTINGS)
+    assert claude.auth_settings(path) == {
+        "apiKeyHelper": "/usr/local/bin/key-helper",
+        "model": "claude-opus-5",
+        "modelOverrides": {"claude-opus-5": "arn:example"},
+        "env": {
+            "ANTHROPIC_BASE_URL": "https://proxy.example",
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "AWS_REGION": "eu-west-1",
+            "HTTPS_PROXY": "http://proxy.example:3128",
+            "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "60000",
+            "CLAUDE_CODE_OAUTH_TOKEN": "token-from-setup-token",
+        },
+    }
+
+
+def test_auth_drops_an_env_with_nothing_to_keep():
+    path = write_claude_settings({"env": {"PATH": "/x"}, "hooks": {}})
+    assert claude.auth_settings(path) == {}
+
+
+def test_auth_reads_the_settings_under_claude_config_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "elsewhere"))
+    assert claude.user_settings_path() == tmp_path / "elsewhere" / "settings.json"
+
+
+def test_auth_passes_the_kept_settings_as_a_private_file_and_removes_it(monkeypatch):
+    write_claude_settings(MIXED_USER_SETTINGS)
+    seen = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        path = cmd[cmd.index("--settings") + 1]
+        seen["cmd"], seen["path"] = cmd, path
+        seen["file_mode"] = stat.S_IMODE(os.stat(path).st_mode)
+        seen["dir_mode"] = stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode)
+        with open(path) as f:
+            seen["data"] = json.load(f)
+        return "ok"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    claude.review(job())
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--setting-sources") + 1] == ""
+    assert seen["file_mode"] == 0o600 and seen["dir_mode"] == 0o700
+    assert seen["data"] == claude.auth_settings(claude.user_settings_path())
+    # The settings travel as a path, never inline: a command line is readable through /proc.
+    assert not any(arg.lstrip().startswith("{") for arg in cmd)
+    assert not any("proxy.example" in arg for arg in cmd)
+    assert not os.path.exists(seen["path"]) and not os.path.exists(os.path.dirname(seen["path"]))
+
+
+def test_auth_settings_file_is_removed_when_the_run_fails(monkeypatch):
+    write_claude_settings(MIXED_USER_SETTINGS)
+    seen = {}
+
+    def failing_run(cmd, *, stdin=None, timeout=900):
+        seen["path"] = cmd[cmd.index("--settings") + 1]
+        raise BackendError("claude failed (exit 1)")
+
+    monkeypatch.setattr(base, "run_command", failing_run)
+    with pytest.raises(BackendError):
+        claude.review(job())
+    assert not os.path.exists(seen["path"]) and not os.path.exists(os.path.dirname(seen["path"]))
+
+
+@pytest.mark.parametrize("data", [None, {"permissions": {"allow": ["Bash(x)"]}}])
+def test_auth_with_nothing_to_keep_passes_no_settings_file(monkeypatch, data):
+    if data is not None:
+        write_claude_settings(data)
+    cmd, _, _ = _claude_call(monkeypatch)
+    assert cmd[cmd.index("--setting-sources") + 1] == ""
+    assert "--settings" not in cmd
+
+
+@pytest.mark.parametrize("body, fragment", [
+    ("{not json", "could not read Claude Code settings"),
+    ("[1, 2]", "is not a JSON object"),
+])
+def test_auth_refuses_a_settings_file_it_cannot_read(monkeypatch, body, fragment):
+    path = write_claude_settings(body)
+    monkeypatch.setattr(base, "run_command", lambda *a, **k: "ok")
+    with pytest.raises(BackendError, match=fragment) as e:
+        claude.review(job())
+    assert str(path) in str(e.value)
+
+
+@pytest.mark.parametrize("mode, sources", [("user", "user"), ("none", "")])
+def test_user_and_none_never_read_or_pass_a_settings_file(monkeypatch, mode, sources):
+    write_claude_settings("{not json")  # would be an error if either mode read it
+    cmd, _, _ = _claude_call(monkeypatch, claude_setting_sources=mode)
+    assert cmd[cmd.index("--setting-sources") + 1] == sources
+    assert "--settings" not in cmd

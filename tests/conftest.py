@@ -16,6 +16,9 @@ def isolate_config(monkeypatch, tmp_path):
     home = tmp_path / "config-home"
     home.mkdir()
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home))
+    # The claude backend reads the user's Claude Code settings for "auth"; an empty
+    # directory stands in for them, so no developer's settings reach a test.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     monkeypatch.chdir(cwd)

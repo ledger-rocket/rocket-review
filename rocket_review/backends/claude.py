@@ -1,3 +1,12 @@
+import json
+import os
+import shutil
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+
 from rocket_review.backends import base
 from rocket_review.backends.base import BackendError, ReviewJob
 from rocket_review.prompts import build_agent_prompt
@@ -24,25 +33,126 @@ PERMISSION_MODE = "manual"
 # so no write flag can be appended. Read/Glob/Grep cover project navigation.
 READ_ONLY_TOOLS = "Read Glob Grep"
 
-# Layer 3: settings from the checkout under review never load. In a workspace Claude Code
-# trusts, a `.claude/settings.json` or `.claude/settings.local.json` adds its
-# permissions.allow entries to --allowedTools, so the branch under review could choose what
-# its reviewer may run. "user" loads only the user's own settings, which often carry how
-# Claude Code reaches a model; "none" (an empty --setting-sources) loads no user, project or
-# local settings file. Managed (policy) settings apply either way.
-# --strict-mcp-config with no --mcp-config starts no MCP server, so a repository's
-# `.mcp.json` launches nothing either.
-SETTING_SOURCES_ARG = {"user": "user", "none": ""}
+# Layer 3: no settings file the reviewer did not need. Claude Code layers settings files:
+# in a workspace it trusts, the checkout's `.claude/settings.json` and
+# `.claude/settings.local.json` add their permissions.allow entries to --allowedTools, so the
+# branch under review could choose what its reviewer may run. The user's own settings file
+# does the same for the user's rules, and also brings their hooks, plugins, skills and env.
+# Every mode passes `--setting-sources` without project or local:
+#   - "auth" (the default): no settings file loads; rr passes, through --settings, a file
+#     holding only the keys below from the user's settings. A --settings file is a full
+#     layer (its permissions merge into --allowedTools, its hooks run, its env reaches the
+#     shell), so it carries no permissions, hooks or plugins, and no env outside the list.
+#   - "user": the user's settings file loads whole.
+#   - "none": no settings file loads.
+# Managed (policy) settings apply in every mode. --strict-mcp-config with no --mcp-config
+# starts no MCP server, so a repository's `.mcp.json` launches nothing either.
+SETTING_SOURCES_ARG = {"auth": "", "user": "user", "none": ""}
+
+# What "auth" keeps: how Claude Code reaches and authenticates to a model, and which model.
+# Sources: https://code.claude.com/docs/en/settings (settings keys) and
+# https://code.claude.com/docs/en/env-vars (environment variables).
+AUTH_SETTINGS_KEYS = (
+    "apiKeyHelper",
+    "awsAuthRefresh",
+    "awsCredentialExport",
+    "gcpAuthRefresh",
+    "forceLoginMethod",
+    "forceLoginOrgUUID",
+    "forceLoginGatewayUrl",
+    "gatewayInternalNetworks",
+    "allowedProviders",
+    "modelOverrides",
+    "model",
+)
+AUTH_ENV_PREFIXES = (
+    "ANTHROPIC_", "CLAUDE_CODE_USE_", "CLAUDE_CODE_SKIP_", "AWS_", "AZURE_", "VERTEX_REGION_",
+)
+AUTH_ENV_NAMES = frozenset({
+    "CLOUD_ML_REGION",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GCLOUD_PROJECT",
+    "GOOGLE_CLOUD_PROJECT",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "NODE_EXTRA_CA_CERTS",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_CLIENT_CERT",
+    "CLAUDE_CODE_CLIENT_KEY",
+    "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
+    "CLAUDE_CODE_API_KEY_HELPER_TTL_MS",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+})
 
 
-def _settings_isolation(job: ReviewJob) -> list[str]:
+def user_settings_path() -> Path | None:
+    """Where Claude Code keeps the user's settings, or None when there is no home."""
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        return Path(config_dir) / "settings.json"
+    try:
+        return Path.home() / ".claude" / "settings.json"
+    except RuntimeError:
+        return None
+
+
+def _auth_env_name(name: str) -> bool:
+    return name in AUTH_ENV_NAMES or name.startswith(AUTH_ENV_PREFIXES)
+
+
+def auth_settings(path: Path | None) -> dict[str, Any]:
+    """The part of the user's settings file that "auth" passes on; {} when there is none.
+
+    A file that exists but cannot be read as a JSON object is an error rather than an
+    empty result: falling back would run the review without the auth it was meant to keep.
+    """
+    if path is None or not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise BackendError(f"could not read Claude Code settings {path}: {e}") from None
+    if not isinstance(data, dict):
+        raise BackendError(f"Claude Code settings {path} is not a JSON object")
+    kept = {key: data[key] for key in AUTH_SETTINGS_KEYS if key in data}
+    env = data.get("env")
+    if isinstance(env, dict):
+        kept_env = {name: value for name, value in env.items() if _auth_env_name(name)}
+        if kept_env:
+            kept["env"] = kept_env
+    return kept
+
+
+@contextmanager
+def _settings_args(job: ReviewJob) -> Iterator[list[str]]:
+    """The settings arguments for one claude run, with any --settings file it needs.
+
+    The file goes on disk rather than inline: a command line is readable by every local
+    user through /proc, and an apiKeyHelper or proxy URL can carry a secret. It sits in a
+    private directory, mode 0600, and is removed when the run ends, however it ends.
+    """
     try:
         sources = SETTING_SOURCES_ARG[job.claude_setting_sources]
     except KeyError:
         raise BackendError(
             f"unknown claude setting sources {job.claude_setting_sources!r}"
         ) from None
-    return ["--setting-sources", sources, "--strict-mcp-config"]
+    args = ["--setting-sources", sources, "--strict-mcp-config"]
+    kept = auth_settings(user_settings_path()) if job.claude_setting_sources == "auth" else {}
+    if not kept:
+        yield args
+        return
+    directory = tempfile.mkdtemp(prefix="rr-claude-")
+    try:
+        fd, name = tempfile.mkstemp(suffix=".json", dir=directory)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(kept, f)
+        yield [*args, "--settings", name]
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def _exec_rules(commands: tuple[str, ...]) -> list[str]:
@@ -130,21 +240,23 @@ def review(job: ReviewJob) -> str:
     if git_rule:
         allowed.append(git_rule)
     allowed += _exec_rules(job.exec_commands)
-    cmd = [
-        "claude", "-p",
-        "--permission-mode", PERMISSION_MODE,
-        *_settings_isolation(job),
-        "--allowedTools", " ".join(allowed),
-    ]
-    if job.model:
-        cmd += ["--model", job.model]
-    if job.effort:
-        cmd += ["--effort", job.effort]
-    # Prompt goes via stdin: no ARG_MAX concern and no temp file needed.
     timeout = base.TIMEOUT if job.timeout is None else job.timeout
-    output = base.run_command(
-        cmd, stdin=prompt(job), timeout=timeout
-    ).strip()
+    with _settings_args(job) as settings_args:
+        cmd = [
+            "claude", "-p",
+            "--permission-mode", PERMISSION_MODE,
+            *settings_args,
+            "--allowedTools", " ".join(allowed),
+        ]
+        # --model outranks a `model` the settings file carries.
+        if job.model:
+            cmd += ["--model", job.model]
+        if job.effort:
+            cmd += ["--effort", job.effort]
+        # Prompt goes via stdin: no ARG_MAX concern and no temp file needed.
+        output = base.run_command(
+            cmd, stdin=prompt(job), timeout=timeout
+        ).strip()
     if not output:
         raise BackendError("claude produced no output")
     return output

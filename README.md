@@ -284,17 +284,24 @@ privileges; see [SECURITY.md](SECURITY.md).
 
 The claude backend never loads the Claude Code settings of the checkout under review
 (`.claude/settings.json`, `.claude/settings.local.json`), because those could change what
-the reviewer may run. It also starts no MCP server. By default it still loads your user
-settings, because they often hold how Claude Code reaches a model: `env` for a proxy or a
-cloud provider, or an `apiKeyHelper`. They also hold your `permissions.allow` rules,
-plugins and hooks, and those apply to the reviewer too.
+the reviewer may run. It also starts no MCP server. `--claude-setting-sources` (config key
+`claude_setting_sources`, user file only) decides what it takes from your own settings:
 
-`--claude-setting-sources none`, or `claude_setting_sources = "none"` in the user config,
-loads no user, project or local settings file. The reviewer then gets only rr's allowlist,
-plus any organisation managed (policy) settings, which Claude Code always applies. Use it
-when Claude Code reaches its model without settings, for example through a subscription
-login or environment variables that rr's process already has. A setup that depends on `env` or
-`apiKeyHelper` in the settings file stops working under `none`.
+- `auth` (the default) loads no settings file. rr passes Claude Code a private temporary
+  file that holds only the keys of your user settings that decide how Claude Code reaches
+  and authenticates to a model, and which model: `apiKeyHelper`, the cloud-provider auth
+  refresh and export commands, the forced-login keys, `allowedProviders`, `modelOverrides`,
+  `model`, and the `env` entries for the API endpoint, the cloud provider, proxies and
+  certificates. Your `permissions.allow` rules, hooks, plugins and other `env` entries do
+  not reach the reviewer. `--model` outranks a `model` from the file.
+- `user` loads your user settings file whole, as rr did before: its permission rules,
+  hooks and plugins apply to the reviewer too.
+- `none` loads no user, project or local settings file. Use it when Claude Code reaches
+  its model without settings, for example through a subscription login or environment
+  variables that rr's process already has.
+
+Organisation managed (policy) settings apply in every mode. Under `auth`, a settings file
+that is not valid JSON fails the review with an error naming the file.
 
 Ignoring settings files has one more effect: Claude Code does not load the project's
 `CLAUDE.md` as memory for the reviewer. The reviewer can still read the file, and `--docs`
@@ -444,7 +451,7 @@ full = false            # --full
 docs = true             # --docs with no path (auto-discovery); or a list of paths
 codex_sandbox = "read-only"  # --codex-sandbox; user file only, see below
 allow_exec = false      # --allow-exec; user file only, see "Running the tests"
-claude_setting_sources = "user"  # --claude-setting-sources; user file only, see below
+claude_setting_sources = "auth"  # --claude-setting-sources; user file only, see below
 
 [backends]              # per-mode default backend, overriding the built-in table
 plan = "codex"
