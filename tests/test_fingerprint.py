@@ -355,6 +355,7 @@ MOVES = {
     "timeout": BASE_ARGS + ["--timeout", "3300"],
     "codex sandbox": BASE_ARGS + ["--codex-sandbox", "workspace-write"],
     "exec mode": BASE_ARGS + ["--allow-exec"],
+    "claude setting sources": BASE_ARGS + ["--claude-setting-sources", "none"],
     "fail-on threshold": BASE_ARGS + ["--fail-on", "medium"],
     "json mode": [a for a in BASE_ARGS if a != "--json"],
     "mode": ["--fingerprint", "--mode", "code", *BASE_ARGS[3:]],
@@ -523,3 +524,10 @@ def test_records_the_commands_exec_mode_allows(monkeypatch, capsys, tmp_path):
     user.parent.mkdir(parents=True)
     user.write_text('allow_exec = true\nexec_commands = ["make check"]\n')
     assert fp(monkeypatch, capsys)["exec_commands"] == ["make check"]
+
+
+def test_records_and_moves_with_a_command_line_exec_list(monkeypatch, capsys):
+    default = fp(monkeypatch, capsys, BASE_ARGS + ["--allow-exec"])
+    custom = fp(monkeypatch, capsys, BASE_ARGS + ["--allow-exec", "--exec-command", "make check"])
+    assert custom["exec_commands"] == ["make check"]
+    assert custom["fingerprint"] != default["fingerprint"]

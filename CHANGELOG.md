@@ -16,7 +16,10 @@
 
 - Security: the claude backend no longer loads Claude Code settings from the checkout
   under review, in every mode. Only the user's own settings load, and no MCP server
-  starts. One consequence: Claude Code no longer loads the project's `CLAUDE.md` as memory
+  starts. New `--claude-setting-sources none` option and `claude_setting_sources` user
+  config key: load no settings file at all, so the user's own permission rules, plugins
+  and hooks do not reach the reviewer either. The default stays `user`, because user
+  settings often carry the `env` or `apiKeyHelper` that Claude Code needs to reach a model. One consequence: Claude Code no longer loads the project's `CLAUDE.md` as memory
   for the reviewer. The reviewer can still read it as a file, and `--docs` sends it as
   project standards.
 - New `--allow-exec` flag and `allow_exec` user-config key, off by default. For a review
@@ -24,7 +27,8 @@
   suspected defect, and the review names each command it ran. The default commands are
   `just test*`, `go test`, `pytest`, `uv run pytest`, `cargo test`, `node --test` and
   `npm test`; `exec_commands` replaces the list and `exec_commands_extra` adds to it. All
-  three keys are user file only. `--allow-exec` with `--pr` is an error, and the config key
+  three keys are user file only. `--exec-command PATTERN`, repeatable, sets the list for
+  one run. `--allow-exec` or `--exec-command` with `--pr` is an error, and the config key
   is ignored for `--pr`. `--no-allow-exec` turns the config key off for one run.
   `rr --fingerprint` records the allowed commands.
 - Diff reviews treat an unexplained removed, skipped or loosened test or assertion as a

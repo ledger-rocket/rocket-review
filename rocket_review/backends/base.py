@@ -109,6 +109,9 @@ class ReviewJob:
     #: `codex exec -s <mode>`. Only the codex backend reads it; the config layer has
     #: already checked it is one of config.CODEX_SANDBOX_MODES.
     codex_sandbox: str = "read-only"
+    #: Claude Code settings files the claude backend loads: "user" or "none". Only the
+    #: claude backend reads it; the config layer has checked it.
+    claude_setting_sources: str = "user"
     #: The command patterns `--allow-exec` lets the claude backend run; empty keeps the
     #: review read-only. The CLI leaves it empty for `--pr`, whose diff is not the tree the
     #: commands would run in.

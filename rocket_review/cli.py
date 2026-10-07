@@ -786,6 +786,19 @@ def _run():
              "exec_commands_extra (user file only).",
     )
     parser.add_argument(
+        "--exec-command", action="append", default=None, metavar="PATTERN",
+        help="A command pattern --allow-exec allows, e.g. 'make test' or 'bash tests/*.sh'. "
+             "Repeat for more. Replaces the configured list for this run.",
+    )
+    parser.add_argument(
+        "--claude-setting-sources", default=None, choices=config.CLAUDE_SETTING_SOURCES,
+        help="Claude Code settings files the claude backend loads: user (default) or none. "
+             "The checkout's project and local settings never load. none also keeps your "
+             "user settings' permissions, plugins and hooks away from the reviewer, but "
+             "drops their env and apiKeyHelper too. Config key: claude_setting_sources "
+             "(user file only).",
+    )
+    parser.add_argument(
         "--timeout", type=positive_int, default=None, metavar="SECONDS",
         help="Per-backend subprocess timeout in seconds (default: 900 = 15 min). "
              "Raise for slow high-effort reviews, e.g. --timeout 1800.",
@@ -838,7 +851,10 @@ def _run():
     # backend work, and every check below judges the effective value, not just the flag.
     try:
         layers = config.load(no_config=args.no_config, cwd=Path.cwd())
-        settings = config.resolve({key: getattr(args, key) for key in config.FLAG_KEYS}, layers)
+        cli_values = {key: getattr(args, key) for key in config.FLAG_KEYS}
+        if args.exec_command is not None:
+            cli_values["exec_commands"] = config.exec_patterns("--exec-command", args.exec_command)
+        settings = config.resolve(cli_values, layers)
     except config.ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -867,6 +883,14 @@ def _run():
     # run in is whatever this checkout holds: often not that branch, and often someone else's
     # code. The flag typed with --pr is a mistake worth stopping on; the config key is a
     # standing default for the user's own reviews, so --pr runs read-only and says so.
+    if args.exec_command and args.pr:
+        print("Error: --exec-command does not apply to --pr reviews; the commands would run "
+              "in this checkout, not in the pull request.", file=sys.stderr)
+        sys.exit(1)
+    if args.exec_command and not settings.allow_exec:
+        print("Error: --exec-command needs --allow-exec."
+              + where_set(settings, "allow_exec"), file=sys.stderr)
+        sys.exit(1)
     allow_exec = settings.allow_exec
     if allow_exec and args.pr:
         if settings.from_file("allow_exec") is None:
@@ -1056,6 +1080,7 @@ def _run():
         effort=settings.effort,
         timeout=settings.timeout,
         codex_sandbox=settings.codex_sandbox,
+        claude_setting_sources=settings.claude_setting_sources,
         exec_commands=exec_commands,
         foreign_repo=bool(args.repo),
         changed_paths=changed_paths,

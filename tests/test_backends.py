@@ -1161,3 +1161,16 @@ def test_claude_exec_mode_allows_exactly_the_configured_commands(monkeypatch):
     assert "check that the tree holds the change before you cite a result" in stdin
     assert "pass no argument that writes or updates files" in stdin
     assert "read-only sandbox" not in stdin
+
+
+def test_claude_setting_sources_none_loads_no_settings_file(monkeypatch):
+    # An empty --setting-sources loads no settings file at all, so the user's own
+    # permissions.allow rules, plugins and hooks do not reach the reviewer either.
+    cmd, _, _ = _claude_call(monkeypatch, claude_setting_sources="none")
+    assert cmd[cmd.index("--setting-sources") + 1] == ""
+    assert "--strict-mcp-config" in cmd
+
+
+def test_claude_refuses_an_unknown_setting_sources_value(monkeypatch):
+    with pytest.raises(BackendError, match="unknown claude setting sources"):
+        _claude_call(monkeypatch, claude_setting_sources="project")

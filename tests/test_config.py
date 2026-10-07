@@ -331,8 +331,8 @@ def test_unknown_key_names_the_file_the_key_and_the_accepted_set(tmp_path):
     assert str(path) in message
     assert "unknown key 'timeuot'" in message
     assert (
-        "Accepted: allow_exec, backends, codex_sandbox, docs, effort, exec_commands, "
-        "exec_commands_extra, fail_on, full, json, models, timeout."
+        "Accepted: allow_exec, backends, claude_setting_sources, codex_sandbox, docs, effort, "
+        "exec_commands, exec_commands_extra, fail_on, full, json, models, timeout."
     ) in message
 
 
@@ -1224,9 +1224,13 @@ def test_exec_commands_extra_alone_extends_the_default(tmp_path):
     assert settings.exec_commands == (*config.DEFAULT_EXEC_COMMANDS, "mix test")
 
 
-@pytest.mark.parametrize("key", ["allow_exec", "exec_commands", "exec_commands_extra"])
-def test_exec_keys_are_rejected_in_a_project_file(tmp_path, key):
-    value = "true" if key == "allow_exec" else '["sh"]'
+@pytest.mark.parametrize("key, value", [
+    ("allow_exec", "true"),
+    ("exec_commands", '["sh"]'),
+    ("exec_commands_extra", '["sh"]'),
+    ("claude_setting_sources", '"none"'),
+])
+def test_sandbox_keys_are_rejected_in_a_project_file(tmp_path, key, value):
     message = error_from(write(tmp_path, f"{key} = {value}\n"), repo_supplied=True)
     assert f"{key} is not accepted in a project file" in message
 
@@ -1240,6 +1244,28 @@ def test_exec_keys_are_rejected_in_a_project_file(tmp_path, key):
     ("exec_commands = ['go test) Write(x']", "must not contain parentheses"),
     ("exec_commands_extra = ['go test,Edit']", "must not contain parentheses, commas"),
     ("exec_commands = [\"go test\\nrm\"]", "control characters"),
+    ("claude_setting_sources = 'project'", "claude_setting_sources must be one of user, none"),
 ])
 def test_invalid_exec_settings_are_errors(tmp_path, body, fragment):
     assert fragment in error_from(write(tmp_path, body + "\n"))
+
+
+def test_claude_setting_sources_defaults_to_user_and_reads_the_user_file(tmp_path):
+    assert resolve_with([]).claude_setting_sources == "user"
+    write_user_config('claude_setting_sources = "none"\n')
+    settings = resolve_with(config.load(no_config=False, cwd=tmp_path))
+    assert settings.claude_setting_sources == "none"
+
+
+def test_a_command_line_exec_list_replaces_the_files_list_and_its_extras(tmp_path):
+    write_user_config('exec_commands = ["make check"]\nexec_commands_extra = ["go test"]\n')
+    cli_values = {key: None for key in config.FLAG_KEYS}
+    cli_values["exec_commands"] = config.exec_patterns("--exec-command", ["mix test"])
+    settings = config.resolve(cli_values, config.load(no_config=False, cwd=tmp_path))
+    assert settings.exec_commands == ("mix test",)
+
+
+@pytest.mark.parametrize("value", [[], ["*"], ["go test) Write(x"], ["go test,Edit"], ["a\nb"]])
+def test_a_command_line_exec_list_is_validated_like_the_files(value):
+    with pytest.raises(config.ConfigError, match="--exec-command"):
+        config.exec_patterns("--exec-command", value)

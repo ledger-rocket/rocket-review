@@ -263,13 +263,41 @@ exec_commands = ["make test", "go test"]   # replaces the default list
 exec_commands_extra = ["bash tests/*.sh"]  # adds to whichever list is in force
 ```
 
-All three keys are user file only, so a repository cannot turn execution on or choose
+`--exec-command PATTERN`, repeated for each pattern, sets the list for one run and
+replaces both keys. It suits a script that knows its project's test commands:
+
+```bash
+rr --diff --allow-exec --exec-command "make test" --exec-command "bash tests/*.sh"
+```
+
+A pattern must start with a command and may not contain parentheses, commas or control
+characters. All three keys are user file only, so a repository cannot turn execution on or choose
 what runs. `--allow-exec` with `--pr` is an error: the pull request's diff comes from
 GitHub, and the commands would run in this checkout, which may not hold that branch. An
-`allow_exec = true` in the config is ignored for `--pr`, with a note on stderr. The codex
+`allow_exec = true` in the config is ignored for `--pr`, with a note on stderr, and
+`--exec-command` with `--pr` is an error. The codex
 backend is unchanged: its `--codex-sandbox` policy already decides what it may run, and
 it has no per-command allowlist. A test run executes the repository's code with your
 privileges; see [SECURITY.md](SECURITY.md).
+
+### Claude Code settings
+
+The claude backend never loads the Claude Code settings of the checkout under review
+(`.claude/settings.json`, `.claude/settings.local.json`), because those could change what
+the reviewer may run. It also starts no MCP server. By default it still loads your user
+settings, because they often hold how Claude Code reaches a model: `env` for a proxy or a
+cloud provider, or an `apiKeyHelper`. They also hold your `permissions.allow` rules,
+plugins and hooks, and those apply to the reviewer too.
+
+`--claude-setting-sources none`, or `claude_setting_sources = "none"` in the user config,
+loads no settings file at all. The reviewer then gets only rr's allowlist. Use it when
+Claude Code reaches its model without settings, for example through a subscription login
+or environment variables that rr's process already has. A setup that depends on `env` or
+`apiKeyHelper` in the settings file stops working under `none`.
+
+Ignoring settings files has one more effect: Claude Code does not load the project's
+`CLAUDE.md` as memory for the reviewer. The reviewer can still read the file, and `--docs`
+sends it as project standards.
 
 > **opencode is experimental.** The integration works, but end-to-end review
 > reliability depends on the provider you have configured, and non-interactive
@@ -320,7 +348,8 @@ the reviewed content plus this value and reuse it only when neither moved.
   `files`, or `unspecified` when only `--mode` was); each backend with the model it runs
   and its CLI's `--version` (for `api`, the OpenAI SDK's version and a hash of
   `OPENAI_BASE_URL` without its userinfo, never the URL itself); `effort`, `codex_sandbox`,
-  the commands `--allow-exec` allows (`exec_commands`, empty when it is off), `fail_on`, `json` and `timeout` (`api` drops its file attachments when too little of the
+  `claude_setting_sources`, the commands `--allow-exec` allows (`exec_commands`, empty
+  when it is off), `fail_on`, `json` and `timeout` (`api` drops its file attachments when too little of the
   timeout is left); whether `--repo` names another repository, which also turns
   attachments off; the standards docs as read (`docs_sha256`); the extra instructions
   (`extra_sha256`); and the prompt each backend assembles for every source shape, with the
@@ -414,6 +443,7 @@ full = false            # --full
 docs = true             # --docs with no path (auto-discovery); or a list of paths
 codex_sandbox = "read-only"  # --codex-sandbox; user file only, see below
 allow_exec = false      # --allow-exec; user file only, see "Running the tests"
+claude_setting_sources = "user"  # --claude-setting-sources; user file only, see below
 
 [backends]              # per-mode default backend, overriding the built-in table
 plan = "codex"
@@ -429,8 +459,8 @@ claude = "claude-opus-5"
 Every key mirrors a flag — a config file changes what `rr` does by default, never what
 it can do. The exceptions are `exec_commands` and `exec_commands_extra`, which set the
 commands `--allow-exec` allows (see [Running the tests](#running-the-tests---allow-exec)).
-A project file may not set `allow_exec`, `exec_commands` or `exec_commands_extra`, nor
-`codex_sandbox`, which is
+A project file may not set `allow_exec`, `exec_commands`, `exec_commands_extra` or
+`claude_setting_sources`, nor `codex_sandbox`, which is
 `codex exec -s <mode>`, `read-only` by default, and the code under review must not choose
 how much of the reviewer's machine the reviewer may touch. Set `workspace-write` or
 `danger-full-access` in your user file, or pass `--codex-sandbox`, only on a host where
@@ -571,12 +601,12 @@ For plans, run `rr plan.md --docs` before implementing. Use a 900000ms timeout.
 
 ## Notes
 
-- Every backend runs in a read-only sandbox on your project — **no writes**: Codex
-  runs with `-s read-only`, Claude Code with a read-only tool allowlist under
-  `--permission-mode manual` and with the checkout's own Claude Code settings ignored
-  (`--setting-sources user`, which also stops the project's `CLAUDE.md` loading as Claude
-  Code memory; `--docs` sends it as project standards), and opencode with its built-in read-only `plan` agent
-  (edit/write denied at the tool level). Read-only stops writes; it does not stop the
+- Every backend runs in a read-only sandbox on your project — **no writes**, except
+  that [`--allow-exec`](#running-the-tests---allow-exec) lets the claude backend run test
+  commands, and a test run can write files. Codex runs with `-s read-only`, Claude Code
+  with a read-only tool allowlist under `--permission-mode manual` and with the checkout's
+  own Claude Code settings ignored (see [Claude Code settings](#claude-code-settings)), and
+  opencode with its built-in read-only `plan` agent (edit/write denied at the tool level). Read-only stops writes; it does not stop the
   agent *reading* readable secrets and sending them to the backend's provider — see
   [Security & data flow](#security--data-flow).
 - Every agentic prompt carries the backend's own description of what its sandbox allows, and

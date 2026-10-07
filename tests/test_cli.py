@@ -1100,3 +1100,45 @@ def test_no_allow_exec_turns_a_configured_allow_exec_off_for_one_run(monkeypatch
     jobs = record_jobs(monkeypatch)
     assert run_main(monkeypatch, ["--diff", "--no-allow-exec", "--backend", "claude"]) == 0
     assert jobs[0].exec_commands == ()
+
+
+def test_exec_command_replaces_the_configured_list_for_one_run(monkeypatch, tmp_path):
+    write_user_config(tmp_path, 'allow_exec = true\nexec_commands = ["make check"]\n')
+    jobs = record_jobs(monkeypatch)
+    argv = ["--diff", "--exec-command", "mix test", "--exec-command", "bash tests/*.sh",
+            "--backend", "claude"]
+    assert run_main(monkeypatch, argv) == 0
+    assert jobs[0].exec_commands == ("mix test", "bash tests/*.sh")
+
+
+def test_exec_command_is_validated(monkeypatch, capsys):
+    jobs = record_jobs(monkeypatch)
+    argv = ["--diff", "--allow-exec", "--exec-command", "go test,Edit", "--backend", "claude"]
+    assert run_cli(monkeypatch, argv) == 1
+    assert "--exec-command entry 'go test,Edit'" in capsys.readouterr().err
+    assert jobs == []
+
+
+def test_exec_command_without_allow_exec_is_refused(monkeypatch, capsys):
+    jobs = record_jobs(monkeypatch)
+    assert run_cli(monkeypatch, ["--diff", "--exec-command", "make", "--backend", "claude"]) == 1
+    assert "--exec-command needs --allow-exec" in capsys.readouterr().err
+    assert jobs == []
+
+
+def test_exec_command_with_pr_is_refused(monkeypatch, capsys, tmp_path):
+    write_user_config(tmp_path, "allow_exec = true\n")
+    jobs = record_jobs(monkeypatch)
+    argv = ["--pr", "5", "--exec-command", "make", "--backend", "claude"]
+    assert run_cli(monkeypatch, argv) == 1
+    assert "--exec-command does not apply to --pr" in capsys.readouterr().err
+    assert jobs == []
+
+
+def test_claude_setting_sources_reaches_the_job(monkeypatch):
+    jobs = record_jobs(monkeypatch)
+    assert run_main(monkeypatch, ["--diff", "--backend", "claude"]) == 0
+    assert run_main(
+        monkeypatch, ["--diff", "--claude-setting-sources", "none", "--backend", "claude"]
+    ) == 0
+    assert [job.claude_setting_sources for job in jobs] == ["user", "none"]

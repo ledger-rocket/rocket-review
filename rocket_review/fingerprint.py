@@ -7,7 +7,7 @@ gave, while one that moves on a change that cannot matter costs one fresh review
 everything rr decides is in, and only what provably cannot change an answer is out.
 
 In: rr's version and its own code; the mode and which source flag was given; each backend, the model it runs and its CLI's
-version (for api, the OpenAI SDK's version and the endpoint it sends to); effort; the codex sandbox; the commands --allow-exec lets the reviewer run; the fail-on threshold; JSON mode; the timeout, because
+version (for api, the OpenAI SDK's version and the endpoint it sends to); effort; the codex sandbox; the Claude Code settings files the claude backend loads; the commands --allow-exec lets the reviewer run; the fail-on threshold; JSON mode; the timeout, because
 api drops its file attachments when too little of it is left; whether the text comes from
 another repository, which also turns attachments off; the standards docs as read; the extra
 instructions; and the prompt each backend assembles for every source shape. Out: --full,
@@ -259,6 +259,7 @@ def describe(
         "backends": backends,
         "effort": settings.effort,
         "codex_sandbox": settings.codex_sandbox,
+        "claude_setting_sources": settings.claude_setting_sources,
         "exec_commands": list(exec_commands),
         "fail_on": settings.fail_on,
         "json": settings.json,

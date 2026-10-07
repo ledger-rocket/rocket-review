@@ -27,10 +27,21 @@ READ_ONLY_TOOLS = "Read Glob Grep"
 # Layer 3: settings from the checkout under review never load. In a workspace Claude Code
 # trusts, a `.claude/settings.json` or `.claude/settings.local.json` adds its
 # permissions.allow entries to --allowedTools, so the branch under review could choose what
-# its reviewer may run. Only the user's own settings load; they carry the model and
-# environment the user picked. --strict-mcp-config with no --mcp-config starts no MCP
-# server, so a repository's `.mcp.json` launches nothing either.
-SETTINGS_ISOLATION = ["--setting-sources", "user", "--strict-mcp-config"]
+# its reviewer may run. "user" loads only the user's own settings, which often carry how
+# Claude Code reaches a model; "none" loads no settings file (an empty --setting-sources).
+# --strict-mcp-config with no --mcp-config starts no MCP server, so a repository's
+# `.mcp.json` launches nothing either.
+SETTING_SOURCES_ARG = {"user": "user", "none": ""}
+
+
+def _settings_isolation(job: ReviewJob) -> list[str]:
+    try:
+        sources = SETTING_SOURCES_ARG[job.claude_setting_sources]
+    except KeyError:
+        raise BackendError(
+            f"unknown claude setting sources {job.claude_setting_sources!r}"
+        ) from None
+    return ["--setting-sources", sources, "--strict-mcp-config"]
 
 
 def _exec_rules(commands: tuple[str, ...]) -> list[str]:
@@ -121,7 +132,7 @@ def review(job: ReviewJob) -> str:
     cmd = [
         "claude", "-p",
         "--permission-mode", PERMISSION_MODE,
-        *SETTINGS_ISOLATION,
+        *_settings_isolation(job),
         "--allowedTools", " ".join(allowed),
     ]
     if job.model:

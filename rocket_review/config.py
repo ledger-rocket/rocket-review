@@ -2,7 +2,8 @@
 
 Every key mirrors a flag, so a config file changes what rr does by default and never what
 it can do. exec_commands and exec_commands_extra are the exceptions: they set what
---allow-exec allows, and only the user file may set them. Precedence — CLI flag > project file > user file > built-in default — lives in
+--allow-exec allows (--exec-command replaces both for one run), and only the user file may
+set them. Precedence — CLI flag > project file > user file > built-in default — lives in
 resolve() and nowhere else.
 """
 
@@ -40,7 +41,15 @@ FLAG_DEFAULTS: dict[str, Any] = {
     "docs": None,
     "codex_sandbox": "read-only",
     "allow_exec": False,
+    "claude_setting_sources": "user",
 }
+
+# Which Claude Code settings files the claude backend loads. Never the checkout's own:
+# project and local settings could widen what the reviewer may run. "user" keeps the
+# user's settings, which often carry how Claude Code reaches a model (env for a proxy or a
+# cloud provider, apiKeyHelper) and also their permissions.allow rules, plugins and hooks.
+# "none" loads no settings file, so none of those reach the reviewer either.
+CLAUDE_SETTING_SOURCES = ("user", "none")
 
 # What `codex exec -s` accepts. read-only is the built-in default: a review needs to read
 # the prompt file and the repository, nothing more. The wider modes exist for hosts where
@@ -68,6 +77,7 @@ DEFAULT_EXEC_COMMANDS = (
 USER_ONLY_KEYS = {
     "codex_sandbox": "pass --codex-sandbox",
     "allow_exec": "pass --allow-exec",
+    "claude_setting_sources": "pass --claude-setting-sources",
     "exec_commands": None,
     "exec_commands_extra": None,
 }
@@ -110,7 +120,10 @@ class Settings:
     codex_sandbox: str
     #: `--allow-exec`: the claude backend may run the commands in exec_commands.
     allow_exec: bool
-    #: DEFAULT_EXEC_COMMANDS, or the user file's exec_commands, plus exec_commands_extra.
+    #: one of CLAUDE_SETTING_SOURCES.
+    claude_setting_sources: str
+    #: --exec-command when given; else DEFAULT_EXEC_COMMANDS or the user file's
+    #: exec_commands, plus exec_commands_extra.
     exec_commands: tuple[str, ...]
     #: mode -> backend name, with the built-in table already folded in.
     backends: dict[str, str]
@@ -246,13 +259,16 @@ def resolve(cli: dict[str, Any], layers: list[Layer]) -> Settings:
     for _, layer_values in reversed(stack):  # lowest first, so a higher layer overwrites
         models.update(layer_values.get("models") or {})
 
+    # --exec-command is the whole list for its run; a file's list still takes its extras.
     exec_commands: tuple[str, ...] = DEFAULT_EXEC_COMMANDS
-    for _, layer_values in stack:
-        if "exec_commands" in layer_values:
-            exec_commands = layer_values["exec_commands"]
+    replaced_by = BUILT_IN
+    for origin, layer_values in stack:
+        if layer_values.get("exec_commands") is not None:
+            exec_commands, replaced_by = layer_values["exec_commands"], origin
             break
-    for _, layer_values in reversed(stack):
-        exec_commands += layer_values.get("exec_commands_extra", ())
+    if replaced_by != COMMAND_LINE:
+        for _, layer_values in reversed(stack):
+            exec_commands += layer_values.get("exec_commands_extra", ())
     exec_commands = tuple(dict.fromkeys(exec_commands))
 
     return Settings(
@@ -291,7 +307,11 @@ def _validate(path: Path, data: dict[str, Any]) -> dict[str, Any]:
         values["codex_sandbox"] = _codex_sandbox(path, data["codex_sandbox"])
     for key in ("exec_commands", "exec_commands_extra"):
         if key in data:
-            values[key] = _exec_commands(path, key, data[key])
+            values[key] = exec_patterns(f"{path}: {key}", data[key])
+    if "claude_setting_sources" in data:
+        values["claude_setting_sources"] = _claude_setting_sources(
+            path, data["claude_setting_sources"]
+        )
     if "backends" in data:
         values["backends"] = _backends(path, data["backends"])
     if "models" in data:
@@ -327,8 +347,19 @@ def _codex_sandbox(path: Path, value: Any) -> str:
     return value
 
 
-def _exec_commands(path: Path, key: str, value: Any) -> tuple[str, ...]:
+def _claude_setting_sources(path: Path, value: Any) -> str:
+    if not isinstance(value, str) or value not in CLAUDE_SETTING_SOURCES:
+        raise ConfigError(
+            f"{path}: claude_setting_sources must be one of "
+            f"{', '.join(CLAUDE_SETTING_SOURCES)}, got {value!r}."
+        )
+    return value
+
+
+def exec_patterns(origin: str, value: Any) -> tuple[str, ...]:
     """A non-empty list of command patterns, each safe to wrap as `Bash(<pattern>)`.
+
+    `origin` names where the list came from, a config key or a flag, for the error.
 
     The patterns are joined into one --allowedTools argument, which Claude Code splits on
     commas and reads parentheses in, so either character could end one rule and start
@@ -338,12 +369,12 @@ def _exec_commands(path: Path, key: str, value: Any) -> tuple[str, ...]:
         not isinstance(value, list) or not value
         or not all(isinstance(item, str) and item.strip() for item in value)
     ):
-        raise ConfigError(f"{path}: {key} must be a non-empty list of strings, got {value!r}.")
+        raise ConfigError(f"{origin} must be a non-empty list of strings, got {value!r}.")
     patterns = tuple(item.strip() for item in value)
     for pattern in patterns:
         if pattern.startswith("*") or any(c in pattern for c in "(),") or not pattern.isprintable():
             raise ConfigError(
-                f"{path}: {key} entry {pattern!r} must start with a command, and must not "
+                f"{origin} entry {pattern!r} must start with a command, and must not "
                 "contain parentheses, commas or control characters."
             )
     return patterns

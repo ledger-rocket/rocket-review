@@ -42,9 +42,13 @@ Each backend is constrained so the reviewer cannot modify your files:
     `permissions.allow` entries to the allowlist, so a branch under review could choose
     what its reviewer may run. rr passes `--setting-sources user`, so only your user
     settings load, and `--strict-mcp-config`, so a repository's `.mcp.json` starts no
-    MCP server. Your own user settings still apply: a `permissions.allow` entry in
-    `~/.claude/settings.json` also applies to the reviewer. The same flag stops Claude
-    Code loading the project's `CLAUDE.md` as memory; pass `--docs` to review against it.
+    MCP server. Your own user settings still apply by default: a `permissions.allow`
+    entry, plugin or hook in `~/.claude/settings.json` also applies to the reviewer.
+    `--claude-setting-sources none` (or `claude_setting_sources = "none"`) loads no
+    settings file, so only rr's allowlist applies; the cost is that `env` and
+    `apiKeyHelper` from the settings file do not apply either. Ignoring settings files also
+    stops Claude Code loading the project's `CLAUDE.md` as memory; pass `--docs` to review
+    against it.
 - **opencode** — the built-in read-only `plan` agent, with edit/write denied at the
   tool level.
 
@@ -56,9 +60,11 @@ runs the repository's code with your privileges, so the test suite can write fil
 the network and read secrets. Claude Code checks each part of a compound command, so
 `go test && rm -rf x` is denied, but the arguments of an allowed command are not checked:
 `go test -exec <program>` and a pytest plugin both run what they name. Turn it on only
-for code you trust as much as your own. rr refuses the flag with `--pr`, and ignores the
-config key there, because the commands would run in this checkout, not in the pull
-request. A project's `.rocket-review.toml` cannot turn it on or change the command list.
+for code you trust as much as your own. rr refuses the flag and `--exec-command` with
+`--pr`, and ignores the config key there, because the commands would run in this checkout,
+not in the pull request. A project's `.rocket-review.toml` cannot turn it on or change the
+command list. `--exec-command` sets the list for one run from the command line, which is
+your authority, not the repository's.
 
 ### What read-only does NOT protect against
 
