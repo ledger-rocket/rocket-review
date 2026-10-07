@@ -28,8 +28,12 @@ arm without the DO NOT FLAG bullet (`730c71f4`, same protocol) gave the same pic
 
 `adjudicate.py` was not run, so no verdict exists. Hand adjudication of the clean-control
 CRITICAL/HIGH findings: the control arm's two are on `c-005`, and this arm's one is on
-`c-006` (a claim that a reviewed checkout's `.claude/settings.json` widens the claude
-sandbox; Claude Code 2.1.291 ignores those settings in an untrusted workspace, so it is a
-false positive). With `c-005`'s findings called false positives, the veto holds. With
-`c-005` invalidated, as M5 did, the aggregate condition fails by one finding in 15 runs.
-The promotion is a human decision on this record, per *Certification is suspended*.
+`c-006`. The `c-006` finding claims that a reviewed checkout's `.claude/settings.json`
+widens the claude sandbox. A probe refutes it: with a project settings file allowing
+`Bash(touch:*)`, `claude -p --permission-mode manual --allowedTools "Read Glob Grep"`
+(Claude Code 2.1.291) printed "Ignoring 1 permissions.allow entry from
+.claude/settings.json: this workspace has not been trusted" and refused the command. So it
+is a false positive. With `c-005`'s findings called false positives, the veto holds. With
+`c-005` invalidated, as M5 did, the aggregate condition fails by one finding in 15 runs,
+which is a VETOED outcome under the binding-veto rule in `evals/README.md`. The promotion
+in `rocket_review/prompts.py` is therefore pending that call and an `adjudicate.py` run.
