@@ -1104,3 +1104,60 @@ def test_api_sends_the_prompt_the_fingerprint_hashes(monkeypatch):
     monkeypatch.setattr(api, "_call_openai", fake_call)
     api.review(job(**PARITY_JOB))
     assert captured["system"] == api.prompt(job(**PARITY_JOB))
+
+
+def _claude_call(monkeypatch, **kw):
+    captured = {}
+
+    def fake_run(cmd, *, stdin=None, timeout=900):
+        captured["cmd"], captured["stdin"] = cmd, stdin
+        return "ok"
+
+    monkeypatch.setattr(base, "run_command", fake_run)
+    claude.review(job(**kw))
+    cmd = captured["cmd"]
+    return cmd, cmd[cmd.index("--allowedTools") + 1], captured["stdin"]
+
+
+@pytest.mark.parametrize("source", [
+    dict(),
+    dict(content=None, commit="deadbeef"),
+    dict(content=None, git_cmd="git diff HEAD"),
+    dict(pr=True, content="PR BODY AND DIFF"),
+])
+@pytest.mark.parametrize("exec_commands", [(), ("go test",)])
+def test_claude_never_loads_the_checkouts_settings(monkeypatch, source, exec_commands):
+    # In a trusted workspace, project and local settings add their permissions.allow entries
+    # to --allowedTools. Only user settings may load, and no MCP server may start.
+    cmd, _, _ = _claude_call(monkeypatch, exec_commands=exec_commands, **source)
+    assert cmd[cmd.index("--setting-sources") + 1] == "user"
+    assert "--strict-mcp-config" in cmd
+    assert "--settings" not in cmd and "--mcp-config" not in cmd
+
+
+def test_claude_is_read_only_without_exec_commands(monkeypatch):
+    _, allow, stdin = _claude_call(monkeypatch, content=None, git_cmd="git diff HEAD")
+    assert allow == "Read Glob Grep Bash(git diff HEAD)"
+    assert "read-only sandbox" in stdin
+    assert "including tests," in stdin
+
+
+def test_claude_exec_mode_allows_exactly_the_configured_commands(monkeypatch):
+    commands = ("just test*", "go test", "uv run pytest")
+    _, allow, stdin = _claude_call(
+        monkeypatch, content=None, git_cmd="git diff HEAD", exec_commands=commands,
+    )
+    # A pattern with no trailing `*` takes arguments through ` *`; one that ends in `*`
+    # already does. Nothing else is added: no wildcard Bash rule, no write tool.
+    assert allow == (
+        "Read Glob Grep Bash(git diff HEAD) "
+        "Bash(just test*) Bash(go test *) Bash(uv run pytest *)"
+    )
+    assert "Bash(*)" not in allow and "Write" not in allow and "Edit" not in allow
+    assert "`just test*`, `go test`, `uv run pytest`" in stdin
+    assert "When running a test would confirm or refute a defect you suspect, run it." in stdin
+    assert "Name in your review each command you ran and its result." in stdin
+    # The tree the tests run on is the working tree, whatever the source under review.
+    assert "check that the tree holds the change before you cite a result" in stdin
+    assert "pass no argument that writes or updates files" in stdin
+    assert "read-only sandbox" not in stdin

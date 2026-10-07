@@ -324,3 +324,9 @@ def test_agent_prompt_with_no_content_source_still_gives_instructions():
 def test_agent_prompt_joins_parts_with_blank_lines():
     prompt = agent_prompt(job(extra="x"))
     assert "\n\nAdditional instructions: x\n\n" in prompt
+
+
+def test_diff_prompt_makes_an_unexplained_weaker_test_a_finding():
+    prompt = get_prompt("diff")
+    assert "Removing, skipping or loosening a test or an assertion without a stated reason" in prompt
+    assert "HIGH when it removes coverage of a behaviour the change touches" in prompt

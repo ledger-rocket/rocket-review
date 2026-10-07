@@ -37,8 +37,28 @@ Each backend is constrained so the reviewer cannot modify your files:
     like `Bash(git diff:*)` would be a write vector. Instead, only the single exact git
     command needed to view the change under review is allow-listed (e.g.
     `Bash(git diff HEAD)`) — with no `:*`, no write flag can be appended.
+  - The checkout's own Claude Code settings never load. In a workspace Claude Code
+    trusts, `.claude/settings.json` and `.claude/settings.local.json` add their
+    `permissions.allow` entries to the allowlist, so a branch under review could choose
+    what its reviewer may run. rr passes `--setting-sources user`, so only your user
+    settings load, and `--strict-mcp-config`, so a repository's `.mcp.json` starts no
+    MCP server. Your own user settings still apply: a `permissions.allow` entry in
+    `~/.claude/settings.json` also applies to the reviewer. The same flag stops Claude
+    Code loading the project's `CLAUDE.md` as memory; pass `--docs` to review against it.
 - **opencode** — the built-in read-only `plan` agent, with edit/write denied at the
   tool level.
+
+### `--allow-exec`: the exception to read-only
+
+`--allow-exec` (or `allow_exec = true` in the user config) adds a fixed set of test
+commands to the claude backend's allowlist, for reviews of your own code. Running a test
+runs the repository's code with your privileges, so the test suite can write files, use
+the network and read secrets. Claude Code checks each part of a compound command, so
+`go test && rm -rf x` is denied, but the arguments of an allowed command are not checked:
+`go test -exec <program>` and a pytest plugin both run what they name. Turn it on only
+for code you trust as much as your own. rr refuses the flag with `--pr`, and ignores the
+config key there, because the commands would run in this checkout, not in the pull
+request. A project's `.rocket-review.toml` cannot turn it on or change the command list.
 
 ### What read-only does NOT protect against
 

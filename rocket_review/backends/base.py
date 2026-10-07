@@ -109,6 +109,10 @@ class ReviewJob:
     #: `codex exec -s <mode>`. Only the codex backend reads it; the config layer has
     #: already checked it is one of config.CODEX_SANDBOX_MODES.
     codex_sandbox: str = "read-only"
+    #: The command patterns `--allow-exec` lets the claude backend run; empty keeps the
+    #: review read-only. The CLI leaves it empty for `--pr`, whose diff is not the tree the
+    #: commands would run in.
+    exec_commands: tuple[str, ...] = ()
     #: True when the text under review comes from a repository other than this checkout
     #: (`--repo owner/name --pr N`). It decides whether local files may be attached at all:
     #: the trust question is "does the repository that wrote this text carry the file", and

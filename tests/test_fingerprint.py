@@ -354,6 +354,7 @@ MOVES = {
     # api drops its file attachments when too little of the timeout is left for them.
     "timeout": BASE_ARGS + ["--timeout", "3300"],
     "codex sandbox": BASE_ARGS + ["--codex-sandbox", "workspace-write"],
+    "exec mode": BASE_ARGS + ["--allow-exec"],
     "fail-on threshold": BASE_ARGS + ["--fail-on", "medium"],
     "json mode": [a for a in BASE_ARGS if a != "--json"],
     "mode": ["--fingerprint", "--mode", "code", *BASE_ARGS[3:]],
@@ -514,3 +515,11 @@ def test_holds_still_for_a_comment_in_a_config_file(monkeypatch, capsys, tmp_pat
     before = fp(monkeypatch, capsys)["fingerprint"]
     user.write_text('# the everyday setting\neffort = "high"\n')
     assert fp(monkeypatch, capsys)["fingerprint"] == before
+
+
+def test_records_the_commands_exec_mode_allows(monkeypatch, capsys, tmp_path):
+    assert fp(monkeypatch, capsys)["exec_commands"] == []
+    user = tmp_path / "config-home" / "rocket-review" / "config.toml"
+    user.parent.mkdir(parents=True)
+    user.write_text('allow_exec = true\nexec_commands = ["make check"]\n')
+    assert fp(monkeypatch, capsys)["exec_commands"] == ["make check"]

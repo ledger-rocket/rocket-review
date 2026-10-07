@@ -330,7 +330,10 @@ def test_unknown_key_names_the_file_the_key_and_the_accepted_set(tmp_path):
     message = error_from(path)
     assert str(path) in message
     assert "unknown key 'timeuot'" in message
-    assert "Accepted: backends, codex_sandbox, docs, effort, fail_on, full, json, models, timeout." in message
+    assert (
+        "Accepted: allow_exec, backends, codex_sandbox, docs, effort, exec_commands, "
+        "exec_commands_extra, fail_on, full, json, models, timeout."
+    ) in message
 
 
 def test_several_unknown_keys_are_all_named(tmp_path):
@@ -1186,3 +1189,57 @@ def test_codex_sandbox_flag_outranks_user_config(monkeypatch, tmp_path):
 def test_codex_sandbox_is_rejected_in_a_project_file(tmp_path):
     message = error_from(write(tmp_path, 'codex_sandbox = "danger-full-access"\n'), repo_supplied=True)
     assert "codex_sandbox is not accepted in a project file" in message
+
+
+def resolve_with(layers):
+    return config.resolve({key: None for key in config.FLAG_KEYS}, layers)
+
+
+def test_exec_mode_is_off_by_default_with_the_default_commands():
+    settings = resolve_with([])
+    assert settings.allow_exec is False
+    assert settings.exec_commands == config.DEFAULT_EXEC_COMMANDS
+
+
+def test_allow_exec_from_user_config_and_flag(tmp_path):
+    write_user_config("allow_exec = true\n")
+    settings = resolve_with(config.load(no_config=False, cwd=tmp_path))
+    assert settings.allow_exec is True
+    assert settings.from_file("allow_exec") is not None
+    cli_values = {key: None for key in config.FLAG_KEYS}
+    cli_values["allow_exec"] = True
+    assert config.resolve(cli_values, []).sources["allow_exec"] == config.COMMAND_LINE
+
+
+def test_exec_commands_replaces_the_default_and_extra_adds_to_it(tmp_path):
+    write_user_config('exec_commands = ["make check"]\nexec_commands_extra = ["bash tests/*.sh"]\n')
+    settings = resolve_with(config.load(no_config=False, cwd=tmp_path))
+    assert settings.exec_commands == ("make check", "bash tests/*.sh")
+
+
+def test_exec_commands_extra_alone_extends_the_default(tmp_path):
+    write_user_config('exec_commands_extra = ["  mix test  ", "go test"]\n')
+    settings = resolve_with(config.load(no_config=False, cwd=tmp_path))
+    # Trimmed, and deduplicated against the default.
+    assert settings.exec_commands == (*config.DEFAULT_EXEC_COMMANDS, "mix test")
+
+
+@pytest.mark.parametrize("key", ["allow_exec", "exec_commands", "exec_commands_extra"])
+def test_exec_keys_are_rejected_in_a_project_file(tmp_path, key):
+    value = "true" if key == "allow_exec" else '["sh"]'
+    message = error_from(write(tmp_path, f"{key} = {value}\n"), repo_supplied=True)
+    assert f"{key} is not accepted in a project file" in message
+
+
+@pytest.mark.parametrize("body, fragment", [
+    ("allow_exec = 'yes'", "allow_exec must be true or false"),
+    ("exec_commands = []", "exec_commands must be a non-empty list of strings"),
+    ("exec_commands = 'go test'", "exec_commands must be a non-empty list of strings"),
+    ("exec_commands_extra = ['']", "exec_commands_extra must be a non-empty list of strings"),
+    ("exec_commands = ['*']", "must start with a command"),
+    ("exec_commands = ['go test) Write(x']", "must not contain parentheses"),
+    ("exec_commands_extra = ['go test,Edit']", "must not contain parentheses, commas"),
+    ("exec_commands = [\"go test\\nrm\"]", "control characters"),
+])
+def test_invalid_exec_settings_are_errors(tmp_path, body, fragment):
+    assert fragment in error_from(write(tmp_path, body + "\n"))

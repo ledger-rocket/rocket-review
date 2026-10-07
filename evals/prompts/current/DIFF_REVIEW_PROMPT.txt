@@ -19,6 +19,7 @@ REVIEW FOCUS
 5. SECURITY — Does the change introduce vulnerabilities (injection, auth bypass, secrets exposure)?
 6. PERFORMANCE — Does the change degrade performance or introduce resource leaks?
 7. TESTS — Which inputs does this change read that no test exercises? Which configuration or flag could switch the guarantee off silently? How could the suite pass while exercising nothing? Rank what you find by the severity levels below.
+8. TEST PRESERVATION — Removing, skipping or loosening a test or an assertion without a stated reason (in the code, the commit message or the PR description) is a finding. It is HIGH when it removes coverage of a behaviour the change touches. A test updated to check a behaviour the change deliberately alters, as strictly as before, is not a finding.
 
 SEVERITY LEVELS
 Rank a finding by its consequence, not by its kind.

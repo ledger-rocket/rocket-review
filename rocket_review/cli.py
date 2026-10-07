@@ -778,6 +778,14 @@ def _run():
              "file only).",
     )
     parser.add_argument(
+        "--allow-exec", action=argparse.BooleanOptionalAction, default=None,
+        help="Let the claude backend run the project's test commands to confirm a suspected "
+             f"defect (by default: {', '.join(config.DEFAULT_EXEC_COMMANDS)}). For reviews of "
+             "your own code; refused with --pr. --no-allow-exec turns a configured "
+             "allow_exec off for one run. Config keys: allow_exec, exec_commands, "
+             "exec_commands_extra (user file only).",
+    )
+    parser.add_argument(
         "--timeout", type=positive_int, default=None, metavar="SECONDS",
         help="Per-backend subprocess timeout in seconds (default: 900 = 15 min). "
              "Raise for slow high-effort reviews, e.g. --timeout 1800.",
@@ -854,6 +862,21 @@ def _run():
     if args.repo and not args.pr:
         print("Error: --repo only applies with --pr.", file=sys.stderr)
         sys.exit(1)
+
+    # A pull request's diff comes from GitHub, and the working directory the commands would
+    # run in is whatever this checkout holds: often not that branch, and often someone else's
+    # code. The flag typed with --pr is a mistake worth stopping on; the config key is a
+    # standing default for the user's own reviews, so --pr runs read-only and says so.
+    allow_exec = settings.allow_exec
+    if allow_exec and args.pr:
+        if settings.from_file("allow_exec") is None:
+            print("Error: --allow-exec does not apply to --pr reviews; the commands would run "
+                  "in this checkout, not in the pull request.", file=sys.stderr)
+            sys.exit(1)
+        print("Note: --pr reviews run read-only; ignoring allow_exec"
+              + where_set(settings, "allow_exec") + ".", file=sys.stderr)
+        allow_exec = False
+    exec_commands = settings.exec_commands if allow_exec else ()
 
     if args.diff and args.staged:
         # Not silently staged-only: the user likely expects both sets reviewed.
@@ -955,7 +978,7 @@ def _run():
         )
         doc = fingerprint.describe(
             mode=mode, source=source, specs=specs, settings=settings, docs_content=docs,
-            extra=args.prompt, foreign_repo=bool(args.repo),
+            extra=args.prompt, foreign_repo=bool(args.repo), exec_commands=exec_commands,
         )
         print(json.dumps(doc, indent=2))
         sys.exit(0)
@@ -1033,6 +1056,7 @@ def _run():
         effort=settings.effort,
         timeout=settings.timeout,
         codex_sandbox=settings.codex_sandbox,
+        exec_commands=exec_commands,
         foreign_repo=bool(args.repo),
         changed_paths=changed_paths,
     )
