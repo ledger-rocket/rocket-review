@@ -1,0 +1,6 @@
+PROJECT STANDARDS CONTEXT
+The reviewer has provided project standards documentation below. You MUST:
+- Check compliance with these documented standards and conventions
+- Flag deviations as findings with appropriate severity
+- Reference specific standards when citing violations
+- Treat documented project conventions as authoritative
