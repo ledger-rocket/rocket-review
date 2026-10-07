@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.0 (unreleased)
+## 0.6.0
 
 - Diff reviews rank findings by consequence, not by kind. This changes every review of a
   diff, commit, staged change or pull request, in CI and in manual runs. MEDIUM is a
