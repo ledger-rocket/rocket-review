@@ -230,8 +230,8 @@ Five arms ship:
   feature; they are the only slice this corpus can score — see *The language-checks arm*.
 - **`consequence-rubric/`**: `current/` at commit `3d169c3` with `DIFF_REVIEW_PROMPT`
   ranking findings by consequence and asking test-validity questions (PRO-8570). Frozen and
-  hash-pinned like `stance/` and `lang-python/`. It was measured against `current/` before
-  the same text became the live diff body, so `current/` carries that text too.
+  hash-pinned like `stance/` and `lang-python/`. Its README records the sweep it was
+  measured in. The same text is the live diff body, so `current/` carries it too.
 
 Adding a prompt constant to `rocket_review/prompts.py` without adding it to every arm is
 also caught: `PROMPT_CONSTANTS` is asserted against the constants the runtime actually
