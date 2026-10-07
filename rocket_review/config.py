@@ -48,7 +48,8 @@ FLAG_DEFAULTS: dict[str, Any] = {
 # project and local settings could widen what the reviewer may run. "user" keeps the
 # user's settings, which often carry how Claude Code reaches a model (env for a proxy or a
 # cloud provider, apiKeyHelper) and also their permissions.allow rules, plugins and hooks.
-# "none" loads no settings file, so none of those reach the reviewer either.
+# "none" loads no user, project or local settings file, so none of those reach the reviewer
+# either. Managed (policy) settings apply either way.
 CLAUDE_SETTING_SOURCES = ("user", "none")
 
 # What `codex exec -s` accepts. read-only is the built-in default: a review needs to read

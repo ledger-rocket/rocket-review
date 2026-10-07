@@ -28,7 +28,8 @@ READ_ONLY_TOOLS = "Read Glob Grep"
 # trusts, a `.claude/settings.json` or `.claude/settings.local.json` adds its
 # permissions.allow entries to --allowedTools, so the branch under review could choose what
 # its reviewer may run. "user" loads only the user's own settings, which often carry how
-# Claude Code reaches a model; "none" loads no settings file (an empty --setting-sources).
+# Claude Code reaches a model; "none" (an empty --setting-sources) loads no user, project or
+# local settings file. Managed (policy) settings apply either way.
 # --strict-mcp-config with no --mcp-config starts no MCP server, so a repository's
 # `.mcp.json` launches nothing either.
 SETTING_SOURCES_ARG = {"user": "user", "none": ""}

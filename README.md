@@ -290,9 +290,10 @@ cloud provider, or an `apiKeyHelper`. They also hold your `permissions.allow` ru
 plugins and hooks, and those apply to the reviewer too.
 
 `--claude-setting-sources none`, or `claude_setting_sources = "none"` in the user config,
-loads no settings file at all. The reviewer then gets only rr's allowlist. Use it when
-Claude Code reaches its model without settings, for example through a subscription login
-or environment variables that rr's process already has. A setup that depends on `env` or
+loads no user, project or local settings file. The reviewer then gets only rr's allowlist,
+plus any organisation managed (policy) settings, which Claude Code always applies. Use it
+when Claude Code reaches its model without settings, for example through a subscription
+login or environment variables that rr's process already has. A setup that depends on `env` or
 `apiKeyHelper` in the settings file stops working under `none`.
 
 Ignoring settings files has one more effect: Claude Code does not load the project's
