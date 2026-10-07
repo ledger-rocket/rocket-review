@@ -26,14 +26,15 @@ fail, values that must change together, comments that state the wrong behaviour.
 "Missing tests" findings at medium or above fall from 10 to 3. An earlier sweep of the
 arm without the DO NOT FLAG bullet (`730c71f4`, same protocol) gave the same picture.
 
-`adjudicate.py` was not run, so no verdict exists. Hand adjudication of the clean-control
-CRITICAL/HIGH findings: the control arm's two are on `c-005`, and this arm's one is on
-`c-006`. The `c-006` finding claims that a reviewed checkout's `.claude/settings.json`
-widens the claude sandbox. A probe refutes it: with a project settings file allowing
-`Bash(touch:*)`, `claude -p --permission-mode manual --allowedTools "Read Glob Grep"`
-(Claude Code 2.1.291) printed "Ignoring 1 permissions.allow entry from
-.claude/settings.json: this workspace has not been trusted" and refused the command. So it
-is a false positive. With `c-005`'s findings called false positives, the veto holds. With
-`c-005` invalidated, as M5 did, the aggregate condition fails by one finding in 15 runs,
-which is a VETOED outcome under the binding-veto rule in `evals/README.md`. The promotion
-in `rocket_review/prompts.py` is therefore pending that call and an `adjudicate.py` run.
+`adjudicate.py` was not run, so no verdict exists. The clean-control CRITICAL/HIGH
+findings are the control arm's two on `c-005` and this arm's one on `c-006`. The `c-006`
+finding claims that a reviewed checkout's `.claude/settings.json` widens the claude
+sandbox. A probe covers only part of it: in an untrusted workspace, Claude Code 2.1.291
+printed "Ignoring 1 permissions.allow entry from .claude/settings.json: this workspace has
+not been trusted" and refused the command. The probe does not cover a trusted workspace,
+such as a PR branch checked out in the user's own repository, so the call is open. The two
+calls decide the veto. If `c-006` is real, the case leaves both arms and the aggregate
+condition holds under either `c-005` call. If `c-006` is a false positive and `c-005` is
+invalidated, as M5 did, the aggregate fails by one finding in 15 runs; if `adjudicate.py`
+confirms that, the verdict is VETOED, and that verdict is binding. This branch must not
+merge until both calls are made and `adjudicate.py` has run.
