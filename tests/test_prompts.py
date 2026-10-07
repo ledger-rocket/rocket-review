@@ -88,6 +88,55 @@ def test_finding_format_has_a_line_slot_where_a_line_is_asked_for(mode):
     assert "Use `N/A` in place of `File:Line`" in prompt
 
 
+def diff_section(start, end):
+    body = get_prompt("diff")
+    return body[body.index(start):body.index(end)]
+
+
+def test_diff_severity_ranks_by_consequence_not_kind():
+    # `--fail-on medium` gates on this rubric, so MEDIUM has to mean "this can cause a
+    # defect" and not "this is a kind of finding". A missing test shares no rank with a
+    # swallowed error.
+    medium = diff_section("- MEDIUM:", "- LOW:")
+    low = diff_section("- LOW:", "Label each finding")
+    assert "Rank a finding by its consequence, not by its kind." in get_prompt("diff")
+    assert "a gate or check that misses a case" in medium
+    assert "an error handled in a way that hides a failure" in medium
+    assert "one contract enforced in two places that can diverge" in medium
+    assert "a test that cannot fail" in medium
+    assert "Missing tests for changed behaviour (coverage gates own coverage)" in low
+    assert "Missing tests" not in medium
+
+
+def test_diff_review_focus_asks_whether_the_tests_can_fail():
+    # COMPLETENESS leaves missing tests out, so a reviewer does not rank them as a gap in
+    # the change. The TESTS item asks whether the tests that exist can prove anything.
+    completeness = diff_section("2. COMPLETENESS", "3. CONTRACTS")
+    tests = diff_section("7. TESTS", "SEVERITY LEVELS")
+    assert "missing tests" not in completeness.lower()
+    assert "Which inputs does this change read that no test exercises?" in tests
+    assert "switch the guarantee off silently" in tests
+    assert "How could the suite pass while exercising nothing?" in tests
+
+
+def test_diff_leaves_what_the_repository_enforces_to_its_tools():
+    # A finding a configured linter or coverage gate already fails the build on is a
+    # duplicate. Duplicated logic that must change together is semantic, so it stays a
+    # model finding even though clone detectors exist.
+    do_not_flag = diff_section("DO NOT FLAG", "REVIEW FOCUS")
+    assert "Anything a linter or CI gate configured in this repository already enforces" in (
+        do_not_flag
+    )
+    for category in ("complexity", "function length", "nesting depth", "argument count",
+                     "unused or dead code", "test coverage", "vulnerable dependencies"):
+        assert category in do_not_flag
+    assert "`[tool.ruff]` in `pyproject.toml`" in do_not_flag
+    assert "Where the repository enforces none of these, you may flag them" in do_not_flag
+    assert "Logic duplicated in places that must change together is not a lint finding" in (
+        do_not_flag
+    )
+
+
 def test_unknown_mode_raises_key_error():
     with pytest.raises(KeyError):
         get_prompt("bogus")

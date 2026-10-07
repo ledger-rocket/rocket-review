@@ -147,23 +147,41 @@ DO NOT FLAG (these are caught by linters and formatters):
 - Naming conventions that are project-specific style choices
 - Missing type annotations on otherwise correct code
 - Documentation-only issues (missing docstrings, typos in comments)
+- Anything a linter or CI gate configured in this repository already enforces: \
+complexity, function length, nesting depth, argument count, unused or dead code, test \
+coverage, vulnerable dependencies. When unsure, check the repository's own config \
+(`.golangci.yml`, `[tool.ruff]` in `pyproject.toml`, `[lints]` in `Cargo.toml`, \
+`clippy.toml`, a coverage gate). Where the repository enforces none of these, you may \
+flag them, ranked by consequence. Logic duplicated in places that must change together \
+is not a lint finding; flag it.
 
 REVIEW FOCUS
 1. BUGS — Does this change introduce bugs, regressions, or undefined behaviour?
-2. COMPLETENESS — Are there missing changes? Forgotten files, missing tests, \
-incomplete error handling, missing migrations?
+2. COMPLETENESS — Are there missing changes? Forgotten files, incomplete error \
+handling, missing migrations?
 3. CONTRACTS — Does this break any API contracts, interfaces, or assumptions \
 that callers depend on?
 4. EDGE CASES — Does the change handle boundary conditions and failure modes?
 5. SECURITY — Does the change introduce vulnerabilities (injection, auth bypass, \
 secrets exposure)?
 6. PERFORMANCE — Does the change degrade performance or introduce resource leaks?
+7. TESTS — Which inputs does this change read that no test exercises? Which \
+configuration or flag could switch the guarantee off silently? How could the suite \
+pass while exercising nothing? Rank what you find by the severity levels below.
 
 SEVERITY LEVELS
+Rank a finding by its consequence, not by its kind.
 - CRITICAL: Security flaws, data loss, crashes introduced by this change
 - HIGH: Bugs or regressions introduced by this change
-- MEDIUM: Missing tests, incomplete error handling, maintainability concerns
-- LOW: Minor improvements (but not style — leave that to linters)
+- MEDIUM: A defect in this change with bounded consequence (a wrong result in an edge \
+case, a gate or check that misses a case, an error handled in a way that hides a \
+failure); a maintainability problem likely to cause a defect (logic duplicated in two \
+places that must change together, one contract enforced in two places that can \
+diverge, a name or comment that states the wrong behaviour); a test that cannot fail \
+or does not exercise the changed path it claims to cover
+- LOW: Missing tests for changed behaviour (coverage gates own coverage), other \
+maintainability and readability improvements, minor improvements (but not style — \
+leave that to linters)
 
 Label each finding with one of the severity levels above. An unlabelled finding is \
 malformed — do not emit one.

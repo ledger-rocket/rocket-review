@@ -204,6 +204,36 @@ def test_the_lang_python_arm_carries_its_block_in_the_diff_body_alone():
     )
 
 
+#: The treatment of the consequence-rubric experiment (PRO-8570), pinned for the same
+#: reason as the arms above.
+CONSEQUENCE_RUBRIC_HASH = (
+    "42d7f16f9c7d35da32c5e8f23a221e02bec38757a802c2a245b5023d21554f83"
+)
+
+#: `current/`'s hash at 3d169c3, the text `consequence-rubric/` was derived from. The live
+#: prompts had not moved since 285ec3b, so it equals the two base hashes above.
+CONSEQUENCE_RUBRIC_BASE_HASH = (
+    "14e3dcae19cb2a5da07bfe4ffda2d578082145acf757a7ff51eda5f3a52ca12e"
+)
+
+
+def test_the_consequence_rubric_arm_is_frozen():
+    assert load_arm("consequence-rubric").content_hash == CONSEQUENCE_RUBRIC_HASH
+
+
+def test_the_consequence_rubric_arm_edits_the_diff_body_alone():
+    # The arm rewrites lines rather than inserting a paragraph, so the purity check puts
+    # the base diff body back and hashes the result. The base diff body is lang-python's
+    # minus its one inserted block, which that arm's own test proves.
+    texts = dict(load_arm("consequence-rubric").texts)
+    texts["DIFF_REVIEW_PROMPT"] = without_paragraph(
+        load_arm("lang-python").texts["DIFF_REVIEW_PROMPT"], PYTHON_CHECKS_HEADING
+    )
+    assert arm_hash(texts) == CONSEQUENCE_RUBRIC_BASE_HASH, (
+        "consequence-rubric/ edits a file other than DIFF_REVIEW_PROMPT.txt"
+    )
+
+
 def test_every_shipped_arm_documents_its_provenance():
     for directory in sorted(p for p in PROMPTS_DIR.iterdir() if p.is_dir()):
         assert (directory / "README.md").is_file(), directory

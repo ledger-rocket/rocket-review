@@ -206,7 +206,7 @@ An arm is immutable input. The runner loads it, content-hashes it (sha256 over a
 length-prefixed concatenation in a fixed constant order), and writes that hash on **every**
 result row, so any row can be traced back to the exact prompt bytes that produced it.
 
-Four arms ship:
+Five arms ship:
 
 - **`current/`** — a byte-exact export of the constants at HEAD. `test_arms.py` asserts it
   still matches the live `prompts.py`, so editing the runtime prompts without re-exporting
@@ -228,6 +228,10 @@ Four arms ship:
   language-checks experiment, frozen and hash-pinned from the day it was written on the
   same reasoning `stance/` is. Python and `diff` mode are not a first slice of a larger
   feature; they are the only slice this corpus can score — see *The language-checks arm*.
+- **`consequence-rubric/`**: `current/` at commit `3d169c3` with `DIFF_REVIEW_PROMPT`
+  ranking findings by consequence and asking test-validity questions (PRO-8570). Frozen and
+  hash-pinned like `stance/` and `lang-python/`. It was measured against `current/` before
+  the same text became the live diff body, so `current/` carries that text too.
 
 Adding a prompt constant to `rocket_review/prompts.py` without adding it to every arm is
 also caught: `PROMPT_CONSTANTS` is asserted against the constants the runtime actually
