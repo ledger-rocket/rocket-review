@@ -638,7 +638,8 @@ python3 -m venv .venv
 .venv/bin/yamllint .                 # yaml lint
 ```
 
-CI gates all four plus a package build — run them before opening a PR.
+CI gates all four plus a package build, and runs the tests and the build on Python 3.13
+and 3.14. Run them before opening a PR.
 
 ## License
 
