@@ -47,9 +47,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The requires-python floor and the newest release the classifiers name. A
-        # bare `uv venv` takes the newest Python uv can download, which leaves the
-        # floor untested. UV_PYTHON is the interpreter request every uv command reads.
+        # Every Python the classifiers name, from the requires-python floor up
+        # (tests/test_python_versions.py keeps both matrices here and publish.yml's
+        # equal to them). A bare `uv venv` takes the newest Python uv can download,
+        # which leaves the floor untested. Every uv command reads UV_PYTHON.
         python: ["3.13", "3.14"]
     env:
       UV_PYTHON: ${{ matrix.python }}
