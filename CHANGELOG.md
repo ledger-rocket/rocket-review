@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- rr stops its backends on SIGTERM, as it does on Ctrl-C. The backends run in sessions of
+  their own, so before this a `kill`, `timeout` or process supervisor ended rr and left
+  codex, claude or opencode running, and billing, until their own timeout. The first
+  SIGINT or SIGTERM starts the teardown. A further one is recorded but cannot cut the
+  teardown short before its SIGKILL. rr then ends by the first signal. On SIGTERM it ends
+  at once (status 143) and does not wait on a worker the teardown cannot stop, such as an
+  in-flight `api` request. A lone Ctrl-C still waits for the workers, and a second signal
+  ends rr at once. An inherited ignored SIGINT or SIGTERM stays ignored.
+
 - Python 3.14 is a supported version. CI runs the test suite, the package build and an
   import smoke test on Python 3.13 and 3.14, the release workflow runs the suite on both
   before it publishes, and the package classifiers name 3.14. The floor stays at 3.13.

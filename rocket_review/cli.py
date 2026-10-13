@@ -3,10 +3,12 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -680,9 +682,90 @@ def run_one(
 #: Subcommands, dispatched on argv[0] before the review parser ever sees the arguments.
 SUBCOMMANDS = ("doctor", "init")
 
+#: Every stop signal (SIGINT or SIGTERM) the current main() call has received, in order.
+#: The first one raises KeyboardInterrupt and decides how rr ends. A later one is only
+#: recorded: raising again would abort the teardown during the backends' SIGTERM grace,
+#: before the SIGKILL that stops a backend which traps SIGTERM. The teardown polls the
+#: record instead. SIGKILL stays the hard stop.
+_stop_signals: list[int] = []
+
+
+def _stop_now() -> bool:
+    """Whether the stop signals so far ask rr to end without waiting on its workers.
+
+    SIGTERM asks a process to end now, and a second signal repeats a request to stop;
+    neither waits on a worker the teardown cannot stop (an in-flight `api` request, or a
+    backend descendant that left its process group). A lone Ctrl-C keeps waiting on the
+    workers, so a run that can still finish cleanly does.
+    """
+    return _stop_signals[:1] == [signal.SIGTERM] or len(_stop_signals) > 1
+
+
+def _wait_for_workers(futures: list[Future]) -> None:
+    """Wait for the fan-out's workers after its teardown, or end rr if a signal asks to.
+
+    A further signal only lands in _stop_signals, so this polls it while the workers
+    finish: the executor's join would wait on a stuck one unchecked.
+    """
+    # shutdown(cancel_futures=True) cancelled the work items no thread had picked up, and
+    # wait() never counts such a future as done: only a worker's dequeue notifies it.
+    running = [f for f in futures if not f.cancelled()]
+    while not _stop_now() and wait(running, timeout=0.1).not_done:
+        pass
+    if _stop_now():
+        # The workers whose backends were killed get the grace to reap them and clean up;
+        # a worker that is still blocked after it is abandoned.
+        wait(running, timeout=base._TERM_GRACE_SECONDS)
+        _end_by_signal(_stop_signals[0])
+
+
+def _end_by_signal(signum: int) -> None:
+    """End the process by `signum` itself, the way Python ends on an unhandled Ctrl-C.
+
+    Dying by the signal, not exit(128 + n), lets a parent's wait() see which signal stopped
+    rr; a shell reports it as 128 + n all the same. Buffered output is dropped, as a default
+    SIGTERM drops it: a flush could block on a stalled reader, and from here on the handler
+    only records further signals.
+    """
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+    # Reached only if the kill did not end the process: rr as a PID namespace's init, where
+    # the kernel drops a default-disposition signal sent from inside. SystemExit would join
+    # the workers this abandons.
+    os._exit(128 + signum)
+
 
 def main():
+    # Backends run in sessions of their own, so a signal sent to rr's process group never
+    # reaches them: only rr's own teardown, on KeyboardInterrupt, stops them. SIGTERM, what
+    # `kill` and process supervisors send, raises KeyboardInterrupt too, so it starts the
+    # same teardown as Ctrl-C.
+    restoring = False
+
+    def on_stop_signal(signum: int, frame: object) -> None:
+        # Handlers nest, so this takes no lock and reads the record before it writes it.
+        first = not _stop_signals
+        _stop_signals.append(signum)
+        if first and not restoring:
+            raise KeyboardInterrupt
+
+    # Only a default disposition is replaced. An inherited ignore is kept, as Python keeps
+    # it for SIGINT: a non-interactive shell starts a background job with SIGINT ignored,
+    # and nohup-style callers rely on an ignored signal staying ignored. Handlers can only
+    # be set from the main thread.
+    on_main_thread = threading.current_thread() is threading.main_thread()
+    previous = {
+        signum: signal.getsignal(signum)
+        for signum, default in (
+            (signal.SIGINT, signal.default_int_handler),
+            (signal.SIGTERM, signal.SIG_DFL),
+        )
+        if on_main_thread and signal.getsignal(signum) == default
+    }
+    _stop_signals.clear()
     try:
+        for signum in previous:
+            signal.signal(signum, on_stop_signal)
         # Dispatched by hand rather than through argparse subparsers, because the review
         # parser's positional is greedy (`files`, nargs="*"): adding subparsers would change
         # how `rr plan.md` and every other existing invocation parses. Everything that is not
@@ -707,6 +790,18 @@ def main():
         except OSError:
             pass
         sys.exit(0)
+    except KeyboardInterrupt:
+        # The fan-out has torn down its backends already. A further signal that arrived since
+        # was only recorded, so it is acted on here.
+        if _stop_now():
+            _end_by_signal(_stop_signals[0])
+        raise  # Python reports a Ctrl-C and ends by SIGINT, as it always has
+    finally:
+        # main() also runs in-process under the test suite; leave its handlers as they were.
+        # A signal that lands mid-restore is only recorded, so it cannot abort the restore.
+        restoring = True
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 def _run():
@@ -1088,10 +1183,10 @@ def _run():
 
     base.begin_fanout()
     with ThreadPoolExecutor(max_workers=len(specs)) as pool:
+        futures: list[Future] = []
         try:
-            futures = [
-                pool.submit(run_one, name, model, job, commit_content) for name, model in specs
-            ]
+            for name, model in specs:
+                futures.append(pool.submit(run_one, name, model, job, commit_content))
             outputs = [f.result() for f in futures]  # preserves --backend order
         except KeyboardInterrupt:
             # SIGINT lands on the main thread, not in the workers blocked on their
@@ -1114,6 +1209,7 @@ def _run():
             base.request_interrupt()
             pool.shutdown(wait=False, cancel_futures=True)
             base.terminate_active_commands()
+            _wait_for_workers(futures)
             raise
 
     results = []
