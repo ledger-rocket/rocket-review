@@ -2,15 +2,18 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
+import time
 import types
 from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import PackageNotFoundError
 
 import pytest
 
+from rocket_review import cli
 from rocket_review.backends import _openai_sdk_installed, available, base
 from rocket_review.backends.base import BackendError
 from rocket_review.cli import (
@@ -823,6 +826,271 @@ def test_interrupt_gate_is_cleared_for_each_fanout(monkeypatch):
     patch_backends(monkeypatch, {"codex": "review"})
     assert run_main(monkeypatch, ["--diff", "--backend", "codex"]) == 0
     assert not base.interrupted()
+
+
+# A backend that runs until killed. It records its pid, which is also its process group id
+# (run_command starts every backend in a session of its own).
+_STUCK_BACKEND = """#!/bin/sh
+if [ -n "$STUCK_BACKEND_IGNORES_TERM" ]; then trap '' TERM; fi
+echo $$ > "$STUCK_BACKEND_PIDFILE"
+exec sleep 300
+"""
+
+# A backend that ignores SIGTERM and leaves behind a descendant in a session of its own.
+# The descendant keeps the backend's stdout open, so no teardown of the backend's group can
+# unblock the worker waiting on that pipe: the run stays stuck, as on an `api` request.
+_ESCAPING_BACKEND = """
+import os, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pidfile = os.environ["STUCK_BACKEND_PIDFILE"]
+if os.fork() == 0:
+    os.setsid()
+    with open(pidfile + ".escaped", "w") as f:
+        f.write(str(os.getpid()))
+    time.sleep(300)
+    os._exit(0)
+while not os.path.exists(pidfile + ".escaped"):
+    time.sleep(0.01)
+with open(pidfile, "w") as f:
+    f.write(str(os.getpid()))
+time.sleep(300)
+"""
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.fixture
+def rr_with_stuck_backend(tmp_path):
+    """Start the real rr CLI in a child process, reviewing through a stuck `opencode`.
+
+    Returns a starter that takes the SIGINT disposition rr inherits and the kind of
+    backend, waits until the backend runs, and returns (rr, backend pid). Both dispositions
+    are set explicitly because pytest's own, which a CI shell may have set to ignored, would
+    otherwise leak into rr.
+    """
+    started = []
+
+    def start(sigint="signal.default_int_handler", backend_ignores_term=False, escaping=False):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "opencode"
+        if escaping:
+            (tmp_path / "escaping.py").write_text(_ESCAPING_BACKEND)
+            fake.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{tmp_path / "escaping.py"}"\n')
+        else:
+            fake.write_text(_STUCK_BACKEND)
+        fake.chmod(0o755)
+        pidfile = tmp_path / "backend.pid"
+        (tmp_path / "plan.md").write_text("a plan\n")
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "STUCK_BACKEND_PIDFILE": str(pidfile),
+        }
+        if backend_ignores_term:
+            env["STUCK_BACKEND_IGNORES_TERM"] = "1"
+        launcher = (
+            f"import signal, sys; signal.signal(signal.SIGINT, {sigint}); "
+            "signal.signal(signal.SIGTERM, signal.SIG_DFL); "
+            "from rocket_review.cli import main; "
+            "sys.argv = ['rr', 'plan.md', '--backend', 'opencode']; main()"
+        )
+        rr = subprocess.Popen(
+            [sys.executable, "-c", launcher],
+            cwd=tmp_path, env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+        started.append([rr, None])
+        deadline = time.monotonic() + 30
+        while not (pidfile.exists() and pidfile.read_text().strip()):
+            if rr.poll() is not None or time.monotonic() > deadline:
+                rr.kill()
+                pytest.fail(f"the backend never started: {rr.communicate()[1]!r}")
+            time.sleep(0.05)
+        backend = int(pidfile.read_text())
+        started[-1][1] = backend
+        return rr, backend
+
+    yield start
+    for rr, _ in started:
+        if rr.poll() is None:
+            rr.kill()
+        rr.communicate()
+    for recorded in tmp_path.glob("backend.pid*"):
+        try:
+            # Each recorded pid leads a process group; a leaked one must not outlive the test.
+            os.killpg(int(recorded.read_text()), signal.SIGKILL)
+        except (ProcessLookupError, ValueError):
+            pass
+
+
+def test_sigterm_tears_down_the_backend_and_ends_rr_by_sigterm(rr_with_stuck_backend):
+    rr, backend = rr_with_stuck_backend()
+    rr.send_signal(signal.SIGTERM)
+    assert rr.wait(timeout=30) == -signal.SIGTERM
+    assert not _alive(backend)
+
+
+def test_sigterm_during_ctrl_c_teardown_does_not_abort_it(rr_with_stuck_backend):
+    # A caller escalating INT to TERM: the TERM lands while the teardown waits out the
+    # SIGTERM grace of a backend that ignores SIGTERM. The teardown must still reach SIGKILL.
+    rr, backend = rr_with_stuck_backend(backend_ignores_term=True)
+    rr.send_signal(signal.SIGINT)
+    time.sleep(0.2)
+    rr.send_signal(signal.SIGTERM)
+    assert rr.wait(timeout=30) == -signal.SIGINT  # the first signal decides how rr ends
+    assert not _alive(backend)
+
+
+def test_inherited_ignored_sigint_stays_ignored_and_sigterm_still_tears_down(
+    rr_with_stuck_backend,
+):
+    # A non-interactive shell starts a background job with SIGINT ignored.
+    rr, backend = rr_with_stuck_backend(sigint="signal.SIG_IGN")
+    rr.send_signal(signal.SIGINT)
+    time.sleep(0.5)
+    assert rr.poll() is None and _alive(backend)
+    rr.send_signal(signal.SIGTERM)
+    assert rr.wait(timeout=30) == -signal.SIGTERM
+    assert not _alive(backend)
+
+
+# A stuck run ends after the teardown's SIGTERM grace and one more grace for its workers;
+# the rest is margin for a loaded runner.
+_STUCK_RUN_EXIT = 2 * base._TERM_GRACE_SECONDS + 6
+
+
+def test_a_second_ctrl_c_ends_a_stuck_run(rr_with_stuck_backend):
+    rr, _ = rr_with_stuck_backend(escaping=True)
+    rr.send_signal(signal.SIGINT)
+    time.sleep(base._TERM_GRACE_SECONDS + 1)  # the teardown has sent its SIGKILL
+    assert rr.poll() is None  # a lone Ctrl-C still waits on the escaped descendant's pipe
+    rr.send_signal(signal.SIGINT)
+    assert rr.wait(timeout=_STUCK_RUN_EXIT) == -signal.SIGINT
+
+
+def test_one_sigterm_ends_a_stuck_run_without_waiting_on_it(rr_with_stuck_backend):
+    # `timeout` and most supervisors send SIGTERM once; rr must not outlive it waiting on a
+    # worker the teardown cannot stop.
+    rr, _ = rr_with_stuck_backend(escaping=True)
+    rr.send_signal(signal.SIGTERM)
+    assert rr.wait(timeout=_STUCK_RUN_EXIT) == -signal.SIGTERM
+
+
+def test_sigterm_during_ctrl_c_teardown_still_ends_a_stuck_run(rr_with_stuck_backend):
+    # The TERM lands inside the teardown's grace, where it raises nothing; it still counts.
+    rr, _ = rr_with_stuck_backend(escaping=True)
+    rr.send_signal(signal.SIGINT)
+    time.sleep(0.2)
+    rr.send_signal(signal.SIGTERM)
+    assert rr.wait(timeout=_STUCK_RUN_EXIT) == -signal.SIGINT
+
+
+def test_the_teardown_does_not_wait_on_a_cancelled_work_item(monkeypatch):
+    # A Ctrl-C between a submit and its worker's dequeue leaves a work item that the
+    # teardown's shutdown(cancel_futures=True) cancels; no worker ever finishes it.
+    monkeypatch.setattr(cli, "_stop_signals", [])  # a lone Ctrl-C: the path that waits
+    pool = ThreadPoolExecutor(max_workers=1)
+    started, release = threading.Event(), threading.Event()
+
+    def first():
+        started.set()
+        release.wait()
+
+    running = pool.submit(first)
+    try:
+        assert started.wait(timeout=5)
+        queued = pool.submit(lambda: None)
+        pool.shutdown(wait=False, cancel_futures=True)
+        assert queued.cancelled()
+    finally:
+        release.set()  # a blocked pool worker would hang pytest's exit
+    waiter = threading.Thread(target=cli._wait_for_workers, args=([running, queued],), daemon=True)
+    waiter.start()
+    waiter.join(timeout=5)
+    assert not waiter.is_alive()
+
+
+def test_main_restores_the_signal_handlers_it_replaced(monkeypatch):
+    patch_backends(monkeypatch, {"codex": "review"})
+    seen = {}
+
+    def review(job):
+        seen.update(sigint=signal.getsignal(signal.SIGINT), sigterm=signal.getsignal(signal.SIGTERM))
+        return "review"
+
+    monkeypatch.setattr("rocket_review.cli.BACKENDS", {"codex": types.SimpleNamespace(review=review)})
+    outer_int = signal.signal(signal.SIGINT, signal.default_int_handler)
+    outer_term = signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    try:
+        assert run_main(monkeypatch, ["--diff", "--backend", "codex"]) == 0
+        # main() replaced both for the run, and put both back.
+        assert seen["sigint"] != signal.default_int_handler
+        assert seen["sigterm"] != signal.SIG_DFL
+        assert signal.getsignal(signal.SIGINT) == signal.default_int_handler
+        assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+        assert not cli._stop_signals
+    finally:
+        signal.signal(signal.SIGINT, outer_int)
+        signal.signal(signal.SIGTERM, outer_term)
+
+
+def test_a_sigterm_outside_the_fanout_ends_rr_by_sigterm(monkeypatch):
+    ended = []
+
+    def end_by_signal(signum):
+        ended.append(signum)
+        raise SystemExit(128 + signum)
+
+    def run():
+        # A TERM while rr reads stdin or runs git, before any backend exists.
+        assert signal.getsignal(signal.SIGTERM) != signal.SIG_DFL  # else it would end pytest
+        signal.raise_signal(signal.SIGTERM)
+
+    monkeypatch.setattr(cli, "_end_by_signal", end_by_signal)
+    monkeypatch.setattr(cli, "_run", run)
+    outer = signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    try:
+        # Twice: the second run must not inherit the first run's record of the signal.
+        for _ in range(2):
+            assert run_main(monkeypatch, []) == 128 + signal.SIGTERM
+            assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL  # restored on this path too
+    except KeyboardInterrupt:
+        pytest.fail("rr re-raised KeyboardInterrupt instead of ending by SIGTERM")
+    finally:
+        signal.signal(signal.SIGTERM, outer)
+    assert ended == [signal.SIGTERM, signal.SIGTERM]
+
+
+def test_main_off_the_main_thread_leaves_signals_alone(monkeypatch):
+    # Only the main thread may set a handler; an in-process caller on another thread still
+    # gets a review.
+    patch_backends(monkeypatch, {"codex": "review"})
+    result = {}
+    worker = threading.Thread(
+        target=lambda: result.update(code=run_main(monkeypatch, ["--diff", "--backend", "codex"]))
+    )
+    worker.start()
+    worker.join(timeout=10)
+    assert result == {"code": 0}
+
+
+def test_main_keeps_an_inherited_ignored_sigterm(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "_run", lambda: seen.append(signal.getsignal(signal.SIGTERM)))
+    outer = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    try:
+        assert run_main(monkeypatch, []) == 0
+        assert signal.getsignal(signal.SIGTERM) == signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGTERM, outer)
+    assert seen == [signal.SIG_IGN]
 
 
 def _json_envelope(monkeypatch, capsys, review_output, extra_args=()):
