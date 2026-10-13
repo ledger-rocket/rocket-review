@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Python 3.14 is a supported version. CI runs the test suite, the package build and an
+  import smoke test on Python 3.13 and 3.14, the release workflow runs the suite on both
+  before it publishes, and the package classifiers name 3.14. The floor stays at 3.13.
+
 ## 0.6.0
 
 - Diff reviews rank findings by consequence, not by kind. This changes every review of a

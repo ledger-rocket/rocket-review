@@ -638,7 +638,8 @@ python3 -m venv .venv
 .venv/bin/yamllint .                 # yaml lint
 ```
 
-CI gates all four plus a package build — run them before opening a PR.
+CI gates all four plus a package build, and runs the tests and the build on every Python
+version the package classifiers name. Run them before opening a PR.
 
 ## License
 

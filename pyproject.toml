@@ -22,6 +22,7 @@ classifiers = [
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Quality Assurance",
 ]
 # Base install stays light: the CLI backends (codex/claude/opencode) shell out to
