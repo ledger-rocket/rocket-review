@@ -708,6 +708,45 @@ def test_run_command_replaces_non_utf8_output():
     assert "review" in out and "done" in out  # no UnicodeDecodeError
 
 
+def _exit_1(stdout: str = "", stderr: str = "") -> list[str]:
+    import sys
+
+    return [
+        sys.executable, "-c",
+        "import sys; sys.stdout.write(sys.argv[1]); sys.stderr.write(sys.argv[2]); sys.exit(1)",
+        stdout, stderr,
+    ]
+
+
+def test_run_command_failure_reports_stderr_over_stdout():
+    with pytest.raises(BackendError) as e:
+        base.run_command(_exit_1("partial review", "auth failed"))
+    assert str(e.value).endswith("failed (exit 1): auth failed")
+    assert "partial review" not in str(e.value)
+
+
+def test_run_command_failure_reports_stdout_when_stderr_is_empty():
+    # claude -p prints a spend or rate limit on stdout and nothing on stderr (PRO-19250).
+    limit = "You've hit your monthly spend limit. Switch to another model to continue."
+    with pytest.raises(BackendError) as e:
+        base.run_command(_exit_1(limit + "\n"))
+    assert str(e.value).endswith(f"failed (exit 1): (stdout) {limit}")
+
+
+def test_run_command_failure_keeps_only_the_end_of_a_long_stdout():
+    long = "quoted code " * 200 + "the real error"
+    with pytest.raises(BackendError) as e:
+        base.run_command(_exit_1(long))
+    reason = str(e.value).split("(stdout) ", 1)[1]
+    assert reason.startswith("...") and reason.endswith("the real error")
+    assert len(reason) == len("...") + base.FAILURE_STDOUT_CHARS
+
+
+def test_run_command_failure_with_no_output_says_so():
+    with pytest.raises(BackendError, match=r"failed \(exit 1\): no output on stderr or stdout$"):
+        base.run_command(_exit_1())
+
+
 class _FakeProc:
     """Stands in for a Popen handle. `first` is raised by the initial communicate();
     later communicate() calls (the reap after a kill) return quietly."""

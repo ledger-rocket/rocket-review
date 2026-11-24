@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A backend that exits non-zero with an empty stderr now reports the end of its stdout
+  (at most 500 characters, marked `(stdout)`) as the reason. `claude -p` prints a spend
+  limit, a rate limit or an unsupported model on stdout only, so before this the error read
+  `claude failed (exit 1): ` with no reason. With neither stream, the reason says so.
+
 - rr stops its backends on SIGTERM, as it does on Ctrl-C. The backends run in sessions of
   their own, so before this a `kill`, `timeout` or process supervisor ended rr and left
   codex, claude or opencode running, and billing, until their own timeout. The first

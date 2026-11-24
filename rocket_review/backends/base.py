@@ -12,6 +12,9 @@ _TERM_GRACE_SECONDS = 2.0
 
 TIMEOUT = 900
 
+# How much of a failed backend's stdout its error keeps when stderr is empty (failure_reason).
+FAILURE_STDOUT_CHARS = 500
+
 # Backends run inside a ThreadPoolExecutor, so a Ctrl-C (SIGINT) is delivered to the main
 # thread — not the workers blocked in communicate(). The main thread calls
 # terminate_active_commands() to tear down the children the workers can't reach themselves.
@@ -223,9 +226,29 @@ def run_command(cmd: list[str], *, stdin: str | None = None, timeout: int = TIME
             _active_procs.discard(proc)
     if proc.returncode != 0:
         raise BackendError(
-            f"{cmd[0]} failed (exit {proc.returncode}): {err.strip()}"
+            f"{cmd[0]} failed (exit {proc.returncode}): {failure_reason(out, err)}"
         )
     return out
+
+
+def failure_reason(out: str, err: str) -> str:
+    """Why a backend CLI exited non-zero: its stderr, else the end of its stdout.
+
+    Some CLIs print a fatal error on stdout and nothing on stderr: `claude -p` reports a
+    spend limit, a rate limit or an unsupported model that way. Reporting stderr alone
+    turned each of those into an empty reason. The stdout of a failed run can hold part of
+    a review, which quotes the code under review, so only its last
+    FAILURE_STDOUT_CHARS characters are kept.
+    """
+    reason = err.strip()
+    if reason:
+        return reason
+    tail = out.strip()
+    if not tail:
+        return "no output on stderr or stdout"
+    if len(tail) > FAILURE_STDOUT_CHARS:
+        tail = "..." + tail[-FAILURE_STDOUT_CHARS:]
+    return f"(stdout) {tail}"
 
 
 def write_prompt_file(prompt: str) -> Path:
